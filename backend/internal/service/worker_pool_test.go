@@ -17,6 +17,7 @@ func TestWorkerPoolMultiInstanceIsolation(t *testing.T) {
 	pool := testutil.TestPool(t)
 	userID := seedUserForServiceTest(t, pool)
 	wp := NewWorkerPool(pool, 1, nil)
+	isolateWorkerIdentity(wp, "isolation")
 
 	t.Cleanup(func() {
 		wp.Shutdown(context.Background())

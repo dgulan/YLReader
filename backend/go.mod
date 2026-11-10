@@ -32,5 +32,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
+	go.uber.org/goleak v1.3.0 // indirect
 	golang.org/x/sys v0.19.0 // indirect
 )
