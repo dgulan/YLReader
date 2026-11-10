@@ -5,7 +5,7 @@ info:
   version: 1.0.0
   description: |
     ## 状态
-    - Frozen v1.3（Stage 2 契约冻结 + 章节级源覆盖 + 本地书库 + M3c 技术债务清偿）
+    - Draft v1.4（S5-1：书源 header AES-GCM 信封；S5-4 终审冻结）
 
     YReader（Clean-Room Reader）前后端契约。
 
@@ -1378,7 +1378,7 @@ components:
         header:
           type: object
           additionalProperties: true
-          description: HTTP 头；敏感值在 Stage 4 以加密信封存储
+          description: HTTP 头；服务端加密存储（v1.4 AES-GCM 信封），读写对客户端透明
         login_url: { type: string, nullable: true }
         login_check_js: { type: string, nullable: true }
         rules:

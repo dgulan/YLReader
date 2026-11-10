@@ -1,6 +1,6 @@
 # YReader 系统架构与书源沙箱设计
 
-> 状态：Frozen v1.3（Stage 2 契约冻结 + 章节级源覆盖 + 本地书库 + M3c 技术债务清偿）
+> 状态：Draft v1.4（S5-1：书源 header AES-GCM 信封加密；S5-4 终审冻结）
 > 对应交付物：本文件、[schema.sql](schema.sql)、[openapi.yaml](openapi.yaml)
 > 上游依据：[summary.md](research/summary.md) 与 6 份单仓研究报告
 > 范围：M1 书源解析核心（优先）、M2 阅读器与书架、M3 本地书库与外围同步的**契约边界**；不含实现代码。
@@ -796,7 +796,7 @@ RETURNING *;
 | 密钥 | 环境变量/Secret 注入；DB 中不存明文密码、refresh token（只存哈希） |
 | 反爬合规 | 遵守目标站 robots 与限流；`User-Agent` 可配置；不实现验证码破解 |
 
-**已知缺口（转入 Stage 5）**：书源 header 中的 Cookie/token 目前以 jsonb 明文存储，Stage 4 未闭环，正式转入 Stage 5 首项任务（作为 v1.4 契约与安全演进首要特性，对应 DEF-SEC-01）。
+**已闭环（v1.4）**：书源 header 中的 Cookie/token 由 Service 在写库前用 AES-256-GCM 信封加密（信封格式 `v1:<kid>:<base64(nonce||ct||tag)>`，AAD=`user_id|source_id`），Repository 读路径透明解密；dry_run 不加密不落库，历史明文由 `cmd/migrate-header` 分批迁移（幂等、可断点续跑）。对应 DEF-SEC-01 与 ADR-010。
 
 ---
 
@@ -940,6 +940,7 @@ RETURNING *;
 | ADR-007 | 检索列提升 + 规则 JSONB + GIN | 兼容 Legado 全量字段且可检索 | GIN 只服务包含/存在性；复杂查询需表达式索引 |
 | ADR-008 | OpenAPI 驱动生成 DTO | 前后端契约单一来源 | 生成代码需纳入 Lint |
 | ADR-009 | 章节级源覆盖用独立表 `chapter_source_overrides` 而非 `chapters` 增加列 | 避免污染 `chapters`、支持级联删除语义清晰 | 多一次 JOIN 查询 |
+| ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径 | 旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
 
 ---
 
@@ -950,7 +951,7 @@ RETURNING *;
 | R1 | Legado 规则边角语义（`$n` 非正则分组、`getStringList` 按 `\n` 切分、`Entities.unescape`）实现偏差 | 黄金测试集 + 与 `changshengyu_reader-dev` 行为对拍（只对拍输出，不复制代码） |
 | R2 | goja 与 Rhino 的 JS 差异（ES 版本、`importClass`） | 白名单桥接 + 明确 422；不支持的能力进 `unsupported_features` 报告 |
 | R3 | trigram 模糊匹配对「第1章」类同质标题失效 | 距离窗口 + 同分取最近；低置信度提示；允许手动选章 |
-| R4 | 书源 header 明文存储 | 转入 Stage 5 首项实现应用层 AES-GCM 加密信封（DEF-SEC-01） |
+| R4 | 书源 header 明文存储 | 已闭环（v1.4）：应用层 AES-256-GCM 信封 + 密钥轮换 + 分批迁移（DEF-SEC-01 / ADR-010） |
 | R5 | 单进程 Worker 与 API 争抢资源 | `WORKER_ENABLED` 拆分 + 独立并发上限 |
 | R6 | `rules` JSONB 被误用于检索 | §4.3 CI Lint + EXPLAIN 断言 |
 | R7 | 参考仓库许可证/来源风险 | 净室：只对拍行为，不复制代码；`warpdotsys` 反编译来源仅作黑盒 |

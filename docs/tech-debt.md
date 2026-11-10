@@ -24,7 +24,7 @@
 | DEF-CODE-06 | P3 并发 | POST /cache 单书防重存在理论竞态 | 已闭环 (Advisory Lock 显式事务) |
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
 | DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 归档 |
-| DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 转入 Stage 5 (v1.4) |
+| DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
 
 ---
@@ -221,7 +221,9 @@
 
 **问题**：当前书源 `header` 中的 Cookie/token 等敏感凭证以 JSONB 明文存储在数据库中，未做应用层加密防护。
 **处置决议**：Stage 4 已正式封板，该项安全缺口不回退代码返工，正式转入 Stage 5 首项任务（作为 v1.4 契约演进的首要特性实现）。
-**当前状态**：转入 Stage 5 (v1.4)。
+**当前状态**：已闭环 (v1.4)。
+**实现**：`pkg/crypto` AES-256-GCM 信封（nonce 12B 随机、AAD=`user_id|source_id`、多 kid 并存轮换、未知 kid/篡改/AAD 不匹配一律显式报错）；`SourceRepository` 写前密封、读后透明解密（历史明文兼容，密文损坏→500 不回退明文）；`SourceService.Create` 预生成 id（AAD 需要）；`cmd/migrate-header` 按 id 游标分批迁移（1000 行/批、幂等、可断点续跑、`-dry-run`）；导入 `dry_run=true` 不密封不落库。
+**测试**：`TestEnvelopeRoundTrip`/`TestEnvelopeTamperRejected`/`TestEnvelopeKidRotation`/`TestEnvelopeAADMismatchRejected`/`TestKeyringValidation`、`TestSourceHeaderEncryptedAtRest`/`TestSourceHeaderLegacyPlaintextReadable`/`TestSourceHeaderUnknownKIDFailsLoudly`/`TestMigrateSourceHeadersIdempotent`/`TestMigrateSourceHeadersDryRunAndResume`、`TestSourceHeaderTransparentViaAPI`/`TestSourceImportDryRunDoesNotSeal`。
 
 ---
 

@@ -1,6 +1,6 @@
 -- =============================================================================
 -- YReader (Clean-Room Reader) — PostgreSQL 权威 DDL
--- 状态：Frozen v1.3（Stage 4 M3c：技术债务清偿与 v1.3 契约终结）
+-- 状态：Draft v1.4（S5-1：书源 header AES-GCM 信封加密；S5-4 终审冻结）
 --
 -- 设计约束（与 docs/architecture.md 一一对应）：
 --   * PostgreSQL 16+；所有时间列使用 timestamptz（UTC 存储）。
@@ -226,6 +226,11 @@ COMMENT ON COLUMN book_sources.rules IS
  索引契约：ix_book_sources_rules_gin 仅覆盖 @>、?、?|、?&；禁止对 rules->>''x'' 做等值/LIKE 并期望索引生效。
  需要按规则内部字段检索时：建表达式索引或生成列，且必须附带 user_id 条件。';
 
+COMMENT ON COLUMN book_sources.header IS
+'HTTP 请求头。v1.4（ADR-010）起敏感值以应用层 AES-256-GCM 信封加密存储：
+ 密文形如 {"__enc":"v1:<kid>:<base64(nonce||ciphertext||tag)>"}，AAD = user_id|source_id，nonce 12B 随机。
+ 禁止对 header 做键存在性/路径提取查询（如 header ? ''Cookie'' / header->>''Cookie''）：密文不可索引，且会绕过解密路径；
+ 所有读取必须经 SourceRepository 透明解密，engine/fetcher 不得直接持有 *pgxpool.Pool 读该列。';
 COMMENT ON COLUMN book_sources.concurrent_rate IS
 'Legado concurrentRate 原值：纯数字=并发上限；"n/ms"=每 ms 毫秒窗口 n 次。';
 
