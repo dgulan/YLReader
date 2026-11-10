@@ -5,7 +5,7 @@ info:
   version: 1.0.0
   description: |
     ## 状态
-    - Frozen v1.4（Stage 5 终审封板：DEF-SEC-01 Header 信封加密 / DEF-OAS-08 多源预热）
+    - Draft v1.5（Stage 6 S6-1：债务清偿进行中；S6-4 终审后冻结）
 
     YReader（Clean-Room Reader）前后端契约。
 

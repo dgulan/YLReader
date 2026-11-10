@@ -19,7 +19,7 @@
 | DEF-OAS-07 | P2 契约 | ErrUnprocessable 返回 validation_error 的契约外行为 | 已闭环 (v1.3) |
 | DEF-OAS-08 | P2 契约 | CacheBookRequest.source_id 暂不支持多源缓存预热 | 已闭环 (v1.4) |
 | DEF-CODE-03 | P2 实现 | maxNameAuthorAttempts 上限对 10+ 并发不足 | 已闭环 (上限由 5 提升至 20) |
-| DEF-CODE-04 | P2 测试 | handleCommitError 状态 ③ 无法单测 | 归档（M3c 未处理，待后续架构重构时处理） |
+| DEF-CODE-04 | P2 测试 | handleCommitError 状态 ③ 无法单测 | 已闭环 (v1.5, S6-1) |
 | DEF-CODE-05 | P3 测试 | 预检查命中 + 3 并发重试边界与命名验证 | 已闭环 |
 | DEF-CODE-06 | P3 并发 | POST /cache 单书防重存在理论竞态 | 已闭环 (Advisory Lock 显式事务) |
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
@@ -27,8 +27,8 @@
 | DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
 | DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入，正文缓存全量落在缓存抽象层 | 归档（v1.5 架构评估是否保留物理表） |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
-| DEF-CODE-10 | P2 构建 | 本机无 C 工具链，go test -race 不可用（自 M1c 起） | 归档（CI/Docker 环境执行 race 检测） |
-| DEF-CODE-11 | P2 查询优化 | relocate_fuzzy 未使用 % 前置索引谓词，pg_trgm GIN 无法加速函数调用 | 归档（v1.5 契约修订） |
+| DEF-CODE-10 | P2 构建 | 本机无 C 工具链，go test -race 不可用（自 M1c 起） | 已提供 CI 配置 (v1.5, S6-1)，待首次流水线日志 |
+| DEF-CODE-11 | P2 查询优化 | relocate_fuzzy 未使用 % 前置索引谓词，pg_trgm GIN 无法加速函数调用 | 已闭环 (v1.5, S6-1) |
 
 ---
 
@@ -164,6 +164,8 @@
 
 **当前接受度**：状态 ③ 分支逻辑简单（保守不删），代码 review 已确认，无测试可接受。**M3c 未处理，归档**；`TestHandleCommitError_ProbeFails` 保持 `t.Skip` 并注明本条编号。
 
+**v1.5（S6-1）处置**：`ImportService.pool` 已抽象为窄接口 `importPool`（`repository.Querier` + `Begin(ctx) (pgx.Tx, error)`），`*pgxpool.Pool` 天然满足；`import_commit_test.go` 新增 `errRow` / `failingProbePool`（`Query`/`QueryRow`/`Exec`/`Begin` 全部返回注入错误），`TestHandleCommitError_ProbeFails` 去掉 `t.Skip` 实跑，断言 `DeletePrefix` 调用 0 次且日志含 `commit error, probe failed, files retained for gc` 与 `probe_err`。本条闭环。
+
 ---
 
 ### DEF-CODE-05（P3 测试）：预检查命中 + 3 并发重试边界与命名验证
@@ -277,7 +279,7 @@
 **问题**：`go test -race` 需要 cgo 与 C 编译器；本机探测 gcc/clang/zig/cc 均缺失，执行即报 `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`（自 M1c 起持续存在）。
 **替代证据**：涉及并发的批次以「非 race 模式连续两次全量 PASS + 静态锁审查（禁止 SELECT-then-UPDATE、sync.Mutex 仅保护 Start/Shutdown 状态）」替代。
 **后续处置**：CI 流水线在 Linux 镜像内设置 `CGO_ENABLED=1` 执行 `go test -race`，作为合并门禁；本地不阻塞。
-**当前状态**：归档（CI/Docker 环境执行 race 检测）。
+**当前状态**：v1.5（S6-1）已提供 CI 配置 `.github/workflows/race.yml`（`CGO_ENABLED=1` + `go test -race -tags integration ./...`，含 PG16/Redis 服务容器与 schema 预置）。本机仍无 C 工具链，本地继续以「非 race 双次 PASS + 静态锁审查」替代；CI 首次流水线日志尚未产生，本条待日志归档后闭死。
 
 ---
 
@@ -286,6 +288,8 @@
 **问题**：`docs/schema.sql` §9 `relocate_fuzzy` 函数当前仅写 `similarity(normalized_title, p_normalized_title) >= p_threshold`，未附带 `%` 运算符；`pg_trgm` GIN 索引无法加速函数调用，10k+ 章节的大目录换源 Level 2 存在全表扫描退化风险。
 **建议 v1.5**：函数体内改为 `WHERE ... AND normalized_title % p_normalized_title AND similarity(...) >= p_threshold`，前置 `%` 谓词让 GIN 生效。
 **修复归属**：需修改 `docs/schema.sql` `relocate_fuzzy` 函数定义，属 v1.5 契约变更流程（三份文件 + ADR），不在 S5-4 范围。
+
+**v1.5（S6-1）处置**：`relocate_fuzzy` 已加入 `AND c.normalized_title % p_normalized_title` 前置谓词（在 `similarity >= p_threshold` 之前），并附 v1.5 注释说明语义等价；新增 `TestRelocateFuzzyExplain` 以生产阈值 0.6 断言：宽窗口（`chapter_index BETWEEN 0 AND 9999`）命中 `ix_chapters_title_trgm`，默认 ±100 窗口无 `Seq Scan`，且 `relocate_fuzzy(...)` 返回目标行 8888。计划差异与取舍记录于 ADR-014。本条闭环。
 **当前状态**：归档（v1.5 契约修订）
 **S5-4 证据边界**：`TestChaptersTitleTrigramExplain` 使用 `SET LOCAL pg_trgm.similarity_threshold = 0.85` 收敛到 10 条目标行，确定性证明 `ix_chapters_title_trgm` 可服务 `%` 谓词；该结果**不等于**生产 `relocate_fuzzy` 在 0.6 阈值下的查询计划——0.6 阈值下候选集更大，GIN cost 上升，规划器仍可能选 `(book_id, source_id)` btree 位图；且生产函数当前未加 `%` 前置谓词，GIN 无法被调用。v1.5 修复后需以生产实际阈值 0.6 重新 EXPLAIN 断言，方可宣告 GIN 生效。
 ---
@@ -322,3 +326,20 @@
 - 本批未触发 DEF-CODE-12：api 包 goleak `TestMain` 一次通过，仅白名单 `pgxpool.(*Pool).triggerHealthCheck`（纯字符串，无 Markdown 链接）。
 - S5-4 的 trigram EXPLAIN 为索引可选用性验证，非生产 0.6 阈值下查询计划验证。
 - 两 EXPLAIN 用例在 `enable_seqscan=off` 下断言索引可服务性；生产默认配置下规划器是否主动选索引，以 v1.5 压测实测为准。
+
+---
+
+## Stage 6 进展（v1.5，进行中）
+
+> S6-1 进行中；S6-4 终审后才写「Stage 6 封板记录」。
+
+| 编号 | 本批处置 | 状态 |
+|---|---|---|
+| DEF-CODE-04 | `ImportService.pool` 抽象为 `importPool` 窄接口 + `failingProbePool`；`TestHandleCommitError_ProbeFails` 去 Skip 实跑 | 已闭环 |
+| DEF-CODE-10 | 新增 `.github/workflows/race.yml`（PG16 + Redis 服务容器、schema 预置、`CGO_ENABLED=1 go test -race -tags integration ./...`） | 已提供 CI 配置，待首次流水线日志 |
+| DEF-CODE-11 | `relocate_fuzzy` 加 `%` 前置谓词；`TestRelocateFuzzyExplain` 以 0.6 阈值断言 GIN（宽窗口）与无 Seq Scan（窄窗口） | 已闭环 |
+| DEF-CODE-09 | 交付 ADR-013 草案（方案 A 删表 / 方案 B 保留并接对象存储层缓存），本批不改 DDL | 待项目方裁定 |
+
+- 契约版本：三份顶部均为 `Draft v1.5`（S6-1 起），S6-4 终审通过后改 `Frozen v1.5`。
+- `info.version` 仍保持 `1.0.0`（是否跳跃待项目方在 S6-4 裁定）。
+- 门禁基线：Stage 5 封板 160 PASS + 2 SKIP；S6-1 因 DEF-CODE-04 去 Skip，SKIP 由 2 降至 1，另新增 `TestRelocateFuzzyExplain` 1 项。

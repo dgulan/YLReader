@@ -1,6 +1,6 @@
 -- =============================================================================
 -- YReader (Clean-Room Reader) — PostgreSQL 权威 DDL
--- 状态：Frozen v1.4（Stage 5 终审封板）
+-- 状态：Draft v1.5（Stage 6 S6-1：债务清偿进行中，S6-4 终审后冻结）
 --
 -- 设计约束（与 docs/architecture.md 一一对应）：
 --   * PostgreSQL 16+；所有时间列使用 timestamptz（UTC 存储）。

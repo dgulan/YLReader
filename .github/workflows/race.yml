@@ -1,0 +1,57 @@
+name: race
+
+# DEF-CODE-10：本机无 C 工具链，-race 只能在 CI 的 Linux 环境执行。
+# 本流水线同时提供 PG16 与 Redis，使 `-tags integration` 用例可完整跑通。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  race:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: yreader_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CGO_ENABLED: "1"
+      TEST_DATABASE_URL: "host=127.0.0.1 port=5432 user=postgres password=postgres dbname=yreader_test sslmode=disable"
+      REDIS_ADDR: "127.0.0.1:6379"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: backend/go.sum
+
+      - name: Apply schema
+        run: psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f docs/schema.sql
+
+      - name: Vet (integration tag)
+        working-directory: backend
+        run: go vet -tags integration ./...
+
+      - name: Test with -race
+        working-directory: backend
+        run: go test -race -tags integration ./... -count=1

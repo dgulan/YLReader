@@ -1,6 +1,6 @@
 # YReader 系统架构与书源沙箱设计
 
-> 状态：Frozen v1.4（Stage 5 终审封板：S5-1 信封加密 / S5-2 多源预热 / S5-3 常驻巡检 / S5-4 压测与观测）
+> 状态：Draft v1.5（Stage 6 S6-1：DEF-CODE-04/10/11 清偿与 DEF-CODE-09 草案；S6-4 终审后冻结）
 > 对应交付物：本文件、[schema.sql](schema.sql)、[openapi.yaml](openapi.yaml)
 > 上游依据：[summary.md](research/summary.md) 与 6 份单仓研究报告
 > 范围：M1 书源解析核心（优先）、M2 阅读器与书架、M3 本地书库与外围同步的**契约边界**；不含实现代码。
@@ -961,6 +961,28 @@ RETURNING *;
 | ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径；旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
 | ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
 | ADR-012 | WorkerPool 常驻巡检：启动同步初检 + 每 10min Ticker；全部 worker/巡检统一派生 ctx；Shutdown 取消派生 ctx 后双通道 `wg.Wait()` | 跨节点宕机残留任务脱离仅靠重启自愈的局限；消灭停机等待死锁风险；`reaperInterval` 可注入便于测试 | 每节点多一个常驻 goroutine；巡检占用连接，受 `MaxConns` 预算约束 |
+| ADR-013（草案，待项目方裁定） | `chapter_cache` 物理表最终处置：**方案 A 删除该表**（缓存统一由 Redis / 对象存储承载）或 **方案 B 保留该表并重新接入对象存储层缓存** | 现状已分叉：表与索引、§6.3 失效矩阵都已定义，但服务层缓存实际写入 Redis key `yreader:cache:content:*`，该表从未写入 | 方案 A：v1.5 DDL 删除表并清理 §6.3 矩阵、补迁移脚本；方案 B：需扩展 `storage.Provider`，并承担「Redis + 对象存储」双重缓存的一致性与清理成本 |
+| ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退） |
+
+### 12.1 ADR-013 草案全文（DEF-CODE-09，S6-1 交付，待裁定）
+
+**背景**：`docs/schema.sql` 定义了 `chapter_cache` 表（`book_id`/`source_id`/`chapter_index`/`content`/`cached_at`）及索引、`§6.3` 缓存失效矩阵也按该表描述；但 M2c 起的实现把正文缓存写入 Redis（key `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`），`chapter_cache` 自建库以来无任何写入路径。契约与实现长期分叉（DEF-CODE-09）。
+
+**方案 A：删除 `chapter_cache` 物理表**
+- 变更：v1.5 `schema.sql` 中 `DROP TABLE IF EXISTS chapter_cache;`（幂等脚本内以 `DO` 块形式落地），同步删除 §6.3 中该表相关失效行，改述为「Redis key 前缀 + TTL」。
+- 优点：契约与实现立即一致；无双重缓存一致性问题；减少一张具永久增长风险的宽表。
+- 代价：需要一次 DDL 变更与迁移脚本；历史 `chapter_cache` 行（本环境为空）不可回读；缓存容量规划完全落到 Redis/内存。
+- 兼容性：对外 API 无变化（正文响应字段不变）。
+
+**方案 B：保留表并重新接入对象存储层缓存**
+- 变更：扩展 `storage.Provider` 增加「按 book/source/chapter 的缓存读写 + 前缀清理」能力；`ContentService` 写正文时同时落 `chapter_cache`（或改由 `storage` 直写、表只存元数据）。
+- 优点：缓存可持久化到本地盘/S3，重启与跨实例可复用；便于按书清理。
+- 代价：与 Redis 缓存并存 → 需定义两级优先级、失效顺序与容量上限；`storage.Provider` 接口与 LocalFS/S3 实现都要扩展；`§6.3` 矩阵需重写为两级。
+- 兼容性：对外 API 无变化。
+
+**待裁定项**：选 A 或 B；若选 A，是否允许在 v1.5 中直接 `DROP TABLE`（含存量环境清空确认）；若选 B，两级缓存的优先级与清理责任方（Service 统一清理 vs 各缓存自清）。
+
+**本批不落 DDL**：S6-1 仅交付本草案，`docs/schema.sql` 中 `chapter_cache` 定义保持不变。
 
 ---
 
