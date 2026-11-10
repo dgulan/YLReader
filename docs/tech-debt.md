@@ -287,7 +287,7 @@
 **建议 v1.5**：函数体内改为 `WHERE ... AND normalized_title % p_normalized_title AND similarity(...) >= p_threshold`，前置 `%` 谓词让 GIN 生效。
 **修复归属**：需修改 `docs/schema.sql` `relocate_fuzzy` 函数定义，属 v1.5 契约变更流程（三份文件 + ADR），不在 S5-4 范围。
 **当前状态**：归档（v1.5 契约修订）
-
+**S5-4 证据边界**：`TestChaptersTitleTrigramExplain` 使用 `SET LOCAL pg_trgm.similarity_threshold = 0.85` 收敛到 10 条目标行，确定性证明 `ix_chapters_title_trgm` 可服务 `%` 谓词；该结果**不等于**生产 `relocate_fuzzy` 在 0.6 阈值下的查询计划——0.6 阈值下候选集更大，GIN cost 上升，规划器仍可能选 `(book_id, source_id)` btree 位图；且生产函数当前未加 `%` 前置谓词，GIN 无法被调用。v1.5 修复后需以生产实际阈值 0.6 重新 EXPLAIN 断言，方可宣告 GIN 生效。
 ---
 
 ## Stage 4 封板记录（M3c 结项）
@@ -320,3 +320,5 @@
 - S5-4 观测与压测收口：`backend/internal/api/metrics.go` 注册 `yreader_jobs_total` / `yreader_sandbox_executions_total` / `yreader_ssrf_blocked_total` 并预置零值 series；`/metrics` 免 JWT（反代限内网），`/debug/pprof/*` 由 `PPROF_ENABLED=true` 开启；10k 种子 EXPLAIN 断言 `ix_book_sources_rules_gin`（`rules @>`）与 `ix_chapters_title_trgm`（`%` 前置谓词）均可被选用且不出现 `Seq Scan`。
 - 遗留至 v1.5 的归档项：DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-09（`chapter_cache` 物理表未写入）、DEF-CODE-10（本机无 C 工具链，`-race` 改由 CI/Docker 执行）、DEF-CODE-11（`relocate_fuzzy` 未使用 `%` 前置索引谓词）。
 - 本批未触发 DEF-CODE-12：api 包 goleak `TestMain` 一次通过，仅白名单 `pgxpool.(*Pool).triggerHealthCheck`（纯字符串，无 Markdown 链接）。
+- S5-4 的 trigram EXPLAIN 为索引可选用性验证，非生产 0.6 阈值下查询计划验证。
+- 两 EXPLAIN 用例在 `enable_seqscan=off` 下断言索引可服务性；生产默认配置下规划器是否主动选索引，以 v1.5 压测实测为准。
