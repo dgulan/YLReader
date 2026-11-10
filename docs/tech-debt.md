@@ -229,7 +229,9 @@
 - 底层密码学组件包 pkg/crypto 贡献 5 PASS（含 TestKeyringValidation 构造校验 1 条）；
 - 四层合计 95 PASS + 2 SKIP；全工程 140 PASS + 2 SKIP；
 - pkg/crypto 从 S5-2 起正式计入交付基线；S5-1 交付口径不含 pkg/crypto。
-- 终审补交（m05845 闭环）：新增 `TestSourceImportNonDryRunSeals`（+1）→ 全工程 141 PASS + 2 SKIP；业务层 91 PASS + 2 SKIP；四层合计 96 PASS + 2 SKIP。另 P1 加固：`sealSourceHeaderValue` 删除「已是信封即跳过」捷径（伪造 `{"__enc":"x"}` 不再原样落库）、`openSourceHeader` 对非 string `__enc` 显式 `ErrMalformed`、`ImportExportRepository.updateSource` 显式密封。
+- 终审补交（提交 `22b56b1` 代码+测试 / `fbc9d55` 文档口径）：新增 `TestSourceImportNonDryRunSeals`（+1）→ 全工程 141 PASS + 2 SKIP；业务层 91 PASS + 2 SKIP；四层合计 96 PASS + 2 SKIP。另 P1 加固：`sealSourceHeaderValue` 删除「已是信封即跳过」捷径（伪造 `{"__enc":"x"}` 不再原样落库）、`openSourceHeader` 对非 string `__enc` 显式 `ErrMalformed`、`ImportExportRepository.updateSource` 显式密封。
+- Export 读路径闭环（本轮，提交号见 `git log -1 --format="%h %s"` 实际输出）：`ImportExportRepository.Export` 的 SELECT 追加 `id, user_id`、Scan 后显式 `openSourceHeader`，`GET /sources/export` 不再吐出 `__enc` 密文；新增 `TestSourceExportTransparent`（body 无 `__enc` + 解析后 `header.Cookie` 明文，+1 → 全工程 142 PASS + 2 SKIP，业务层 92，四层 97）。同收 P2：`openSourceHeader` 对非 object header（如 `[1,2,3]`）显式 `ErrMalformed`，新增 `TestSourceHeaderNonObjectRejected`（不计入下限，实测为准）。
+- 转入 S5-2 首周（本轮显式登记，不视为遗漏）：`TestSourceImportOverwriteSeals`（`updateSource` 已有加密代码但缺独立断言）、`Import` 中 `err == pgx.ErrNoRows` 改为 `errors.Is(err, pgx.ErrNoRows)`。
 
 ---
 
