@@ -23,7 +23,7 @@
 | DEF-CODE-05 | P3 测试 | 预检查命中 + 3 并发重试边界与命名验证 | 已闭环 |
 | DEF-CODE-06 | P3 并发 | POST /cache 单书防重存在理论竞态 | 已闭环 (Advisory Lock 显式事务) |
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
-| DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 归档 |
+| DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 已闭环 (v1.4) |
 | DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
 | DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入，正文缓存全量落在缓存抽象层 | 归档（v1.5 架构评估是否保留物理表） |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
@@ -214,7 +214,14 @@
 
 **问题**：M3c 演进后，`MarkStaleRunningAsFailed` 仅在 `WorkerPool.Start` 时触发一次。若远程节点发生宕机，且当前健康节点长期常驻运行（未重启），该远程残留的 running 任务必须等待当前节点重启时才能回收。
 **建议后续演进**：引入后台巡检 Goroutine 或在 Worker 主循环中周期性调度跨机超时回收。
-**当前状态**：归档（单节点部署无影响；多节点常驻集群需后续版本演进巡检组件）。
+**当前状态**：已闭环 (v1.4)。
+
+**v1.4（S5-3）处置**：`WorkerPool.reaperLoop` 启动同步初检 + 每 10min Ticker
+周期执行 `MarkStaleRunningAsFailed`，脱离仅依赖节点重启的局限；全部 worker
+协程统一迁移至派生 ctx，`Shutdown` 双通道等待无死锁，`goleak` 覆盖无泄漏。
+**白名单理由登记**：`goleak` 若需 `IgnoreTopFunction`，白名单为 pgxpool 后台健康检查协程
+（`(*Pool).triggerHealthCheck`，以 `go test -tags integration ./internal/service/ -v` 实测堆栈函数名为准），
+该协程在测试周期内随连接池常驻，非本次 WorkerPool 协程泄漏。
 
 ---
 
@@ -268,7 +275,7 @@
 - 封板日期：2026-11-10；契约版本：`Frozen v1.3`（openapi / schema / architecture 三份一致），operationId 43 个全唯一。
 - 回归基线：85 项 = 83 PASS + 2 SKIP（`TestContentCacheRedisKeyAndTTL` 需 `REDIS_ADDR`；`TestHandleCommitError_ProbeFails` 见 DEF-CODE-04）。
 - 终审收口：P3-1（failJob 独立上下文）已于 M3c 修复闭环——`failJob` 移除 `ctx.Err()` 短路并统一 `context.Background()`，Shutdown 窗口内 `ListByBookSourceRange` 失败也能可靠落终态。
-- 转入后续版本统一管理的归档项：P3-2（优雅停机瞬态中间进度更新可能丢失，不影响终态语义）、DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-08（跨节点常驻巡检）、DEF-OAS-08（多源缓存预热）。DEF-SEC-01 归档流转至 Stage 5（v1.4，书源 header AES-GCM 信封加密）。
+- 转入后续版本统一管理的归档项：P3-2（优雅停机瞬态中间进度更新可能丢失，不影响终态语义）、DEF-CODE-04（状态 ③ 无法单测）、DEF-OAS-08（多源缓存预热）。DEF-SEC-01 归档流转至 Stage 5（v1.4，书源 header AES-GCM 信封加密）；DEF-CODE-08（跨节点常驻巡检）已由 S5-3（v1.4）闭环：WorkerPool 启动同步初检 + 每 10min Ticker 巡检 + 统一派生 ctx 双通道 Shutdown。
 - 流程教训（Stage 4）：封板期两次出现「草稿推演被标注为原始输出」（56 条测试清单、144a74f stat 22/10）。Stage 5 凭证规范：标注「原始输出」的段落必须可复现；禁止用整理版/统计版冒充原始版；凡与上轮输出矛盾，当轮撤回并声明，不得两版并存。
 - 43 operationId 清单核验：依据 Frozen v1.3 `docs/openapi.yaml`（基线 `89f9b18`，`144a74f` 未改动该文件），按 path 前缀分组逐行统计：auth 4 / sources 8 / search 1 / books 6 / chapters 1 / chapter-override 2 / content 1 / progress 2 / switch-source 1 / mappings 3 / bookmarks 3 / replace-rules 4 / jobs 3 / settings 2 / health 2 = 43，重复 0。
 - 前序收官令措辞收窄归档：§三「85 项集成回归零衰退闭环」→「83 PASS + 2 SKIP（合计 85 项，0 FAIL）」；§二 第 1 项「224 行注释成功移除干扰字样」→「224 行注释措辞规整，非逻辑修复，diff 仅 +1/-1」。

@@ -774,6 +774,15 @@ RETURNING *;
    - **跨节点故障兜底**：跨机存活任务受保护，超过 2 小时租约上限的任务（60 分钟单任务超时 + 60 分钟缓冲）由节点启动扫描标记为 `failed`（依赖节点重启触发清理）；
    - **历史数据兼容**：`worker_id IS NULL` 的存量遗留任务在启动时立即回收。
 
+4. **常驻巡检（S5-3，DEF-CODE-08）**：
+   `WorkerPool.Start` 内派生 `ctx, cancel := context.WithCancel(parent)`，
+   启动时**同步执行一次** `scanStaleOnce`（保持 DEF-CODE-07 即时自愈语义），
+   随后每 `reaperInterval`（默认 10min）由 `reaperLoop` 的 `time.Ticker` 触发；
+   **全部任务 worker 协程与巡检协程统一使用派生 `ctx` 启动并纳入 `p.wg`**；
+   `Shutdown` 调 `cancel()` 后用 `select { case <-done: case <-ctx.Done(): }`
+   双通道兜住 `wg.Wait()`，彻底防死锁与协程泄漏。终态写入仍用
+   `context.Background()`（与 Stage 4 一致）。
+
 ### 6.3 缓存失效矩阵
 
 | 变更 | 失效动作 |
@@ -948,6 +957,7 @@ RETURNING *;
 | ADR-009 | 章节级源覆盖用独立表 `chapter_source_overrides` 而非 `chapters` 增加列 | 避免污染 `chapters`、支持级联删除语义清晰 | 多一次 JOIN 查询 |
 | ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径 | 旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
 | ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
+| ADR-012 | WorkerPool 常驻巡检：启动同步初检 + 每 10min Ticker；全部 worker/巡检统一派生 ctx；Shutdown 取消派生 ctx 后双通道 `wg.Wait()` | 跨节点宕机残留任务脱离仅靠重启自愈的局限；消灭停机等待死锁风险；`reaperInterval` 可注入便于测试 | 每节点多一个常驻 goroutine；巡检占用连接，受 `MaxConns` 预算约束 |
 
 ---
 
