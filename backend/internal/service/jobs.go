@@ -277,6 +277,14 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		s.mu.Unlock()
 	}()
 
+	// 源信息用 jobCtx 查询：跟随 60min 预算，Shutdown 取消时才能如实归因为取消，
+	// 而不是误报 "source missing"（P1-1）。
+	src, err := s.sources.Get(jobCtx, s.pool, userID, sourceID)
+	if err != nil {
+		s.failJob(jobCtx, jobID, "internal_error", "source missing")
+		return err
+	}
+
 	chapters, err := s.chapters.ListByBookSourceRange(jobCtx, s.pool, userID, bookID, sourceID, p.FromChapter, p.ToChapter)
 	if err != nil {
 		s.failJob(jobCtx, jobID, "internal_error", err.Error())
@@ -316,7 +324,7 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		if ch.ChapterIndex != nil {
 			idx = int(*ch.ChapterIndex)
 		}
-		if _, cerr := s.content.GetForSource(jobCtx, userID, bookID, sourceID, idx, ch.URL); cerr != nil {
+		if cerr := s.content.WarmChapterForSource(jobCtx, userID, bookID, src, ch); cerr != nil {
 			if jobCtx.Err() != nil {
 				if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 					_ = s.jobs.MarkFailed(context.Background(), s.pool, jobID, "source_timeout",

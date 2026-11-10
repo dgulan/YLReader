@@ -156,41 +156,32 @@ func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, chap
 	return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, content, wordCount, appliedIDs, traceID, isOverridden, false)
 }
 
-// GetForSource 从指定源读取章节正文，供多源缓存预热（S5-2）使用。
-// 与 Get 的差异：不读 books.active_source_id、不做单章覆盖路由，
-// 只使用传入的 sourceID 与 chapterURL——严禁回退到活跃源。
-func (s *ContentService) GetForSource(ctx context.Context, userID, bookID, sourceID uuid.UUID, chapterIndex int, chapterURL string) (*ChapterContentView, error) {
-	if chapterURL == "" {
-		return nil, fmt.Errorf("%w: chapter url is required", repository.ErrInvalidArgument)
+// WarmChapterForSource 供 Worker 预热任务使用：复用已预取的 src 与 ch，
+// 消灭 O(N) DB 往返。缓存命中直接返回 nil；未命中抓取成功后写缓存并返回 nil。
+func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookID uuid.UUID,
+	src *repository.BookSource, ch *repository.Chapter) error {
+	if ch == nil || ch.ChapterIndex == nil {
+		return nil // 卷名等无序号章节不预热
 	}
-	src, err := s.sources.Get(ctx, s.pool, userID, sourceID)
-	if err != nil || !src.Enabled {
-		return nil, fmt.Errorf("%w: content source unavailable", repository.ErrInvalidArgument)
+	if ch.URL == "" {
+		return fmt.Errorf("%w: chapter %d has empty url", repository.ErrInvalidArgument, *ch.ChapterIndex)
 	}
-	chapter, err := s.chapters.GetByIndex(ctx, s.pool, userID, bookID, sourceID, int32(chapterIndex))
+	key := fmt.Sprintf("%s:%s:%s:%d", contentCachePrefix, bookID, src.ID, *ch.ChapterIndex)
+	if _, ok := s.loadCache(ctx, key, src.ID); ok {
+		return nil
+	}
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, ch.URL)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if chapter.IsVolume || chapter.ChapterIndex == nil {
-		return nil, fmt.Errorf("%w: volume rows have no content", repository.ErrInvalidArgument)
-	}
-
-	key := fmt.Sprintf("%s:%s:%s:%d", contentCachePrefix, bookID, sourceID, chapterIndex)
-	if payload, ok := s.loadCache(ctx, key, sourceID); ok {
-		return s.assemble(ctx, userID, bookID, sourceID, sourceID, chapter, payload.Content, payload.WordCount,
-			payload.AppliedReplaceRuleIDs, payload.TraceID, false, true)
-	}
-
-	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, chapterURL)
-	if err != nil {
-		return nil, err
-	}
-	wordCount := utf8.RuneCountInString(content)
 	s.storeCache(ctx, key, cachedPayload{
-		Content: content, WordCount: wordCount, AppliedReplaceRuleIDs: appliedIDs,
-		SourceID: sourceID, TraceID: traceID,
+		Content:               content,
+		WordCount:             utf8.RuneCountInString(content),
+		AppliedReplaceRuleIDs: appliedIDs,
+		SourceID:              src.ID,
+		TraceID:               traceID,
 	})
-	return s.assemble(ctx, userID, bookID, sourceID, sourceID, chapter, content, wordCount, appliedIDs, traceID, false, false)
+	return nil
 }
 
 // getLocalContent 读取本地书章节正文：只做用户替换规则 + 基础整理，
