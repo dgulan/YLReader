@@ -187,7 +187,7 @@ func (r *ImportExportRepository) Export(ctx context.Context, q Querier, userID u
 		where += " AND id = ANY($2)"
 		args = append(args, ids)
 	}
-	rows, err := q.Query(ctx, `SELECT rules, book_source_url, book_source_name, book_source_group,
+	rows, err := q.Query(ctx, `SELECT id, user_id, rules, book_source_url, book_source_name, book_source_group,
 			book_source_type, enabled, enabled_explore, weight, respond_time,
 			charset, concurrent_rate, header, login_url, login_check_js
 		FROM book_sources WHERE `+where+`
@@ -201,10 +201,15 @@ func (r *ImportExportRepository) Export(ctx context.Context, q Querier, userID u
 	for rows.Next() {
 		var raw json.RawMessage
 		var s BookSource
-		if err := rows.Scan(&raw, &s.BookSourceURL, &s.BookSourceName, &s.BookSourceGroup,
+		if err := rows.Scan(&s.ID, &s.UserID, &raw, &s.BookSourceURL, &s.BookSourceName, &s.BookSourceGroup,
 			&s.BookSourceType, &s.Enabled, &s.EnabledExplore, &s.Weight, &s.RespondTime,
 			&s.Charset, &s.ConcurrentRate, &s.Header, &s.LoginURL, &s.LoginCheckJS); err != nil {
 			return nil, err
+		}
+		// DEF-SEC-01 / S5-1：Export 是独立读路径（不经 scanSource），必须显式解密；
+		// 密文损坏即报错，绝不把 {"__enc": ...} 吐给客户端。
+		if err := openSourceHeader(&s); err != nil {
+			return nil, fmt.Errorf("export source %s: %w", s.ID, err)
 		}
 		out = append(out, mergeSource(raw, &s))
 	}

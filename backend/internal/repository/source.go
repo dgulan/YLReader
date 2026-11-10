@@ -73,7 +73,7 @@ func openSourceHeader(s *BookSource) error {
 	}
 	fields := map[string]json.RawMessage{}
 	if err := json.Unmarshal(s.Header, &fields); err != nil {
-		return nil
+		return fmt.Errorf("%w: header is not a JSON object", crypto.ErrMalformed)
 	}
 	raw, ok := fields[crypto.EnvelopeKey]
 	if !ok {

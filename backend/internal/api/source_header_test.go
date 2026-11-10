@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -242,5 +243,62 @@ func TestSourceImportNonDryRunSeals(t *testing.T) {
 	}
 	if got.Header["Cookie"] != secret || got.Header["User-Agent"] != "yreader" {
 		t.Fatalf("GET 未透明解密: %v", got.Header)
+	}
+}
+
+// TestSourceExportTransparent 证明导出读路径同样透明：body 原始文本不含 __enc，
+// 解析后 header.Cookie 为明文。
+func TestSourceExportTransparent(t *testing.T) {
+	installAPITestKeyring(t)
+	ts, pool := newTestServer(t, nil)
+	userID, user, pass := seedUser(t, pool)
+	base := ts.URL + "/api/v1"
+	token := login(t, base, user, pass)
+	ctx := context.Background()
+
+	const url = "https://header.example/export-transparent"
+	const secret = "export_secret=xyz"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM book_sources WHERE user_id = $1`, userID)
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"book_source_url":  url,
+		"book_source_name": "导出透明",
+		"header":           map[string]any{"Cookie": secret},
+	})
+	status, resp := doJSON(t, http.MethodPost, base+"/sources", token, body)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /sources status = %d, body = %s", status, resp)
+	}
+
+	status, resp = doJSON(t, http.MethodGet, base+"/sources/export", token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /sources/export status = %d, body = %s", status, resp)
+	}
+	if strings.Contains(string(resp), crypto.EnvelopeKey) {
+		t.Fatalf("导出响应 body 泄漏信封键 %q: %s", crypto.EnvelopeKey, resp)
+	}
+
+	var items []map[string]any
+	if err := json.Unmarshal(resp, &items); err != nil {
+		t.Fatalf("导出结果不是 JSON 数组: %v (%s)", err, resp)
+	}
+	found := false
+	for _, item := range items {
+		if item["bookSourceUrl"] != url {
+			continue
+		}
+		header, ok := item["header"].(map[string]any)
+		if !ok {
+			t.Fatalf("导出项 header 不是对象: %#v", item["header"])
+		}
+		if header["Cookie"] != secret {
+			t.Fatalf("导出 header 未透明解密: %#v", header)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("导出结果缺少被测书源 %s", url)
 	}
 }

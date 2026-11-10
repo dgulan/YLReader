@@ -128,6 +128,32 @@ func TestSourceHeaderLegacyPlaintextReadable(t *testing.T) {
 	}
 }
 
+// TestSourceHeaderNonObjectRejected 覆盖历史脏数据：header 是合法 JSON 却不是对象
+// （schema 未强制 object）。透明语义要求显式报错，而不是把 [1,2,3] 原样放行。
+func TestSourceHeaderNonObjectRejected(t *testing.T) {
+	pool := testutil.TestPool(t)
+	tx := testutil.BeginTx(t, pool)
+	userID := mustSeedUser(t, tx)
+	repo := NewSourceRepository()
+	ctx := context.Background()
+
+	id := uuid.New()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO book_sources (id, user_id, book_source_url, book_source_name, enabled, header, rules)
+		VALUES ($1,$2,$3,$4,true,'[1,2,3]'::jsonb,'{}'::jsonb)`,
+		id, userID, "https://header.example/non-object", "非对象 header"); err != nil {
+		t.Fatalf("seed non-object header: %v", err)
+	}
+
+	_, err := repo.Get(ctx, tx, userID, id)
+	if err == nil {
+		t.Fatal("非对象 header 必须显式报错，不得静默放行")
+	}
+	if !errors.Is(err, crypto.ErrMalformed) {
+		t.Fatalf("want ErrMalformed, got %v", err)
+	}
+}
+
 func TestSourceHeaderUnknownKIDFailsLoudly(t *testing.T) {
 	pool := testutil.TestPool(t)
 	tx := testutil.BeginTx(t, pool)
