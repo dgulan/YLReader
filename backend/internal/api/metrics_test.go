@@ -25,6 +25,10 @@ func TestMetricsEndpointExposed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
+	// Prometheus 文本暴露格式固定为 text/plain; version=0.0.4; charset=utf-8
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain prefix", ct)
+	}
 	for _, name := range []string{
 		"yreader_jobs_total",
 		"yreader_sandbox_executions_total",
