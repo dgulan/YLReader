@@ -51,12 +51,6 @@ func sealSourceHeaderValue(s *BookSource) (json.RawMessage, error) {
 	if ring == nil || len(s.Header) == 0 {
 		return defaultJSON(s.Header), nil
 	}
-	var probe struct {
-		Enc string `json:"__enc"`
-	}
-	if err := json.Unmarshal(s.Header, &probe); err == nil && probe.Enc != "" {
-		return s.Header, nil // 已是信封（迁移脚本重复执行时幂等）
-	}
 	if !json.Valid(s.Header) {
 		return nil, fmt.Errorf("%w: header is not valid json", ErrInvalidArgument)
 	}
@@ -77,17 +71,23 @@ func openSourceHeader(s *BookSource) error {
 	if len(s.Header) == 0 {
 		return nil
 	}
-	var probe struct {
-		Enc string `json:"__enc"`
-	}
-	if err := json.Unmarshal(s.Header, &probe); err != nil || probe.Enc == "" {
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(s.Header, &fields); err != nil {
 		return nil
+	}
+	raw, ok := fields[crypto.EnvelopeKey]
+	if !ok {
+		return nil // 历史明文（迁移前写入）原样返回
+	}
+	var envelope string
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope == "" {
+		return fmt.Errorf("%w: %s is not a non-empty string", crypto.ErrMalformed, crypto.EnvelopeKey)
 	}
 	ring := crypto.DefaultKeyring()
 	if ring == nil {
 		return fmt.Errorf("%w: encrypted header but no YREADER_HEADER_KEY_* configured", crypto.ErrNoKey)
 	}
-	plain, err := ring.Open(probe.Enc, crypto.AAD(s.UserID, s.ID))
+	plain, err := ring.Open(envelope, crypto.AAD(s.UserID, s.ID))
 	if err != nil {
 		return fmt.Errorf("open header: %w", err)
 	}

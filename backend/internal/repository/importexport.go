@@ -151,6 +151,15 @@ func parseSource(raw json.RawMessage, userID uuid.UUID) (*BookSource, error) {
 
 // updateSource 按 id + user 覆盖书源关系列与 rules（供 overwrite=update）。
 func (r *ImportExportRepository) updateSource(ctx context.Context, q Querier, id, userID uuid.UUID, s *BookSource) error {
+	// DEF-SEC-01 / S5-1：overwrite=update 走独立 UPDATE（不经 SourceRepository.Create），
+	// 必须在此显式密封 header，否则批量导入的 Cookie/Token 会明文落库。
+	if s.ID == uuid.Nil {
+		s.ID = id
+	}
+	header, hErr := sealSourceHeaderValue(s)
+	if hErr != nil {
+		return hErr
+	}
 	tag, err := q.Exec(ctx, `UPDATE book_sources SET
 			book_source_name = $3, book_source_group = $4, book_source_type = $5,
 			enabled = $6, enabled_explore = $7, weight = $8, respond_time = $9,
@@ -159,7 +168,7 @@ func (r *ImportExportRepository) updateSource(ctx context.Context, q Querier, id
 		WHERE id = $1 AND user_id = $2`,
 		id, userID, s.BookSourceName, s.BookSourceGroup, s.BookSourceType,
 		s.Enabled, s.EnabledExplore, s.Weight, s.RespondTime,
-		s.Charset, s.ConcurrentRate, defaultJSON(s.Header), s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules))
+		s.Charset, s.ConcurrentRate, header, s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules))
 	if err != nil {
 		return err
 	}
