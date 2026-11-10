@@ -5,10 +5,13 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"yreader/backend/internal/pkg/storage"
 	"yreader/backend/internal/service"
@@ -99,26 +102,39 @@ func (s *Server) Handler() http.Handler {
 	r.Use(RequestID)
 	r.Use(Recover(s.log))
 	r.Use(Logging(s.log))
-	r.Use(s.AuthMiddleware)
 
-	// 容器编排探针（docker-compose / k8s 用根路径）。
-	r.Get("/healthz", s.Healthz)
-	r.Get("/readyz", s.Readyz)
+	// S5-4：/metrics 与 /debug/pprof 注册在受保护路由组之前（不挂 AuthMiddleware），
+	// 免 JWT 鉴权。/metrics 由反代限制内网访问；pprof 由 PPROF_ENABLED 控制（默认关闭）。
+	// chi 要求所有中间件先于路由定义，故这里用 Group 分出「免鉴权」与「受保护」两组。
+	r.Get("/metrics", promhttp.Handler().ServeHTTP)
+	if os.Getenv("PPROF_ENABLED") == "true" {
+		r.Mount("/debug", middleware.Profiler())
+	}
 
-	return HandlerWithOptions(s, ChiServerOptions{
-		BaseURL:    "/api/v1",
-		BaseRouter: r,
-		// 缺失 If-Match（PUT /books/{id}/progress）按契约返回 428 precondition_required，
-		// 其余参数绑定错误统一 400 validation_error。
-		ErrorHandlerFunc: func(w http.ResponseWriter, req *http.Request, err error) {
-			var headerErr *RequiredHeaderError
-			if errors.As(err, &headerErr) && strings.EqualFold(headerErr.ParamName, "If-Match") {
-				writeErrorCode(w, req, http.StatusPreconditionRequired, "precondition_required")
-				return
-			}
-			writeErrorCode(w, req, http.StatusBadRequest, "validation_error")
-		},
+	r.Group(func(protected chi.Router) {
+		protected.Use(s.AuthMiddleware)
+
+		// 容器编排探针（docker-compose / k8s 用根路径）。
+		protected.Get("/healthz", s.Healthz)
+		protected.Get("/readyz", s.Readyz)
+
+		HandlerWithOptions(s, ChiServerOptions{
+			BaseURL:    "/api/v1",
+			BaseRouter: protected,
+			// 缺失 If-Match（PUT /books/{id}/progress）按契约返回 428 precondition_required，
+			// 其余参数绑定错误统一 400 validation_error。
+			ErrorHandlerFunc: func(w http.ResponseWriter, req *http.Request, err error) {
+				var headerErr *RequiredHeaderError
+				if errors.As(err, &headerErr) && strings.EqualFold(headerErr.ParamName, "If-Match") {
+					writeErrorCode(w, req, http.StatusPreconditionRequired, "precondition_required")
+					return
+				}
+				writeErrorCode(w, req, http.StatusBadRequest, "validation_error")
+			},
+		})
 	})
+
+	return r
 }
 
 // Healthz 处理 GET /healthz（存活检查）。

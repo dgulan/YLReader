@@ -34,7 +34,7 @@ type WorkerPool struct {
 	jobs     *repository.JobRepository
 
 	workerID   string // 实例唯一标识 hostname-<pid>-<nano>
-	hostPrefix string // 同主机前缀 hostname-
+	hostPrefix string // 生产由 hostname 生成；并测环境须经 isolateWorkerIdentity 隔离防跨包误杀
 
 	// reaperInterval 是常驻巡检周期（默认 10min）；测试可经 WithReaperInterval 注入短周期。
 	reaperInterval time.Duration
