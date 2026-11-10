@@ -642,6 +642,10 @@ LANGUAGE sql STABLE AS $$
 $$;
 
 -- Level 2：窗口内 trigram 相似度模糊匹配
+-- v1.5（DEF-CODE-11）：先用 % 运算符做索引谓词（pg_trgm GIN 可服务），
+-- 再用 similarity(...) >= p_threshold 二次过滤保证精度。
+-- % 的判定阈值来自 pg_trgm.similarity_threshold（默认 0.3，是相似度下限），
+-- 因此 % 结果集 ⊇ similarity >= p_threshold 结果集（p_threshold=0.6 时），语义等价。
 CREATE OR REPLACE FUNCTION relocate_fuzzy(
   p_book_id uuid, p_source_id uuid, p_normalized_title text,
   p_old_index integer, p_window integer DEFAULT 100, p_threshold real DEFAULT 0.6
@@ -655,6 +659,7 @@ LANGUAGE sql STABLE AS $$
     AND c.is_volume = false
     AND c.chapter_index BETWEEN greatest(0, p_old_index - p_window)
                             AND p_old_index + p_window
+    AND c.normalized_title % p_normalized_title
     AND similarity(c.normalized_title, p_normalized_title) >= p_threshold
   ORDER BY sim DESC, abs(c.chapter_index - p_old_index) ASC
   LIMIT 1

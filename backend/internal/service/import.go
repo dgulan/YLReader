@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
@@ -59,9 +60,18 @@ type ImportBookResult struct {
 	Created      bool
 }
 
+// importPool 是 ImportService 依赖的最小数据库能力：
+// Begin 用于导入事务；其余方法（Query/QueryRow/Exec）使其可直接作为 repository.Querier 使用，
+// 便于单测注入 fake 覆盖 commit 后探查失败等无法用真实 PG 触发的路径（DEF-CODE-04）。
+// *pgxpool.Pool 满足该接口。
+type importPool interface {
+	repository.Querier
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // ImportService 负责本地 EPUB / TXT 的解析、落库与正文落盘。
 type ImportService struct {
-	pool        *pgxpool.Pool
+	pool        importPool
 	books       *repository.BookRepository
 	chapters    *repository.ChapterRepository
 	mappings    *repository.MappingRepository

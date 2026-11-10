@@ -10,9 +10,12 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"yreader/backend/internal/pkg/storage"
+	"yreader/backend/internal/repository"
 	"yreader/backend/internal/repository/testutil"
 )
 
@@ -128,9 +131,55 @@ func TestHandleCommitError_CleanupOnRowAbsent(t *testing.T) {
 	}
 }
 
-// 状态 ③：探查失败 → 保守保留。
-// 本测试无法从外部注入探查失败（probeCtx 由 handleCommitError 内部创建，
-// pool 为共享测试池、Close 会污染其他用例），故显式 Skip 并归档 DEF-CODE-04。
+// errRow 让 QueryRow().Scan 返回指定错误，用于模拟探查阶段 DB 故障。
+type errRow struct{ err error }
+
+func (r errRow) Scan(dest ...any) error { return r.err }
+
+// failingProbePool 实现 importPool：所有查询/事务均返回同一错误，
+// 用于覆盖 handleCommitError 状态 ③（探查本身失败）。
+type failingProbePool struct{ err error }
+
+func (p *failingProbePool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	return nil, p.err
+}
+
+func (p *failingProbePool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return errRow{p.err}
+}
+
+func (p *failingProbePool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, p.err
+}
+
+func (p *failingProbePool) Begin(ctx context.Context) (pgx.Tx, error) {
+	return nil, p.err
+}
+
+// 状态 ③：探查失败（DB 报错，非 ErrNotFound）→ 保守保留文件并记录 probe_err。
+// pool 已抽象为窄接口 importPool，这里注入始终失败的 fake（DEF-CODE-04 闭环）。
 func TestHandleCommitError_ProbeFails(t *testing.T) {
-	t.Skip("状态 ③ 无法单测：probeCtx 内部创建无法注入失败，pool 共享无法 Close。归档 DEF-CODE-04。代码逻辑已 review 确认。")
+	logBuf, logger := newCommitTestLogger()
+	st := &countingStorage{}
+	probeErr := errors.New("probe boom: connection reset")
+	svc := &ImportService{
+		pool:    &failingProbePool{err: probeErr},
+		books:   repository.NewBookRepository(),
+		storage: st,
+		log:     logger,
+	}
+
+	logBuf.Reset()
+	svc.handleCommitError(context.Background(), uuid.New(), uuid.New(), errors.New("simulated commit err"))
+
+	if n := st.calls(); n != 0 {
+		t.Fatalf("probe failed: DeletePrefix calls = %d, want 0 (files retained)", n)
+	}
+	out := logBuf.String()
+	if !bytes.Contains([]byte(out), []byte("commit error, probe failed, files retained for gc")) {
+		t.Fatalf("want error log 'commit error, probe failed, files retained for gc', got: %s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("probe_err")) {
+		t.Fatalf("want probe_err attribute in log, got: %s", out)
+	}
 }
