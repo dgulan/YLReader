@@ -223,7 +223,13 @@
 **处置决议**：Stage 4 已正式封板，该项安全缺口不回退代码返工，正式转入 Stage 5 首项任务（作为 v1.4 契约演进的首要特性实现）。
 **当前状态**：已闭环 (v1.4)。
 **实现**：`pkg/crypto` AES-256-GCM 信封（nonce 12B 随机、AAD=`user_id|source_id`、多 kid 并存轮换、未知 kid/篡改/AAD 不匹配一律显式报错）；`SourceRepository` 写前密封、读后透明解密（历史明文兼容，密文损坏→500 不回退明文）；`SourceService.Create` 预生成 id（AAD 需要）；`cmd/migrate-header` 按 id 游标分批迁移（1000 行/批、幂等、可断点续跑、`-dry-run`）；导入 `dry_run=true` 不密封不落库。
-**测试**：`TestEnvelopeRoundTrip`/`TestEnvelopeTamperRejected`/`TestEnvelopeKidRotation`/`TestEnvelopeAADMismatchRejected`/`TestKeyringValidation`、`TestSourceHeaderEncryptedAtRest`/`TestSourceHeaderLegacyPlaintextReadable`/`TestSourceHeaderUnknownKIDFailsLoudly`/`TestMigrateSourceHeadersIdempotent`/`TestMigrateSourceHeadersDryRunAndResume`、`TestSourceHeaderTransparentViaAPI`/`TestSourceImportDryRunDoesNotSeal`。
+**测试**：`TestEnvelopeRoundTrip`/`TestEnvelopeTamperRejected`/`TestEnvelopeKidRotation`/`TestEnvelopeAADMismatchRejected`/`TestKeyringValidation`、`TestSourceHeaderEncryptedAtRest`/`TestSourceHeaderLegacyPlaintextReadable`/`TestSourceHeaderUnknownKIDFailsLoudly`/`TestMigrateSourceHeadersIdempotent`/`TestMigrateSourceHeadersDryRunAndResume`、`TestSourceHeaderTransparentViaAPI`/`TestSourceImportDryRunDoesNotSeal`/`TestSourceImportNonDryRunSeals`。
+**交付口径（S5-1）**：
+- 业务层交付口径：90 PASS + 2 SKIP（repo 25 + api 58 + service 7）；
+- 底层密码学组件包 pkg/crypto 贡献 5 PASS（含 TestKeyringValidation 构造校验 1 条）；
+- 四层合计 95 PASS + 2 SKIP；全工程 140 PASS + 2 SKIP；
+- pkg/crypto 从 S5-2 起正式计入交付基线；S5-1 交付口径不含 pkg/crypto。
+- 终审补交（m05845 闭环）：新增 `TestSourceImportNonDryRunSeals`（+1）→ 全工程 141 PASS + 2 SKIP；业务层 91 PASS + 2 SKIP；四层合计 96 PASS + 2 SKIP。另 P1 加固：`sealSourceHeaderValue` 删除「已是信封即跳过」捷径（伪造 `{"__enc":"x"}` 不再原样落库）、`openSourceHeader` 对非 string `__enc` 显式 `ErrMalformed`、`ImportExportRepository.updateSource` 显式密封。
 
 ---
 
