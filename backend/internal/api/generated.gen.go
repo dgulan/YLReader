@@ -370,7 +370,7 @@ type BookmarkCreate struct {
 type CacheBookRequest struct {
 	FromChapter *int `json:"from_chapter,omitempty"`
 
-	// SourceId 缺省用当前激活源；显式传入时必须与 books.active_source_id 一致，否则 422（当前仅支持预热活跃源目录，多源预热见 DEF-OAS-08）
+	// SourceId 缺省用活跃源；显式传入时必须属于该书已绑定的 book_source_mappings 的 source_id，且目标源 chapters 存在至少一条可读章节记录，否则 422 relocation_failed
 	SourceId  *openapi_types.UUID `json:"source_id,omitempty"`
 	ToChapter *int                `json:"to_chapter,omitempty"`
 }
@@ -558,7 +558,10 @@ type Job struct {
 	Result       *map[string]interface{} `json:"result"`
 	StartedAt    *time.Time              `json:"started_at"`
 	Status       JobStatus               `json:"status"`
-	Type         JobType                 `json:"type"`
+
+	// TargetSourceId 仅 full_cache 且多源预热时非空，缺省/活跃源预热为 null
+	TargetSourceId *openapi_types.UUID `json:"target_source_id"`
+	Type           JobType             `json:"type"`
 }
 
 // JobStatus defines model for Job.Status.

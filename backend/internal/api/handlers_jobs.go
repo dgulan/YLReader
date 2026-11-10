@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 
 	"yreader/backend/internal/repository"
 	"yreader/backend/internal/service"
@@ -72,6 +73,18 @@ func toAPIJob(j *repository.Job) Job {
 		var m map[string]any
 		if err := json.Unmarshal(*j.Result, &m); err == nil {
 			out.Result = &m
+		}
+	}
+	// S5-2：target_source_id 由 payload.source_id 解析，不落 DB 列；仅 full_cache 非空。
+	if j.Type == "full_cache" {
+		var p struct {
+			SourceID string `json:"source_id"`
+		}
+		if err := json.Unmarshal(j.Payload, &p); err == nil && p.SourceID != "" {
+			if id, perr := uuid.Parse(p.SourceID); perr == nil {
+				ts := openapi_types.UUID(id)
+				out.TargetSourceId = &ts
+			}
 		}
 	}
 	return out

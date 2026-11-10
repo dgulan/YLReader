@@ -82,12 +82,24 @@ func (r *JobRepository) GetStatus(ctx context.Context, q Querier, jobID uuid.UUI
 	return status, nil
 }
 
-// HasActiveFullCache 判断该书是否已有进行中的 full_cache 任务。
-func (r *JobRepository) HasActiveFullCache(ctx context.Context, q Querier, userID, bookID uuid.UUID) (bool, error) {
+// HasActiveFullCache 判断该书 + 目标源是否已有进行中的 full_cache 任务。
+// S5-2 起防重粒度为 (book, source)：同书不同源可并行预热。
+func (r *JobRepository) HasActiveFullCache(ctx context.Context, q Querier, userID, bookID, sourceID uuid.UUID) (bool, error) {
 	var exists bool
 	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM jobs
 		WHERE user_id = $1 AND type = 'full_cache' AND status IN ('queued','running')
-		  AND payload->>'book_id' = $2)`, userID, bookID.String()).Scan(&exists)
+		  AND payload->>'book_id' = $2 AND payload->>'source_id' = $3)`,
+		userID, bookID.String(), sourceID.String()).Scan(&exists)
+	return exists, err
+}
+
+// HasMappingForSource 判断 (book, source) 是否已建立书源映射（含 pending/stale）。
+func (r *JobRepository) HasMappingForSource(ctx context.Context, q Querier, userID, bookID, sourceID uuid.UUID) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM book_source_mappings m
+		JOIN books b ON b.id = m.book_id AND b.user_id = $1
+		WHERE m.book_id = $2 AND m.source_id = $3)`, userID, bookID, sourceID).Scan(&exists)
 	return exists, err
 }
 

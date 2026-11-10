@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -82,7 +83,7 @@ func (r *ImportExportRepository) Import(ctx context.Context, q Querier, userID u
 			} else {
 				rep.Skipped++
 			}
-		case err == pgx.ErrNoRows:
+		case errors.Is(err, pgx.ErrNoRows):
 			if cerr := srcRepo.Create(ctx, q, s); cerr != nil {
 				rep.Failed++
 				rep.Failures = append(rep.Failures, ImportFailure{Index: i, URL: s.BookSourceURL, Message: cerr.Error()})

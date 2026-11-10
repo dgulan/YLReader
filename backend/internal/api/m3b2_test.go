@@ -181,6 +181,9 @@ func TestM3b2CacheCreateAndDedup(t *testing.T) {
 		t.Fatalf("create book = %d", status)
 	}
 	bookID := dbString(t, pool, `SELECT id::text FROM books WHERE user_id=$1 AND name='缓存之书'`, userID)
+	// S5-2 门禁⑤要求目标源存在可读章节，否则 422 relocation_failed。
+	bookUUID := uuid.MustParse(bookID)
+	insertChapters(t, pool, bookUUID, s1, 3, "http://mock-c1.example/book/1/ch%d")
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM jobs WHERE user_id=$1`, userID)
 	})
@@ -454,8 +457,8 @@ func bookNames(t *testing.T, pool *pgxpool.Pool, userID uuid.UUID) []string {
 	return out
 }
 
-// TestM3b2CacheSourceMismatchRejected（v1.3）：显式 source_id 必须等于活跃源，否则 422。
-func TestM3b2CacheSourceMismatchRejected(t *testing.T) {
+// TestM3b2CacheSourceNotInMappingsRejected（S5-2）：显式 source_id 必须属于该书已绑定映射，否则 422 relocation_failed。
+func TestM3b2CacheSourceNotInMappingsRejected(t *testing.T) {
 	ts, pool := newTestServer(t, nil)
 	base := ts.URL + "/api/v1"
 	userID, username, password := seedUser(t, pool)
@@ -470,13 +473,13 @@ func TestM3b2CacheSourceMismatchRejected(t *testing.T) {
 	}
 	bookID := dbString(t, pool, `SELECT id::text FROM books WHERE user_id=$1 AND name='门禁之书'`, userID)
 
-	// 显式源 != 活跃源 → 422（多源预热未支持）。
-	if status, raw := doJSON(t, http.MethodPost, base+"/books/"+bookID+"/cache", token, mustJSON(t, map[string]any{"source_id": s2})); status != http.StatusUnprocessableEntity {
-		t.Fatalf("mismatched source cache = %d, want 422 (%s)", status, raw)
+	// 显式源 s2 未绑定到本书 mappings → 422 relocation_failed。
+	status, raw := doJSON(t, http.MethodPost, base+"/books/"+bookID+"/cache", token, mustJSON(t, map[string]any{"source_id": s2}))
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("unmapped source cache = %d, want 422 (%s)", status, raw)
 	}
-	// 显式源 == 活跃源 → 202。
-	if status, raw := doJSON(t, http.MethodPost, base+"/books/"+bookID+"/cache", token, mustJSON(t, map[string]any{"source_id": s1})); status != http.StatusAccepted {
-		t.Fatalf("matching source cache = %d, want 202 (%s)", status, raw)
+	if !strings.Contains(string(raw), "relocation_failed") {
+		t.Fatalf("error code = %s, want relocation_failed", raw)
 	}
 }
 

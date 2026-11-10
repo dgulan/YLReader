@@ -246,6 +246,86 @@ func TestSourceImportNonDryRunSeals(t *testing.T) {
 	}
 }
 
+// TestSourceImportOverwriteSeals（S5-2 同收）：overwrite=update 的独立 UPDATE 路径同样密封。
+func TestSourceImportOverwriteSeals(t *testing.T) {
+	installAPITestKeyring(t)
+	ts, pool := newTestServer(t, nil)
+	userID, user, pass := seedUser(t, pool)
+	base := ts.URL + "/api/v1"
+	token := login(t, base, user, pass)
+	ctx := context.Background()
+
+	const url = "https://header.example/import-overwrite"
+	const oldSecret = "session=old_token_111"
+	const newSecret = "session=new_token_222"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM book_sources WHERE user_id = $1`, userID)
+	})
+
+	body, _ := json.Marshal(map[string]any{
+		"book_source_url":  url,
+		"book_source_name": "覆盖导入",
+		"header":           map[string]any{"Cookie": oldSecret},
+	})
+	status, resp := doJSON(t, http.MethodPost, base+"/sources", token, body)
+	if status != http.StatusCreated {
+		t.Fatalf("POST /sources status = %d, body = %s", status, resp)
+	}
+
+	payload, _ := json.Marshal([]map[string]any{{
+		"bookSourceUrl":  url,
+		"bookSourceName": "覆盖导入-已更新",
+		"header":         `{"Cookie":"` + newSecret + `"}`,
+	}})
+	imp, _ := json.Marshal(map[string]any{
+		"data":      string(payload),
+		"format":    "legado_json",
+		"dry_run":   false,
+		"overwrite": "update",
+	})
+	status, resp = doJSON(t, http.MethodPost, base+"/sources/import", token, imp)
+	if status != http.StatusOK {
+		t.Fatalf("import overwrite status = %d, body = %s", status, resp)
+	}
+	var result struct {
+		Updated int `json:"updated"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("decode import result: %v (%s)", err, resp)
+	}
+	if result.Updated != 1 {
+		t.Fatalf("updated = %d, want 1 (%s)", result.Updated, resp)
+	}
+
+	var id uuid.UUID
+	var hasEnvelope, hasCookie bool
+	if err := pool.QueryRow(ctx,
+		`SELECT id, header ? '__enc', header ? 'Cookie' FROM book_sources WHERE user_id = $1 AND book_source_url = $2`,
+		userID, url).Scan(&id, &hasEnvelope, &hasCookie); err != nil {
+		t.Fatalf("raw header: %v", err)
+	}
+	if !hasEnvelope {
+		t.Fatal("覆盖导入后 DB header 缺少 __enc 信封（明文落库）")
+	}
+	if hasCookie {
+		t.Fatal("覆盖导入后 DB header 仍含明文键 Cookie")
+	}
+
+	status, resp = doJSON(t, http.MethodGet, base+"/sources/"+id.String(), token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /sources/{id} status = %d, body = %s", status, resp)
+	}
+	var got struct {
+		Header map[string]string `json:"header"`
+	}
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if got.Header["Cookie"] != newSecret {
+		t.Fatalf("GET 未透明解密新值: %v", got.Header)
+	}
+}
+
 // TestSourceExportTransparent 证明导出读路径同样透明：body 原始文本不含 __enc，
 // 解析后 header.Cookie 为明文。
 func TestSourceExportTransparent(t *testing.T) {
@@ -270,6 +350,12 @@ func TestSourceExportTransparent(t *testing.T) {
 	status, resp := doJSON(t, http.MethodPost, base+"/sources", token, body)
 	if status != http.StatusCreated {
 		t.Fatalf("POST /sources status = %d, body = %s", status, resp)
+	}
+	var createdID uuid.UUID
+	if err := pool.QueryRow(ctx,
+		`SELECT id FROM book_sources WHERE user_id = $1 AND book_source_url = $2`, userID, url).
+		Scan(&createdID); err != nil {
+		t.Fatalf("查询书源 id: %v", err)
 	}
 
 	status, resp = doJSON(t, http.MethodGet, base+"/sources/export", token, nil)
@@ -300,5 +386,25 @@ func TestSourceExportTransparent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("导出结果缺少被测书源 %s", url)
+	}
+
+	// S5-2 同收：?ids= 精准导出同样透明，且只返回指定书源。
+	status, resp = doJSON(t, http.MethodGet, base+"/sources/export?ids="+createdID.String(), token, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /sources/export?ids status = %d, body = %s", status, resp)
+	}
+	if strings.Contains(string(resp), crypto.EnvelopeKey) {
+		t.Fatalf("精准导出 body 泄漏信封键 %q: %s", crypto.EnvelopeKey, resp)
+	}
+	var picked []map[string]any
+	if err := json.Unmarshal(resp, &picked); err != nil {
+		t.Fatalf("精准导出不是 JSON 数组: %v (%s)", err, resp)
+	}
+	if len(picked) != 1 || picked[0]["bookSourceUrl"] != url {
+		t.Fatalf("精准导出结果 = %#v, want 仅 %s", picked, url)
+	}
+	ph, ok := picked[0]["header"].(map[string]any)
+	if !ok || ph["Cookie"] != secret {
+		t.Fatalf("精准导出 header 未透明解密: %#v", picked[0]["header"])
 	}
 }

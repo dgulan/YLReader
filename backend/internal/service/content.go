@@ -156,6 +156,43 @@ func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, chap
 	return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, content, wordCount, appliedIDs, traceID, isOverridden, false)
 }
 
+// GetForSource 从指定源读取章节正文，供多源缓存预热（S5-2）使用。
+// 与 Get 的差异：不读 books.active_source_id、不做单章覆盖路由，
+// 只使用传入的 sourceID 与 chapterURL——严禁回退到活跃源。
+func (s *ContentService) GetForSource(ctx context.Context, userID, bookID, sourceID uuid.UUID, chapterIndex int, chapterURL string) (*ChapterContentView, error) {
+	if chapterURL == "" {
+		return nil, fmt.Errorf("%w: chapter url is required", repository.ErrInvalidArgument)
+	}
+	src, err := s.sources.Get(ctx, s.pool, userID, sourceID)
+	if err != nil || !src.Enabled {
+		return nil, fmt.Errorf("%w: content source unavailable", repository.ErrInvalidArgument)
+	}
+	chapter, err := s.chapters.GetByIndex(ctx, s.pool, userID, bookID, sourceID, int32(chapterIndex))
+	if err != nil {
+		return nil, err
+	}
+	if chapter.IsVolume || chapter.ChapterIndex == nil {
+		return nil, fmt.Errorf("%w: volume rows have no content", repository.ErrInvalidArgument)
+	}
+
+	key := fmt.Sprintf("%s:%s:%s:%d", contentCachePrefix, bookID, sourceID, chapterIndex)
+	if payload, ok := s.loadCache(ctx, key, sourceID); ok {
+		return s.assemble(ctx, userID, bookID, sourceID, sourceID, chapter, payload.Content, payload.WordCount,
+			payload.AppliedReplaceRuleIDs, payload.TraceID, false, true)
+	}
+
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, chapterURL)
+	if err != nil {
+		return nil, err
+	}
+	wordCount := utf8.RuneCountInString(content)
+	s.storeCache(ctx, key, cachedPayload{
+		Content: content, WordCount: wordCount, AppliedReplaceRuleIDs: appliedIDs,
+		SourceID: sourceID, TraceID: traceID,
+	})
+	return s.assemble(ctx, userID, bookID, sourceID, sourceID, chapter, content, wordCount, appliedIDs, traceID, false, false)
+}
+
 // getLocalContent 读取本地书章节正文：只做用户替换规则 + 基础整理，
 // 不生成 trace_id（本地读不涉及规则求值），也不写缓存。
 func (s *ContentService) getLocalContent(

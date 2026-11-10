@@ -25,8 +25,11 @@ var ErrMappingActive = errors.New("cannot delete active source mapping")
 // ErrJobFinal 表示任务已处于终态，无法取消（契约 409）。
 var ErrJobFinal = errors.New("job already in final state")
 
-// ErrJobActive 表示该书已有进行中的 full_cache 任务（契约 409）。
+// ErrJobActive 表示该书该源已有进行中的 full_cache 任务（契约 409）。
 var ErrJobActive = errors.New("job already active")
+
+// ErrRelocationFailed 表示多源预热的目标源不可用（不在 mappings / 无章节），契约 422 relocation_failed。
+var ErrRelocationFailed = errors.New("relocation failed")
 
 // CacheBookInput 是 POST /books/{bookId}/cache 的业务入参。
 type CacheBookInput struct {
@@ -99,29 +102,54 @@ func (s *JobService) CacheBook(ctx context.Context, userID, bookID uuid.UUID, in
 		return nil, fmt.Errorf("%w: local books cannot be cached from network", ErrUnprocessable)
 	}
 
-	// CacheBook 三层门禁：① 必须有活跃源；② 活跃源必须启用；③ 显式 source_id 必须等于活跃源。
-	// 第③条是 v1.3 收口语义——当前缓存任务只预热活跃源目录，多源预热留给后续重构（DEF-OAS-08）。
+	// S5-2 五层门禁（顺序固定）：① 活跃源存在 ② 目标源缺省=活跃源
+	// ③ 目标源 ∈ mappings（活跃源缺失映射时容忍并 Warn）④ 目标源可用 ⑤ 目标源有可读章节。
 	if book.ActiveSourceID == nil {
 		return nil, fmt.Errorf("%w: no active source", ErrUnprocessable)
 	}
-	src, err := s.sources.Get(ctx, s.pool, userID, *book.ActiveSourceID)
+	activeSourceID := *book.ActiveSourceID
+	targetSourceID := activeSourceID
+	if in.SourceID != nil {
+		targetSourceID = *in.SourceID
+	}
+
+	// ③ 目标源必须已绑定到该书；显式非活跃源严格要求，活跃源映射缺失仅 Warn（数据不一致容忍）。
+	inMappings, err := s.jobs.HasMappingForSource(ctx, s.pool, userID, bookID, targetSourceID)
+	if err != nil {
+		return nil, err
+	}
+	if !inMappings {
+		if targetSourceID != activeSourceID {
+			return nil, fmt.Errorf("%w: source %s not bound to book %s", ErrRelocationFailed, targetSourceID, bookID)
+		}
+		s.log.Warn("active source mapping missing; data inconsistency tolerated for default preheat",
+			"book_id", bookID, "source_id", targetSourceID)
+	}
+
+	// ④ 目标源必须存在且启用。
+	src, err := s.sources.Get(ctx, s.pool, userID, targetSourceID)
 	if err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
-			return nil, fmt.Errorf("%w: active source not found", ErrUnprocessable)
+			return nil, fmt.Errorf("%w: target source not found", ErrUnprocessable)
 		}
 		return nil, err
 	}
 	if !src.Enabled {
-		return nil, fmt.Errorf("%w: active source disabled", ErrUnprocessable)
+		return nil, fmt.Errorf("%w: target source disabled", ErrUnprocessable)
 	}
-	if in.SourceID != nil && *in.SourceID != *book.ActiveSourceID {
-		return nil, fmt.Errorf("%w: explicit source_id must equal the active source", ErrUnprocessable)
+
+	// ⑤ 目标源必须有可读章节（chapter_index IS NOT NULL），否则无法预热。
+	readable, err := s.chapters.CountReadable(ctx, s.pool, userID, bookID, targetSourceID)
+	if err != nil {
+		return nil, err
+	}
+	if readable == 0 {
+		return nil, fmt.Errorf("%w: target source has no readable chapters", ErrRelocationFailed)
 	}
 	sourceID := src.ID
 
-	// v1.3（DEF-CODE-06）：「查重 + 入队」必须原子化。前置只读校验已在上面完成，
-	// 此处不再做无锁 HasActiveFullCache（否则命中瞬间并发任务完成会误报 409），
-	// 而是把查重与插入放进持有 64 位排他咨询锁的显式事务内。
+	// v1.3（DEF-CODE-06）+ S5-2：查重与入队原子化，锁粒度改为 (book, source)，
+	// 同书不同源可并行入队；同书同源第二次仍返回 409。
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -129,13 +157,13 @@ func (s *JobService) CacheBook(ctx context.Context, userID, bookID uuid.UUID, in
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended('cache:' || $1::text, 0))`,
-		bookID.String(),
+		`SELECT pg_advisory_xact_lock(hashtextextended('cache:' || $1::text || ':' || $2::text, 0))`,
+		bookID.String(), sourceID.String(),
 	); err != nil {
 		return nil, fmt.Errorf("acquire advisory lock: %w", err)
 	}
 
-	busy, err := s.jobs.HasActiveFullCache(ctx, tx, userID, bookID)
+	busy, err := s.jobs.HasActiveFullCache(ctx, tx, userID, bookID, sourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -254,10 +282,21 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		s.failJob(jobCtx, jobID, "internal_error", err.Error())
 		return err
 	}
+	// to_chapter 超出目标源范围时静默截断，如实记入 skipped_out_of_range。
+	readableTotal, cErr := s.chapters.CountReadable(jobCtx, s.pool, userID, bookID, sourceID)
+	if cErr != nil {
+		s.failJob(jobCtx, jobID, "internal_error", cErr.Error())
+		return cErr
+	}
+	skipped := 0
+	if p.ToChapter != nil && *p.ToChapter >= readableTotal {
+		skipped = *p.ToChapter - readableTotal + 1
+	}
 	total := len(chapters)
 	if total == 0 {
 		return s.jobs.MarkSucceeded(context.Background(), s.pool, jobID, 100,
-			map[string]any{"total": 0, "succeeded": 0, "attempted": 0})
+			map[string]any{"total": 0, "succeeded": 0, "attempted": 0,
+				"target_source_id": sourceID.String(), "skipped_out_of_range": skipped})
 	}
 
 	done, succeeded := 0, 0
@@ -277,7 +316,7 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		if ch.ChapterIndex != nil {
 			idx = int(*ch.ChapterIndex)
 		}
-		if _, cerr := s.content.Get(jobCtx, userID, bookID, &idx, nil); cerr != nil {
+		if _, cerr := s.content.GetForSource(jobCtx, userID, bookID, sourceID, idx, ch.URL); cerr != nil {
 			if jobCtx.Err() != nil {
 				if errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
 					_ = s.jobs.MarkFailed(context.Background(), s.pool, jobID, "source_timeout",
@@ -304,9 +343,11 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 	// done = 已尝试章节数（含失败）；succeeded = 成功章节数。键名与变量语义严格对齐。
 	finalProgress := int16(succeeded * 100 / total)
 	return s.jobs.MarkSucceeded(context.Background(), s.pool, jobID, finalProgress, map[string]any{
-		"total":     total,
-		"succeeded": succeeded,
-		"attempted": done,
+		"total":                total,
+		"succeeded":            succeeded,
+		"attempted":            done,
+		"target_source_id":     sourceID.String(),
+		"skipped_out_of_range": skipped,
 	})
 }
 

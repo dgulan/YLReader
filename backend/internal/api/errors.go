@@ -50,6 +50,8 @@ func mapErrorToCode(err error) (int, string) {
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, service.ErrUnprocessable):
 		return http.StatusUnprocessableEntity, string(ErrorCodeUnprocessableEntity)
+	case errors.Is(err, service.ErrRelocationFailed):
+		return http.StatusUnprocessableEntity, "relocation_failed"
 	case errors.Is(err, repository.ErrDuplicate), errors.Is(err, repository.ErrVersionConflict):
 		return http.StatusConflict, "conflict"
 	case errors.Is(err, repository.ErrInvalidArgument):
