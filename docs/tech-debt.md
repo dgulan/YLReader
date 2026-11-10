@@ -245,4 +245,7 @@
 - 回归基线：85 项 = 83 PASS + 2 SKIP（`TestContentCacheRedisKeyAndTTL` 需 `REDIS_ADDR`；`TestHandleCommitError_ProbeFails` 见 DEF-CODE-04）。
 - 终审收口：P3-1（failJob 独立上下文）已于 M3c 修复闭环——`failJob` 移除 `ctx.Err()` 短路并统一 `context.Background()`，Shutdown 窗口内 `ListByBookSourceRange` 失败也能可靠落终态。
 - 转入后续版本统一管理的归档项：P3-2（优雅停机瞬态中间进度更新可能丢失，不影响终态语义）、DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-08（跨节点常驻巡检）、DEF-OAS-08（多源缓存预热）。DEF-SEC-01 归档流转至 Stage 5（v1.4，书源 header AES-GCM 信封加密）。
+- 流程教训（Stage 4）：封板期两次出现「草稿推演被标注为原始输出」（56 条测试清单、144a74f stat 22/10）。Stage 5 凭证规范：标注「原始输出」的段落必须可复现；禁止用整理版/统计版冒充原始版；凡与上轮输出矛盾，当轮撤回并声明，不得两版并存。
+- 43 operationId 清单核验：依据 Frozen v1.3 `docs/openapi.yaml`（基线 `89f9b18`，`144a74f` 未改动该文件），按 path 前缀分组逐行统计：auth 4 / sources 8 / search 1 / books 6 / chapters 1 / chapter-override 2 / content 1 / progress 2 / switch-source 1 / mappings 3 / bookmarks 3 / replace-rules 4 / jobs 3 / settings 2 / health 2 = 43，重复 0。
+- 前序收官令措辞收窄归档：§三「85 项集成回归零衰退闭环」→「83 PASS + 2 SKIP（合计 85 项，0 FAIL）」；§二 第 1 项「224 行注释成功移除干扰字样」→「224 行注释措辞规整，非逻辑修复，diff 仅 +1/-1」。
 - 本封板令为 Stage 4 最终法定记录；后续变更须走 Stage 5 或 v1.4 契约修订流程。
