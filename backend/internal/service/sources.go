@@ -47,6 +47,11 @@ func (s *SourceService) Get(ctx context.Context, userID, id uuid.UUID) (*reposit
 // Create 新建书源（src.UserID 必须已设置）。
 func (s *SourceService) Create(ctx context.Context, userID uuid.UUID, src *repository.BookSource) error {
 	src.UserID = userID
+	// v1.4（ADR-010）：AAD = user_id|source_id，因此 id 必须在加密前确定。
+	// Service 显式预生成，Repository.Create 会保留该 id（不再依赖 DB DEFAULT）。
+	if src.ID == uuid.Nil {
+		src.ID = uuid.New()
+	}
 	return s.sources.Create(ctx, s.pool, src)
 }
 

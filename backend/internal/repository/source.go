@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"yreader/backend/internal/pkg/crypto"
 )
 
 // SourceRepository 负责 book_sources 的 CRUD、分页检索与乐观锁更新。
@@ -34,7 +36,66 @@ func scanSource(row pgx.Row) (*BookSource, error) {
 		}
 		return nil, err
 	}
+	// v1.4（ADR-010）：header 落库为 AES-GCM 信封，读取时按 AAD=user_id|source_id 透明解密。
+	if err := openSourceHeader(&s); err != nil {
+		return nil, err
+	}
 	return &s, nil
+}
+
+// sealSourceHeaderValue 返回「写库用」的 header 值：配置了密钥环时封装为
+// {"__enc":"v1:<kid>:<b64>"}；未配置或为空则原样（defaultJSON 兜底 '{}'）。
+// 注意：不修改 s.Header —— API 响应必须回明文，客户端永远不该看到信封。
+func sealSourceHeaderValue(s *BookSource) (json.RawMessage, error) {
+	ring := crypto.DefaultKeyring()
+	if ring == nil || len(s.Header) == 0 {
+		return defaultJSON(s.Header), nil
+	}
+	var probe struct {
+		Enc string `json:"__enc"`
+	}
+	if err := json.Unmarshal(s.Header, &probe); err == nil && probe.Enc != "" {
+		return s.Header, nil // 已是信封（迁移脚本重复执行时幂等）
+	}
+	if !json.Valid(s.Header) {
+		return nil, fmt.Errorf("%w: header is not valid json", ErrInvalidArgument)
+	}
+	sealed, err := ring.Seal(s.Header, crypto.AAD(s.UserID, s.ID))
+	if err != nil {
+		return nil, fmt.Errorf("seal header: %w", err)
+	}
+	wrapped, err := json.Marshal(map[string]string{crypto.EnvelopeKey: sealed})
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(wrapped), nil
+}
+
+// openSourceHeader 把信封还原为明文；未加密的历史行原样返回（迁移前兼容），
+// 但「有 __enc 却解不开」必须报错，严禁静默回退明文。
+func openSourceHeader(s *BookSource) error {
+	if len(s.Header) == 0 {
+		return nil
+	}
+	var probe struct {
+		Enc string `json:"__enc"`
+	}
+	if err := json.Unmarshal(s.Header, &probe); err != nil || probe.Enc == "" {
+		return nil
+	}
+	ring := crypto.DefaultKeyring()
+	if ring == nil {
+		return fmt.Errorf("%w: encrypted header but no YREADER_HEADER_KEY_* configured", crypto.ErrNoKey)
+	}
+	plain, err := ring.Open(probe.Enc, crypto.AAD(s.UserID, s.ID))
+	if err != nil {
+		return fmt.Errorf("open header: %w", err)
+	}
+	if !json.Valid(plain) {
+		return crypto.ErrMalformed
+	}
+	s.Header = json.RawMessage(plain)
+	return nil
 }
 
 func defaultJSON(v json.RawMessage) json.RawMessage {
@@ -44,24 +105,32 @@ func defaultJSON(v json.RawMessage) json.RawMessage {
 	return v
 }
 
-// Create 插入一条书源并回填数据库生成的 id/version/时间戳。
+// Create 插入一条书源并回填 id/version/时间戳。
+// id 由调用方（或此处）预生成：AAD 需要 id，因此不允许依赖 DB DEFAULT。
 func (r *SourceRepository) Create(ctx context.Context, q Querier, s *BookSource) error {
 	if s.BookSourceGroup == "" {
 		s.BookSourceGroup = "默认"
 	}
-	err := q.QueryRow(ctx, `
+	if s.ID == uuid.Nil {
+		s.ID = uuid.New()
+	}
+	header, err := sealSourceHeaderValue(s)
+	if err != nil {
+		return err
+	}
+	err = q.QueryRow(ctx, `
 		INSERT INTO book_sources (
-			user_id, book_source_url, book_source_name, book_source_group,
+			id, user_id, book_source_url, book_source_name, book_source_group,
 			book_source_type, enabled, enabled_explore, weight, respond_time,
 			charset, concurrent_rate, header, login_url, login_check_js, rules,
 			failure_count, last_checked_at, last_success_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-		RETURNING id, version, created_at, updated_at`,
-		s.UserID, s.BookSourceURL, s.BookSourceName, s.BookSourceGroup,
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		RETURNING version, created_at, updated_at`,
+		s.ID, s.UserID, s.BookSourceURL, s.BookSourceName, s.BookSourceGroup,
 		s.BookSourceType, s.Enabled, s.EnabledExplore, s.Weight, s.RespondTime,
-		s.Charset, s.ConcurrentRate, defaultJSON(s.Header), s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules),
+		s.Charset, s.ConcurrentRate, header, s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules),
 		s.FailureCount, s.LastCheckedAt, s.LastSuccessAt,
-	).Scan(&s.ID, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+	).Scan(&s.Version, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil && isUniqueViolation(err) {
 		// 多 %w：既可用 errors.Is(ErrDuplicate) 判断，也可用 errors.As(*pgconn.PgError) 取约束名。
 		return fmt.Errorf("%w: %w", ErrDuplicate, err)
@@ -201,6 +270,10 @@ func (r *SourceRepository) List(ctx context.Context, q Querier, userID uuid.UUID
 // Update 以乐观锁更新书源；version 由数据库触发器维护，SQL 中不显式自增。
 // 版本不匹配（或记录不存在）时返回 ErrVersionConflict。
 func (r *SourceRepository) Update(ctx context.Context, q Querier, s *BookSource, expectedVersion int64) error {
+	header, err := sealSourceHeaderValue(s)
+	if err != nil {
+		return err
+	}
 	tag, err := q.Exec(ctx, `
 		UPDATE book_sources SET
 			book_source_url = $3, book_source_name = $4, book_source_group = $5,
@@ -211,7 +284,7 @@ func (r *SourceRepository) Update(ctx context.Context, q Querier, s *BookSource,
 		WHERE user_id = $1 AND id = $2 AND version = $20`,
 		s.UserID, s.ID, s.BookSourceURL, s.BookSourceName, s.BookSourceGroup,
 		s.BookSourceType, s.Enabled, s.EnabledExplore, s.Weight, s.RespondTime,
-		s.Charset, s.ConcurrentRate, defaultJSON(s.Header), s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules),
+		s.Charset, s.ConcurrentRate, header, s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules),
 		s.FailureCount, s.LastCheckedAt, s.LastSuccessAt, expectedVersion)
 	if err != nil {
 		return err
@@ -224,7 +297,11 @@ func (r *SourceRepository) Update(ctx context.Context, q Querier, s *BookSource,
 
 // UpdateVersioned 是 Update 的便捷变体：更新成功后把触发器自增后的版本回读进 s。
 func (r *SourceRepository) UpdateVersioned(ctx context.Context, q Querier, s *BookSource, expectedVersion int64) error {
-	err := q.QueryRow(ctx, `
+	header, err := sealSourceHeaderValue(s)
+	if err != nil {
+		return err
+	}
+	err = q.QueryRow(ctx, `
 		UPDATE book_sources SET
 			book_source_url = $3, book_source_name = $4, book_source_group = $5,
 			book_source_type = $6, enabled = $7, enabled_explore = $8, weight = $9,
@@ -235,7 +312,7 @@ func (r *SourceRepository) UpdateVersioned(ctx context.Context, q Querier, s *Bo
 		RETURNING version, updated_at`,
 		s.UserID, s.ID, s.BookSourceURL, s.BookSourceName, s.BookSourceGroup,
 		s.BookSourceType, s.Enabled, s.EnabledExplore, s.Weight, s.RespondTime,
-		s.Charset, s.ConcurrentRate, defaultJSON(s.Header), s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules),
+		s.Charset, s.ConcurrentRate, header, s.LoginURL, s.LoginCheckJS, defaultJSON(s.Rules),
 		s.FailureCount, s.LastCheckedAt, s.LastSuccessAt, expectedVersion,
 	).Scan(&s.Version, &s.UpdatedAt)
 	if err == pgx.ErrNoRows {

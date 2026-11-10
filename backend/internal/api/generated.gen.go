@@ -370,7 +370,7 @@ type BookmarkCreate struct {
 type CacheBookRequest struct {
 	FromChapter *int `json:"from_chapter,omitempty"`
 
-	// SourceId 缺省用当前激活源
+	// SourceId 缺省用当前激活源；显式传入时必须与 books.active_source_id 一致，否则 422（当前仅支持预热活跃源目录，多源预热见 DEF-OAS-08）
 	SourceId  *openapi_types.UUID `json:"source_id,omitempty"`
 	ToChapter *int                `json:"to_chapter,omitempty"`
 }
@@ -798,7 +798,7 @@ type Source struct {
 	EnabledExplore *bool     `json:"enabled_explore,omitempty"`
 	FailureCount   *int      `json:"failure_count,omitempty"`
 
-	// Header HTTP 头；敏感值在 Stage 4 以加密信封存储
+	// Header HTTP 头；服务端加密存储（v1.4 AES-GCM 信封），读写对客户端透明
 	Header        *map[string]interface{} `json:"header,omitempty"`
 	Id            openapi_types.UUID      `json:"id"`
 	LastCheckedAt *time.Time              `json:"last_checked_at"`

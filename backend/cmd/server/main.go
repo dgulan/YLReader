@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/engine/sandbox"
 	"yreader/backend/internal/pkg/cache"
+	"yreader/backend/internal/pkg/crypto"
 	"yreader/backend/internal/pkg/storage"
 	"yreader/backend/internal/service"
 )
@@ -55,6 +57,24 @@ func main() {
 			os.Exit(1)
 		}
 		log.Warn("JWT_SECRET not set; using insecure development fallback")
+	}
+
+	// v1.4（ADR-010）：书源 header 信封加密。配置了密钥就必须可解（否则 fail-fast），
+	// 未配置则在开发环境降级为明文并告警；生产中必须配置，避免误以为已加密。
+	ring, err := crypto.LoadKeyringFromEnv()
+	switch {
+	case err == nil:
+		crypto.SetDefaultKeyring(ring)
+		log.Info("book source header encryption enabled", "kid", ring.CurrentKID())
+	case errors.Is(err, crypto.ErrNoKey):
+		if os.Getenv("ENVIRONMENT") == "production" {
+			log.Error("YREADER_HEADER_KEY_<KID> is required in production")
+			os.Exit(1)
+		}
+		log.Warn("book source header encryption disabled; set YREADER_HEADER_KEY_<KID> to enable")
+	default:
+		log.Error("load header keyring", "error", err)
+		os.Exit(1)
 	}
 
 	authSvc := service.NewAuthService(pool, []byte(secret), 30*time.Minute, 30*24*time.Hour)
