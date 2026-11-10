@@ -230,19 +230,19 @@ func TestRelocateFuzzyExplain(t *testing.T) {
 		t.Fatalf("analyze: %v", err)
 	}
 
-	conn, err := pool.Acquire(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("acquire conn: %v", err)
+		t.Fatalf("begin tx: %v", err)
 	}
-	defer conn.Release()
-	// 会话级关闭顺序扫描，确保断言的是索引路径而非小表全扫。
-	if _, err := conn.Exec(ctx, `SET enable_seqscan = off`); err != nil {
+	// 事务级 GUC：SET LOCAL 只在事务内生效，Rollback 后自动失效，绝不污染共享连接池。
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan = off`); err != nil {
 		t.Fatalf("set enable_seqscan: %v", err)
 	}
 
 	// 语义验证：0.6 阈值下最相近的可读章节是 8888 号目标行。
 	var gotIndex int
-	if err := conn.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT chapter_index FROM relocate_fuzzy($1, $2, $3, 8888, 100, 0.6)`,
 		bookID, sourceID, "n:8888:九霄风云录特别篇").Scan(&gotIndex); err != nil {
 		t.Fatalf("call relocate_fuzzy: %v", err)
@@ -253,7 +253,7 @@ func TestRelocateFuzzyExplain(t *testing.T) {
 
 	explain := func(query string, args ...any) string {
 		t.Helper()
-		rows, qerr := conn.Query(ctx, query, args...)
+		rows, qerr := tx.Query(ctx, query, args...)
 		if qerr != nil {
 			t.Fatalf("explain: %v", qerr)
 		}

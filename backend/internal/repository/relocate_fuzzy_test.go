@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -44,6 +45,18 @@ func TestRelocateFuzzySemanticEquivalence(t *testing.T) {
 
 	const target = 250
 	seedRelocateChapters(t, pool, book.ID, src.ID, 500, target, "n:250:九霄风云录特别篇")
+	// GUC 硬约束：`%` 与 similarity >= 0.6 语义等价的前提是 pg_trgm.similarity_threshold <= 0.6。
+	var raw string
+	if err := pool.QueryRow(ctx, `SHOW pg_trgm.similarity_threshold`).Scan(&raw); err != nil {
+		t.Fatalf("show pg_trgm.similarity_threshold: %v", err)
+	}
+	threshold, perr := strconv.ParseFloat(raw, 64)
+	if perr != nil {
+		t.Fatalf("parse pg_trgm.similarity_threshold %q: %v", raw, perr)
+	}
+	if threshold > 0.6 {
+		t.Fatalf("pg_trgm.similarity_threshold = %v, must be <= p_threshold 0.6 (semantic equivalence precondition)", threshold)
+	}
 
 	queries := []string{
 		"n:250:九霄风云录特别篇",
