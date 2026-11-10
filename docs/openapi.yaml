@@ -5,7 +5,7 @@ info:
   version: 1.0.0
   description: |
     ## 状态
-    - Draft v1.4（S5-1：书源 header AES-GCM 信封；S5-4 终审冻结）
+    - Frozen v1.4（Stage 5 终审封板：DEF-SEC-01 Header 信封加密 / DEF-OAS-08 多源预热）
 
     YReader（Clean-Room Reader）前后端契约。
 

@@ -27,6 +27,8 @@
 | DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
 | DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入，正文缓存全量落在缓存抽象层 | 归档（v1.5 架构评估是否保留物理表） |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
+| DEF-CODE-10 | P2 构建 | 本机无 C 工具链，go test -race 不可用（自 M1c 起） | 归档（CI/Docker 环境执行 race 检测） |
+| DEF-CODE-11 | P2 查询优化 | relocate_fuzzy 未使用 % 前置索引谓词，pg_trgm GIN 无法加速函数调用 | 归档（v1.5 契约修订） |
 
 ---
 
@@ -270,6 +272,24 @@
 
 ---
 
+### DEF-CODE-10（P2 构建）：本机无 C 工具链，go test -race 不可用
+
+**问题**：`go test -race` 需要 cgo 与 C 编译器；本机探测 gcc/clang/zig/cc 均缺失，执行即报 `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1`（自 M1c 起持续存在）。
+**替代证据**：涉及并发的批次以「非 race 模式连续两次全量 PASS + 静态锁审查（禁止 SELECT-then-UPDATE、sync.Mutex 仅保护 Start/Shutdown 状态）」替代。
+**后续处置**：CI 流水线在 Linux 镜像内设置 `CGO_ENABLED=1` 执行 `go test -race`，作为合并门禁；本地不阻塞。
+**当前状态**：归档（CI/Docker 环境执行 race 检测）。
+
+---
+
+### DEF-CODE-11（P2 查询优化）：生产换源 relocate_fuzzy 未使用 % 前置索引谓词
+
+**问题**：`docs/schema.sql` §9 `relocate_fuzzy` 函数当前仅写 `similarity(normalized_title, p_normalized_title) >= p_threshold`，未附带 `%` 运算符；`pg_trgm` GIN 索引无法加速函数调用，10k+ 章节的大目录换源 Level 2 存在全表扫描退化风险。
+**建议 v1.5**：函数体内改为 `WHERE ... AND normalized_title % p_normalized_title AND similarity(...) >= p_threshold`，前置 `%` 谓词让 GIN 生效。
+**修复归属**：需修改 `docs/schema.sql` `relocate_fuzzy` 函数定义，属 v1.5 契约变更流程（三份文件 + ADR），不在 S5-4 范围。
+**当前状态**：归档（v1.5 契约修订）
+
+---
+
 ## Stage 4 封板记录（M3c 结项）
 
 - 封板日期：2026-11-10；契约版本：`Frozen v1.3`（openapi / schema / architecture 三份一致），operationId 43 个全唯一。
@@ -284,3 +304,19 @@
 - 不采纳项（记录在案）：上轮审计 P2-3「`TestCacheMultiSourcePreheat` 仅断言 `f.count() != 0`」——`succeeded` 断言已隐含每章成功抓取，且 `res.total` 断言（3 vs 4 章不同）覆盖了源区分；若 S5-4 压测发现覆盖率缺口再补。
 - 本批新登记 DEF-CODE-09（`chapter_cache` 物理表自 M2c 起未被写入 → 归档 v1.5 架构评估）。
 - 单章响应式预热（非任务型，如 `GET /content?prefetch=true`）推迟到 v1.5 设计；S5-2 只交付 Worker 预热路径 `WarmChapterForSource`。
+
+---
+
+## Stage 5 封板记录（v1.4 结项）
+
+- 封板日期：2026-11-10；契约版本：`Frozen v1.4`（openapi / schema / architecture 三份一致），`info.version` 保持 `1.0.0`；公开 `operationId` 仍为 43 个（`/metrics` 与 `/debug/pprof` 挂载于顶层路由，不纳入 OpenAPI）。
+- 各批提交（代码 / 契约文档分离）：
+  - S5-1（DEF-SEC-01 书源 header AES-GCM 信封）：`3033c16` / `52af42f`，后续 import 与 export 明文路径补齐 `22b56b1` / `fbc9d55`、`d49d998` / `1bdde31`。
+  - S5-2（DEF-OAS-08 多源缓存预热）：`86aff0f` / `42b70bb`，收口纠偏 `3a3fc18` / `4dc1363`。
+  - S5-3（DEF-CODE-08 跨节点租约常驻巡检）：`0674470` / `c36df85`。
+  - S5-4（压测、观测收口与本封板）：代码提交 `bdc8336`、契约文档提交「本提交（Stage 5 封板文档）」。
+- 测试跃迁轨迹（集成用例级，`go test -tags integration ./... -count=1 -v`）：Stage 4 基线 85 → S5-1 143 → S5-2 151 → S5-3 155 → S5-4 **160 PASS + 2 SKIP + 0 FAIL**。
+- 43 operationId 零破坏核验：S5-4 仅新增顶层 `/metrics` 与条件挂载的 `/debug/pprof/*`，`docs/openapi.yaml` 未新增任何 path，`operationId:` 计数实测 43。
+- S5-4 观测与压测收口：`backend/internal/api/metrics.go` 注册 `yreader_jobs_total` / `yreader_sandbox_executions_total` / `yreader_ssrf_blocked_total` 并预置零值 series；`/metrics` 免 JWT（反代限内网），`/debug/pprof/*` 由 `PPROF_ENABLED=true` 开启；10k 种子 EXPLAIN 断言 `ix_book_sources_rules_gin`（`rules @>`）与 `ix_chapters_title_trgm`（`%` 前置谓词）均可被选用且不出现 `Seq Scan`。
+- 遗留至 v1.5 的归档项：DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-09（`chapter_cache` 物理表未写入）、DEF-CODE-10（本机无 C 工具链，`-race` 改由 CI/Docker 执行）、DEF-CODE-11（`relocate_fuzzy` 未使用 `%` 前置索引谓词）。
+- 本批未触发 DEF-CODE-12：api 包 goleak `TestMain` 一次通过，仅白名单 `pgxpool.(*Pool).triggerHealthCheck`（纯字符串，无 Markdown 链接）。

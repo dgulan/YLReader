@@ -1,6 +1,6 @@
 # YReader 系统架构与书源沙箱设计
 
-> 状态：Draft v1.4（S5-1：书源 header AES-GCM 信封加密；S5-4 终审冻结）
+> 状态：Frozen v1.4（Stage 5 终审封板：S5-1 信封加密 / S5-2 多源预热 / S5-3 常驻巡检 / S5-4 压测与观测）
 > 对应交付物：本文件、[schema.sql](schema.sql)、[openapi.yaml](openapi.yaml)
 > 上游依据：[summary.md](research/summary.md) 与 6 份单仓研究报告
 > 范围：M1 书源解析核心（优先）、M2 阅读器与书架、M3 本地书库与外围同步的**契约边界**；不含实现代码。
@@ -579,7 +579,7 @@ override **只影响该章正文来源**，不改变 `books.active_source_id`、
 
 #### 4.6.7 多源缓存预热与目录归属（v1.4，DEF-OAS-08）
 
-- 预热目标源由 `POST /books/{bookId}/cache` 的 `CacheBookRequest.source_id` 指定，缺省为 `books.active_source_id`；显式传入时必须属于该书 `book_source_mappings` 中已绑定的源。
+- 预热目标源由 `POST /books/{bookId}/cache` 的 `CacheBookRequest.source_id` 指定，缺省为 `books.active_source_id`；显式传入时必须属于该书 `book_source_mappings` 中已绑定的源，且目标源 chapters 存在至少一条可读章节记录，否则返回 422 relocation_failed。
 - 预热只写正文缓存键 `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`（Redis 或内存），同书不同源缓存键相互隔离，**不改变** `books.active_source_id`，**不改变** `chapters` 表；目标源 `chapter_url` 一律取自 `chapters` 表 `(book_id, target_source_id, chapter_index)` 记录，严禁借用活跃源 URL。
 - 锁粒度按书+源：`pg_advisory_xact_lock(hashtextextended('cache:' || book_id || ':' || source_id, 0))`；同书不同源可并行预热，同书同源仍返回 409。
 
@@ -844,6 +844,9 @@ RETURNING *;
 | `yreader_jobs_total` | counter | `type`,`status` |
 | `yreader_progress_conflicts_total` | counter | — |
 
+`/metrics` 端点挂载于顶层路由（免 JWT 鉴权，由反代限制内网访问），不纳入 OpenAPI 公开 `operationId`；
+`/debug/pprof/*` 仅在 `PPROF_ENABLED=true` 时挂载，同样不纳入 `operationId`。
+
 ### 8.3 日志字段（结构化 JSON）
 
 `ts, level, msg, request_id, trace_id, user_id, source_id, book_id, phase, elapsed_ms, error_code`。
@@ -955,7 +958,7 @@ RETURNING *;
 | ADR-007 | 检索列提升 + 规则 JSONB + GIN | 兼容 Legado 全量字段且可检索 | GIN 只服务包含/存在性；复杂查询需表达式索引 |
 | ADR-008 | OpenAPI 驱动生成 DTO | 前后端契约单一来源 | 生成代码需纳入 Lint |
 | ADR-009 | 章节级源覆盖用独立表 `chapter_source_overrides` 而非 `chapters` 增加列 | 避免污染 `chapters`、支持级联删除语义清晰 | 多一次 JOIN 查询 |
-| ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径 | 旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
+| ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径；旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
 | ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
 | ADR-012 | WorkerPool 常驻巡检：启动同步初检 + 每 10min Ticker；全部 worker/巡检统一派生 ctx；Shutdown 取消派生 ctx 后双通道 `wg.Wait()` | 跨节点宕机残留任务脱离仅靠重启自愈的局限；消灭停机等待死锁风险；`reaperInterval` 可注入便于测试 | 每节点多一个常驻 goroutine；巡检占用连接，受 `MaxConns` 预算约束 |
 
