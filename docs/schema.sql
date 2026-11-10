@@ -646,6 +646,8 @@ $$;
 -- 再用 similarity(...) >= p_threshold 二次过滤保证精度。
 -- % 的判定阈值来自 pg_trgm.similarity_threshold（默认 0.3，是相似度下限），
 -- 因此 % 结果集 ⊇ similarity >= p_threshold 结果集（p_threshold=0.6 时），语义等价。
+-- 语义等价硬约束：本函数要求运行环境 pg_trgm.similarity_threshold <= p_threshold（默认 0.3 <= 0.6）。
+-- 严禁在会话或全局将该 GUC 调高于 p_threshold，否则 % 前置谓词会提前截断候选集破坏等价性。
 CREATE OR REPLACE FUNCTION relocate_fuzzy(
   p_book_id uuid, p_source_id uuid, p_normalized_title text,
   p_old_index integer, p_window integer DEFAULT 100, p_threshold real DEFAULT 0.6

@@ -962,7 +962,7 @@ RETURNING *;
 | ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
 | ADR-012 | WorkerPool 常驻巡检：启动同步初检 + 每 10min Ticker；全部 worker/巡检统一派生 ctx；Shutdown 取消派生 ctx 后双通道 `wg.Wait()` | 跨节点宕机残留任务脱离仅靠重启自愈的局限；消灭停机等待死锁风险；`reaperInterval` 可注入便于测试 | 每节点多一个常驻 goroutine；巡检占用连接，受 `MaxConns` 预算约束 |
 | ADR-013（草案，待项目方裁定） | `chapter_cache` 物理表最终处置：**方案 A 删除该表**（缓存统一由 Redis / 对象存储承载）或 **方案 B 保留该表并重新接入对象存储层缓存** | 现状已分叉：表与索引、§6.3 失效矩阵都已定义，但服务层缓存实际写入 Redis key `yreader:cache:content:*`，该表从未写入 | 方案 A：v1.5 DDL 删除表并清理 §6.3 矩阵、补迁移脚本；方案 B：需扩展 `storage.Provider`，并承担「Redis + 对象存储」双重缓存的一致性与清理成本 |
-| ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退） |
+| ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退）。硬约束：运行环境必须保证 `pg_trgm.similarity_threshold <= p_threshold`（默认 0.3 ≤ 0.6），否则 `%` 前置谓词提前截断候选集，语义等价失效。 |
 
 ### 12.1 ADR-013 草案全文（DEF-CODE-09，S6-1 交付，待裁定）
 
@@ -974,13 +974,15 @@ RETURNING *;
 - 代价：需要一次 DDL 变更与迁移脚本；历史 `chapter_cache` 行（本环境为空）不可回读；缓存容量规划完全落到 Redis/内存。
 - 兼容性：对外 API 无变化（正文响应字段不变）。
 
-**方案 B：保留表并重新接入对象存储层缓存**
-- 变更：扩展 `storage.Provider` 增加「按 book/source/chapter 的缓存读写 + 前缀清理」能力；`ContentService` 写正文时同时落 `chapter_cache`（或改由 `storage` 直写、表只存元数据）。
+**方案 B：保留表并重新接入对象存储层缓存（细分 B1 / B2）**
+- 变更（`storage.Provider` 已具备 `Put` / `Get` / `Delete` / `Exists` / `DeletePrefix` 五个方法，正文缓存的实际入口是 `ContentService.storeCache`，被 `Get` 与 `WarmChapterForSource` 共用）：
+  - **B1**：`ContentService.storeCache` 在写 Redis 的同时同步 `INSERT/UPDATE chapter_cache`（表只存元数据 + `object_key`），正文落 `storage`；
+  - **B2**：`chapter_cache` 表只存 `object_key` 与元数据，正文完全由 `storage` 承载，Service 负责两级缓存的读取优先级与过期清理。
 - 优点：缓存可持久化到本地盘/S3，重启与跨实例可复用；便于按书清理。
 - 代价：与 Redis 缓存并存 → 需定义两级优先级、失效顺序与容量上限；`storage.Provider` 接口与 LocalFS/S3 实现都要扩展；`§6.3` 矩阵需重写为两级。
 - 兼容性：对外 API 无变化。
 
-**待裁定项**：选 A 或 B；若选 A，是否允许在 v1.5 中直接 `DROP TABLE`（含存量环境清空确认）；若选 B，两级缓存的优先级与清理责任方（Service 统一清理 vs 各缓存自清）。
+**待裁定项**：选 A 或 B；若选方案 B，进一步裁定选 B1 还是 B2；若选 A，是否允许在 v1.5 中直接 `DROP TABLE`（含存量环境清空确认）；若选 B，两级缓存的优先级与清理责任方（Service 统一清理 vs 各缓存自清）。
 
 **本批不落 DDL**：S6-1 仅交付本草案，`docs/schema.sql` 中 `chapter_cache` 定义保持不变。
 

@@ -290,8 +290,12 @@
 **修复归属**：需修改 `docs/schema.sql` `relocate_fuzzy` 函数定义，属 v1.5 契约变更流程（三份文件 + ADR），不在 S5-4 范围。
 
 **v1.5（S6-1）处置**：`relocate_fuzzy` 已加入 `AND c.normalized_title % p_normalized_title` 前置谓词（在 `similarity >= p_threshold` 之前），并附 v1.5 注释说明语义等价；新增 `TestRelocateFuzzyExplain` 以生产阈值 0.6 断言：宽窗口（`chapter_index BETWEEN 0 AND 9999`）命中 `ix_chapters_title_trgm`，默认 ±100 窗口无 `Seq Scan`，且 `relocate_fuzzy(...)` 返回目标行 8888。计划差异与取舍记录于 ADR-014。本条闭环。
-**当前状态**：归档（v1.5 契约修订）
+**当前状态**：已闭环 (v1.5, S6-1)
+
 **S5-4 证据边界**：`TestChaptersTitleTrigramExplain` 使用 `SET LOCAL pg_trgm.similarity_threshold = 0.85` 收敛到 10 条目标行，确定性证明 `ix_chapters_title_trgm` 可服务 `%` 谓词；该结果**不等于**生产 `relocate_fuzzy` 在 0.6 阈值下的查询计划——0.6 阈值下候选集更大，GIN cost 上升，规划器仍可能选 `(book_id, source_id)` btree 位图；且生产函数当前未加 `%` 前置谓词，GIN 无法被调用。v1.5 修复后需以生产实际阈值 0.6 重新 EXPLAIN 断言，方可宣告 GIN 生效。
+
+**GUC 硬约束**：`%` 与 `similarity >= p_threshold` 语义等价的前提是运行环境 `pg_trgm.similarity_threshold <= p_threshold`（默认 0.3 ≤ 0.6），详见 `schema.sql` §9 与 `ADR-014`。
+
 ---
 
 ## Stage 4 封板记录（M3c 结项）
@@ -331,15 +335,15 @@
 
 ## Stage 6 进展（v1.5，进行中）
 
-> S6-1 进行中；S6-4 终审后才写「Stage 6 封板记录」。
+> S6-1 已于本批签发结项（代码 `f9054b0` + 收口提交 / 契约 `fe7a3f1` + 收口提交）；S6-2 及后续批次待项目方 4 项前置裁定（`DEF-CODE-09` 方案 A/B1/B2、`info.version` 策略、前端测试基线、提交粒度）后开工；S6-4 终审后才写「Stage 6 封板记录」。
 
 | 编号 | 本批处置 | 状态 |
 |---|---|---|
 | DEF-CODE-04 | `ImportService.pool` 抽象为 `importPool` 窄接口 + `failingProbePool`；`TestHandleCommitError_ProbeFails` 去 Skip 实跑 | 已闭环 |
 | DEF-CODE-10 | 新增 `.github/workflows/race.yml`（PG16 + Redis 服务容器、schema 预置、`CGO_ENABLED=1 go test -race -tags integration ./...`） | 已提供 CI 配置，待首次流水线日志 |
 | DEF-CODE-11 | `relocate_fuzzy` 加 `%` 前置谓词；`TestRelocateFuzzyExplain` 以 0.6 阈值断言 GIN（宽窗口）与无 Seq Scan（窄窗口） | 已闭环 |
-| DEF-CODE-09 | 交付 ADR-013 草案（方案 A 删表 / 方案 B 保留并接对象存储层缓存），本批不改 DDL | 待项目方裁定 |
+| DEF-CODE-09 | 交付 ADR-013 草案（方案 A 删表 / 方案 B1 表存元数据+正文落 storage / 方案 B2 表只存 object_key），本批不改 DDL | 待项目方裁定 |
 
 - 契约版本：三份顶部均为 `Draft v1.5`（S6-1 起），S6-4 终审通过后改 `Frozen v1.5`。
 - `info.version` 仍保持 `1.0.0`（是否跳跃待项目方在 S6-4 裁定）。
-- 门禁基线：Stage 5 封板 160 PASS + 2 SKIP；S6-1 因 DEF-CODE-04 去 Skip，SKIP 由 2 降至 1，另新增 `TestRelocateFuzzyExplain` 1 项。
+- 门禁基线：Stage 5 封板 160 PASS + 2 SKIP；S6-1 因 DEF-CODE-04 去 Skip，SKIP 由 2 降至 1，另新增 relocate 相关 3 项，实测 164 PASS + 1 SKIP + 0 FAIL。
