@@ -24,6 +24,7 @@
 | DEF-CODE-06 | P3 并发 | POST /cache 单书防重存在理论竞态 | 已闭环 (Advisory Lock 显式事务) |
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
 | DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 归档 |
+| DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 转入 Stage 5 (v1.4) |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
 
 ---
@@ -216,6 +217,14 @@
 ---
 
 
+### DEF-SEC-01（P1 安全）：书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密
+
+**问题**：当前书源 `header` 中的 Cookie/token 等敏感凭证以 JSONB 明文存储在数据库中，未做应用层加密防护。
+**处置决议**：Stage 4 已正式封板，该项安全缺口不回退代码返工，正式转入 Stage 5 首项任务（作为 v1.4 契约演进的首要特性实现）。
+**当前状态**：转入 Stage 5 (v1.4)。
+
+---
+
 ### DEF-BEHAVIOR-01（P3 行为）：handleCommitError 三态语义变更记录
 
 **变更记录**：
@@ -235,5 +244,5 @@
 - 封板日期：2026-11-10；契约版本：`Frozen v1.3`（openapi / schema / architecture 三份一致），operationId 43 个全唯一。
 - 回归基线：85 项 = 83 PASS + 2 SKIP（`TestContentCacheRedisKeyAndTTL` 需 `REDIS_ADDR`；`TestHandleCommitError_ProbeFails` 见 DEF-CODE-04）。
 - 终审收口：P3-1（failJob 独立上下文）已于 M3c 修复闭环——`failJob` 移除 `ctx.Err()` 短路并统一 `context.Background()`，Shutdown 窗口内 `ListByBookSourceRange` 失败也能可靠落终态。
-- 转入后续版本统一管理的归档项：P3-2（优雅停机瞬态中间进度更新可能丢失，不影响终态语义）、DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-08（跨节点常驻巡检）、DEF-OAS-08（多源缓存预热）。
+- 转入后续版本统一管理的归档项：P3-2（优雅停机瞬态中间进度更新可能丢失，不影响终态语义）、DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-08（跨节点常驻巡检）、DEF-OAS-08（多源缓存预热）。DEF-SEC-01 归档流转至 Stage 5（v1.4，书源 header AES-GCM 信封加密）。
 - 本封板令为 Stage 4 最终法定记录；后续变更须走 Stage 5 或 v1.4 契约修订流程。

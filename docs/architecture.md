@@ -590,7 +590,7 @@ override **只影响该章正文来源**，不改变 `books.active_source_id`、
 | 内容类型 | 请求/响应 `application/json; charset=utf-8` |
 | 命名 | JSON 一律 `snake_case`（与 DB 对齐，减少映射歧义） |
 | 分页 | `page`（1 起）+ `page_size`（默认 20，最大 100）；响应 `{items,total,page,page_size}` |
-| 幂等 | 所有 POST 创建类接口接受 `Idempotency-Key` 头，24h 内同键返回同一结果 |
+| 幂等 | 创建类 POST 接口预留 Idempotency-Key 头；仅校验格式（8–128 字符）并记录日志，当前批次不做 24h 强去重，防重依赖业务端点自身规则（如 POST /books/{bookId}/cache 的咨询锁原子防重与在途任务拦截） |
 | 并发 | 进度写用 `If-Match`；书源/书籍更新用 `If-Unmodified-Since` 或 `version` 字段（二选一，OpenAPI 以 `version` 为准） |
 | 时间 | 全部 RFC 3339 UTC（`2026-01-01T00:00:00Z`） |
 | 请求追踪 | 响应头 `X-Request-Id`；错误体带 `request_id` |
@@ -741,7 +741,7 @@ override **只影响该章正文来源**，不改变 `books.active_source_id`、
 `jobs` 表是队列权威，Worker 用 `FOR UPDATE SKIP LOCKED` 租约，避免 Redis 丢消息：
 
 ```sql
-UPDATE jobs SET status='running', started_at=now(), attempts=attempts+1
+UPDATE jobs SET status='running', started_at=now(), worker_id=$1, attempts=attempts+1
 WHERE id = (
   SELECT id FROM jobs
    WHERE status='queued'
@@ -752,7 +752,8 @@ WHERE id = (
 RETURNING *;
 ```
 
-- 租约超时（`started_at + 5min`）→ 重新入队；`attempts >= 3` → `failed`。
+- （注：基础任务调度与租约模型已被 §6.2.3 M3c 演进规则完全取代）。
+- 租约与自愈：WorkerPool 认领任务时原子绑定 worker_id 并将 status 置为 running；同机旧实例秒级自愈，跨机超过 2 小时租约上限（60 分钟单任务执行预算 + 60 分钟故障缓冲）的存量任务由节点启动扫描置为 failed 终态。
 - 任务幂等：`payload` 内含 `(book_id, source_id, chapter_range)`，重复执行结果一致。
 - 追更巡检：按 `books.last_read_at` 分层调度（近 7 天每天，30 天内每 3 天，其余每周）。
 
@@ -795,7 +796,7 @@ RETURNING *;
 | 密钥 | 环境变量/Secret 注入；DB 中不存明文密码、refresh token（只存哈希） |
 | 反爬合规 | 遵守目标站 robots 与限流；`User-Agent` 可配置；不实现验证码破解 |
 
-**已知缺口（Stage 4 需补）**：书源 `header` 中的 Cookie/token 目前以 jsonb 明文存储，Stage 4 必须加应用层 AES-GCM 信封（`{"__enc":"v1:..."}`）或独立加密列，并在 `architecture.md` 追加 ADR。
+**已知缺口（转入 Stage 5）**：书源 header 中的 Cookie/token 目前以 jsonb 明文存储，Stage 4 未闭环，正式转入 Stage 5 首项任务（作为 v1.4 契约与安全演进首要特性，对应 DEF-SEC-01）。
 
 ---
 
@@ -949,7 +950,7 @@ RETURNING *;
 | R1 | Legado 规则边角语义（`$n` 非正则分组、`getStringList` 按 `\n` 切分、`Entities.unescape`）实现偏差 | 黄金测试集 + 与 `changshengyu_reader-dev` 行为对拍（只对拍输出，不复制代码） |
 | R2 | goja 与 Rhino 的 JS 差异（ES 版本、`importClass`） | 白名单桥接 + 明确 422；不支持的能力进 `unsupported_features` 报告 |
 | R3 | trigram 模糊匹配对「第1章」类同质标题失效 | 距离窗口 + 同分取最近；低置信度提示；允许手动选章 |
-| R4 | 书源 header 明文存储 | Stage 4 加密信封（§7 缺口） |
+| R4 | 书源 header 明文存储 | 转入 Stage 5 首项实现应用层 AES-GCM 加密信封（DEF-SEC-01） |
 | R5 | 单进程 Worker 与 API 争抢资源 | `WORKER_ENABLED` 拆分 + 独立并发上限 |
 | R6 | `rules` JSONB 被误用于检索 | §4.3 CI Lint + EXPLAIN 断言 |
 | R7 | 参考仓库许可证/来源风险 | 净室：只对拍行为，不复制代码；`warpdotsys` 反编译来源仅作黑盒 |

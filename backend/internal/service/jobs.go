@@ -221,7 +221,7 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		FromChapter *int   `json:"from_chapter"`
 		ToChapter   *int   `json:"to_chapter"`
 	}
-	// 终态写入一律使用独立 context.Background()：Shutdown 窗口内父 ctx 已取消时，
+	// 终态写入一律使用独立的 Background 上下文：Shutdown 窗口内父 ctx 已取消时，
 	// 任务状态仍必须可靠落库，避免 job 永远停在 running。
 	if err := json.Unmarshal(job.Payload, &p); err != nil {
 		_ = s.jobs.MarkFailed(context.Background(), s.pool, jobID, "internal_error", "invalid job payload")
