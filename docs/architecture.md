@@ -731,7 +731,7 @@ override **只影响该章正文来源**，不改变 `books.active_source_id`、
 | `source:health:{source_id}` | hash | 600s | 熔断窗口内的失败计数（DB `source_failures` 为权威） |
 | `rate:source:{source_id}` | string(令牌桶) | 动态 | `concurrent_rate` 窗口限速 |
 | `rate:host:{host}` | string(令牌桶) | 动态 | 域名级保护，默认 10 rps/域名 |
-| `idem:{user_id}:{key}` | string | 24h | POST 幂等键 → 响应快照 |
+| `idem:{user_id}:{key}` | string | 24h | POST 幂等键 → 响应快照（预留 key 规范：当前批次未启用强幂等，见 §5.1） |
 | `lock:book:{book_id}` | string(SET NX PX) | 30s | 同书并发刷新目录/换源的短锁（DB 事务仍是最终一致） |
 
 **MUST**：Redis 只做缓存与限流，**不得**作为任何业务数据的唯一副本；Redis 整体丢失后系统必须能从 PG 重建。
