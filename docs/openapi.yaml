@@ -1,0 +1,1978 @@
+openapi: 3.0.3
+
+info:
+  title: YReader API
+  version: 1.0.0
+  description: |
+    ## 状态
+    - Frozen v1.3（Stage 2 契约冻结 + 章节级源覆盖 + 本地书库 + M3c 技术债务清偿）
+
+    YReader（Clean-Room Reader）前后端契约。
+
+    ## 全局约定
+    - 所有路径前缀 `/api/v1`（健康检查除外）。
+    - 字段命名一律 `snake_case`，与 `docs/schema.sql` 对齐。
+    - 认证：`Authorization: Bearer <access_jwt>`；access 15 分钟，refresh 30 天并轮换。
+    - 分页：`page` 从 1 起，`page_size` 默认 20、最大 100。
+    - 时间：RFC 3339 UTC。
+    - 幂等：创建类 POST 支持 `Idempotency-Key`（24h）。
+    - 并发：进度写必须带 `If-Match: "<version>"`；书源/书籍写以请求体 `version` 做乐观锁。
+
+    ## 错误模型
+    所有非 2xx 响应体为 `ErrorResponse`。`error.code` 是稳定枚举，客户端不得依赖 `message` 文案。
+    关键区分：`sandbox_timeout`（504，JS 超时，触发书源降权）与 `rule_execution_failed`（422，规则逻辑错误，不熔断）。
+
+    ## 硬性预算（服务端强制）
+    - 单次书源操作总墙钟 10s；单次 JS 执行 3s；JS 输出 1 MiB。
+    - HTTP 响应体 16 MiB；重定向 ≤ 5 跳；重试 ≤ 2 次（共 3 attempts）。
+    - 目标站命中内网/保留地址一律 403 `blocked_private_address`。
+  contact:
+    name: YReader
+  license:
+    name: Proprietary
+
+servers:
+  - url: /api/v1
+    description: 同源部署（推荐）
+  - url: http://localhost:8080/api/v1
+    description: 本地开发
+
+tags:
+  - name: auth
+    description: 认证与会话
+  - name: sources
+    description: 书源管理与规则调试
+  - name: search
+    description: 多源搜索
+  - name: books
+    description: 书架与多源映射
+  - name: reader
+    description: 目录与正文
+  - name: progress
+    description: 阅读进度与换源重定位
+  - name: bookmarks
+    description: 书签
+  - name: replace-rules
+    description: 替换净化规则
+  - name: jobs
+    description: 异步任务
+  - name: settings
+    description: 用户设置
+  - name: health
+    description: 健康检查
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      operationId: login
+      summary: 用户名密码登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      operationId: refreshToken
+      summary: 刷新 access token（refresh 轮换）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: 新 token 对
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokensResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 吊销当前 refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '204':
+          description: 已吊销
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentUser
+      summary: 当前用户
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sources:
+    get:
+      tags: [sources]
+      operationId: listSources
+      summary: 书源列表
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: q
+          in: query
+          description: 名称/URL 模糊搜索（走 trigram，禁止匹配 rules JSON 内部）
+          schema: { type: string, maxLength: 100 }
+        - name: group
+          in: query
+          schema: { type: string, maxLength: 64 }
+        - name: enabled
+          in: query
+          schema: { type: boolean }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [weight_desc, name_asc, updated_desc]
+            default: weight_desc
+      responses:
+        '200':
+          description: 分页书源
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourcePage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [sources]
+      operationId: createSource
+      summary: 新建书源
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceCreate'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /sources/import:
+    post:
+      tags: [sources]
+      operationId: importSources
+      summary: 导入 Legado 书源 JSON（不执行任何规则）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImportRequest'
+      responses:
+        '200':
+          description: 导入结果（dry_run 时仅报告）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /sources/export:
+    get:
+      tags: [sources]
+      operationId: exportSources
+      summary: 导出为 Legado 兼容 JSON（未知键原样保留）
+      parameters:
+        - name: ids
+          in: query
+          description: 指定书源 id；省略则导出全部
+          style: form
+          explode: false
+          schema:
+            type: array
+            maxItems: 5000
+            items: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 书源数组（Legado 3.0 字段）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Source'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /sources/{sourceId}:
+    parameters:
+      - $ref: '#/components/parameters/SourceId'
+    get:
+      tags: [sources]
+      operationId: getSource
+      summary: 书源详情
+      responses:
+        '200':
+          description: 书源
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [sources]
+      operationId: updateSource
+      summary: 更新书源（`version` 乐观锁）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceUpdate'
+      responses:
+        '200':
+          description: 更新后的书源
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+    delete:
+      tags: [sources]
+      operationId: deleteSource
+      summary: 删除书源（关联书进入「待换源」状态）
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /sources/{sourceId}/debug:
+    parameters:
+      - $ref: '#/components/parameters/SourceId'
+    post:
+      tags: [sources]
+      operationId: debugSourceRule
+      summary: 规则调试（逐级 StepTrace）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DebugRequest'
+      responses:
+        '200':
+          description: 调试结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DebugResult'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /search:
+    get:
+      tags: [search]
+      operationId: searchBooks
+      summary: 多源并行搜索（部分失败不整体失败）
+      parameters:
+        - name: keyword
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 100 }
+        - name: source_ids
+          in: query
+          description: 省略则使用用户全部启用书源（上限 20 个）
+          style: form
+          explode: false
+          schema:
+            type: array
+            maxItems: 20
+            items: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: 分组搜索结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /books:
+    get:
+      tags: [books]
+      operationId: listBooks
+      summary: 书架列表（含进度摘要）
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+        - name: q
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [unknown, serializing, completed, paused]
+        - name: needs_source
+          in: query
+          description: 仅返回 active_source_id 为空的「待换源」书
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: 分页书架
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [books]
+      operationId: addBook
+      summary: 加入书架（同书已存在时只新增源映射，返回 200）
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookCreate'
+      responses:
+        '200':
+          description: 已存在，已追加映射
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '201':
+          description: 新建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /books/import:
+    post:
+      tags: [books]
+      operationId: importLocalBook
+      summary: 导入本地 EPUB / TXT 书籍（原始字节流 + query 元数据）
+      description: |
+        直接以 `application/octet-stream` 上传原始文件字节，避免 multipart 绑定开销。
+        `filename` 仅用于扩展名判定与展示，服务端会做路径清洗；`title`/`author` 可覆盖文件内元数据。
+        文件类型以魔数优先（EPUB 为 ZIP `PK\x03\x04`），扩展名严格白名单 `.epub` / `.txt`。
+        同一用户重复导入同一文件（SHA-256 命中）返回 200 且不重复建书。
+        当省略或传入空白 title 时，若与同用户已有书籍同名同作者，服务端自动追加 (n) 后缀以保证唯一性，
+        返回 201 Created；仅在显式传入非空 title 冲突或达到重命名尝试上限时返回 409 Conflict。
+      parameters:
+        - name: filename
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 512 }
+          description: 原始文件名（用于扩展名判定；服务端做 path.Base 清洗）
+        - name: title
+          in: query
+          schema: { type: string, maxLength: 512 }
+          description: 覆盖书名；缺省取文件元数据或文件名
+        - name: author
+          in: query
+          schema: { type: string, maxLength: 128 }
+          description: 覆盖作者；缺省取文件元数据
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '201':
+          description: 导入成功（新建书籍）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookImportResult' }
+        '200':
+          description: 该文件已导入过（SHA-256 幂等命中，含并发双击场景）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookImportResult' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 显式指定的 title 与同用户已有书籍同名同作者
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /books/{bookId}:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      tags: [books]
+      operationId: getBook
+      summary: 书籍详情
+      responses:
+        '200':
+          description: 书籍
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [books]
+      operationId: updateBook
+      summary: 更新书籍元数据（自定义封面/状态/分组）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookUpdate'
+      responses:
+        '200':
+          description: 更新后的书籍
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [books]
+      operationId: deleteBook
+      summary: 删除书（级联 DB 行；对象存储异步清理）
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /books/{bookId}/chapters:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      tags: [reader]
+      operationId: listChapters
+      summary: 章节目录
+      parameters:
+        - name: source_id
+          in: query
+          description: 省略则用 books.active_source_id
+          schema: { type: string, format: uuid }
+        - name: refresh
+          in: query
+          description: true 时强制回源刷新（受 10s 总预算约束）
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: 目录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChapterList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /books/{bookId}/chapters/{chapterIndex}/override:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+      - name: chapterIndex
+        in: path
+        required: true
+        description: 以当前激活书源（books.active_source_id）目录为准的可读章节序号（0..N-1）
+        schema: { type: integer, minimum: 0 }
+    post:
+      tags: [reader]
+      operationId: setChapterOverride
+      summary: 设置或更新单章源覆盖（Upsert：匹配书源并试抓正文，成功后落库并刷新缓存）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChapterOverrideCreate'
+      responses:
+        '200':
+          description: 覆盖已生效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChapterOverride'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '502':
+          $ref: '#/components/responses/ServerError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+    delete:
+      tags: [reader]
+      operationId: deleteChapterOverride
+      summary: 重置单章覆盖（移除覆盖并清理该章 override 缓存，恢复原激活源）
+      responses:
+        '204':
+          description: 已重置
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /books/{bookId}/content:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      tags: [reader]
+      operationId: getChapterContent
+      summary: 章节正文（`chapter_index` 与 `chapter_id` 二选一）
+      parameters:
+        - name: chapter_index
+          in: query
+          description: >-
+            chapter_index 与 chapter_id 必须提供且仅提供其一；都缺失或都提供时返回 400 validation_error。
+          schema: { type: integer, minimum: 0 }
+        - name: chapter_id
+          in: query
+          description: >-
+            chapter_index 与 chapter_id 必须提供且仅提供其一；都缺失或都提供时返回 400 validation_error。
+          schema: { type: integer, minimum: 1, format: int64 }
+        - name: source_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: prefetch
+          in: query
+          description: 预热下一章（不返回正文）
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: >-
+            正文。读取顺序：先查该章是否有 status='active' 的 override，命中则用 override.source_id + chapter_url 拉取正文；
+            未命中或 override 为 stale 时走 books.active_source_id。响应中的 source_id 与 is_overridden 标识实际来源。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChapterContent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+
+  /books/{bookId}/progress:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      tags: [progress]
+      operationId: getProgress
+      summary: 当前阅读进度
+      responses:
+        '200':
+          description: 进度（无记录时返回 0 值）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Progress'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [progress]
+      operationId: updateProgress
+      summary: 更新进度（必须 If-Match，冲突返回双方进度）
+      parameters:
+        - $ref: '#/components/parameters/IfMatchRequired'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgressUpdate'
+      responses:
+        '200':
+          description: 新进度
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Progress'
+        '409':
+          description: 版本冲突（附 current/incoming）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressConflict'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+
+  /books/{bookId}/switch-source:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    post:
+      tags: [progress]
+      operationId: switchSource
+      summary: 换源（三级重定位）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchSourceRequest'
+      responses:
+        '200':
+          description: 重定位结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwitchSourceResult'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /books/{bookId}/mappings:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      tags: [books]
+      operationId: listMappings
+      summary: 书籍的多源绑定
+      responses:
+        '200':
+          description: 映射列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/BookSourceMapping'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [books]
+      operationId: addMapping
+      summary: 追加备用书源
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MappingCreate'
+      responses:
+        '201':
+          description: 已追加
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BookSourceMapping'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /books/{bookId}/mappings/{mappingId}:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+      - name: mappingId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [books]
+      operationId: deleteMapping
+      summary: 移除备用源（当前激活源不可移除）
+      responses:
+        '204':
+          description: 已移除
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /books/{bookId}/bookmarks:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    get:
+      tags: [bookmarks]
+      operationId: listBookmarks
+      summary: 书签列表
+      responses:
+        '200':
+          description: 书签
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Bookmark'
+    post:
+      tags: [bookmarks]
+      operationId: createBookmark
+      summary: 新建书签
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BookmarkCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Bookmark'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /bookmarks/{bookmarkId}:
+    parameters:
+      - name: bookmarkId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    delete:
+      tags: [bookmarks]
+      operationId: deleteBookmark
+      summary: 删除书签
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /replace-rules:
+    get:
+      tags: [replace-rules]
+      operationId: listReplaceRules
+      summary: 替换规则列表
+      parameters:
+        - name: enabled
+          in: query
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: 规则列表
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReplaceRule'
+    post:
+      tags: [replace-rules]
+      operationId: createReplaceRule
+      summary: 新建替换规则
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceRuleCreate'
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplaceRule'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /replace-rules/{ruleId}:
+    parameters:
+      - name: ruleId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [replace-rules]
+      operationId: updateReplaceRule
+      summary: 更新替换规则
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceRuleUpdate'
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplaceRule'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [replace-rules]
+      operationId: deleteReplaceRule
+      summary: 删除替换规则
+      responses:
+        '204':
+          description: 已删除
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /books/{bookId}/cache:
+    parameters:
+      - $ref: '#/components/parameters/BookId'
+    post:
+      tags: [jobs]
+      operationId: cacheBook
+      summary: 提交整本缓存任务
+      description: >-
+        提交后返回 202 与 queued 任务，由 Worker 以 DB 权威队列消费。422 触发条件：本地书、
+        无活跃源、活跃源已禁用，或显式 source_id 与活跃源不一致（多源预热尚未支持，见 DEF-OAS-08）。
+        同书同类型存在 queued/running 任务时返回 409；防重通过 advisory lock 事务保证原子性。
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CacheBookRequest'
+      responses:
+        '202':
+          description: 已入队
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /jobs/{jobId}:
+    parameters:
+      - name: jobId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [jobs]
+      operationId: getJob
+      summary: 任务状态
+      responses:
+        '200':
+          description: 任务
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [jobs]
+      operationId: cancelJob
+      summary: 取消任务
+      description: 取消指定任务。queued 任务在数据库中直接置为 canceled；running 任务通过 Context 发送取消信号，Worker 在章节边界检查点主动退出，已完成的章节保持缓存，不予回滚。
+      responses:
+        '204':
+          description: 已取消
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /settings:
+    get:
+      tags: [settings]
+      operationId: getSettings
+      summary: 获取用户设置（扁平 key/value）
+      responses:
+        '200':
+          description: 设置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+    patch:
+      tags: [settings]
+      operationId: patchSettings
+      summary: 合并更新设置（浅合并）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingsPatch'
+      responses:
+        '200':
+          description: 更新后的设置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Settings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+
+  /healthz:
+    get:
+      tags: [health]
+      security: []
+      operationId: healthz
+      summary: 存活检查
+      servers:
+        - url: /
+      responses:
+        '200':
+          description: 进程存活
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+                required: [status]
+
+  /readyz:
+    get:
+      tags: [health]
+      security: []
+      operationId: readyz
+      summary: 就绪检查（PG/Redis/Storage）
+      servers:
+        - url: /
+      responses:
+        '200':
+          description: 依赖就绪
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok, degraded] }
+                  checks:
+                    type: object
+                    additionalProperties:
+                      type: string
+                      enum: [ok, fail]
+                required: [status, checks]
+        '503':
+          description: 依赖不可用
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        access token（15 分钟）。claims 必须包含 sub、role、tv（token_version）、exp。
+        服务端每次请求比对 users.token_version；不一致立即 401。
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: page_size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    SourceId:
+      name: sourceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    BookId:
+      name: bookId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: 可选请求幂等键。服务端校验格式（8-128 字符）并在日志中记录以供链路追踪；当前批次不进行强幂等去重，防重依赖单书在途任务拦截（同书同类型 queued/running 响应 409）。
+      schema: { type: string, minLength: 8, maxLength: 128 }
+    IfMatchRequired:
+      name: If-Match
+      in: header
+      required: true
+      description: 当前进度版本，形如 `"8"`（含双引号）。
+      schema:
+        type: string
+        pattern: '^"[0-9]+"$'
+        example: '"8"'
+
+  responses:
+    BadRequest:
+      description: 参数或请求体不合法
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: 未认证或 token 失效
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: 越权或命中安全策略（SSRF）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: 唯一键/版本/状态冲突
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    PreconditionRequired:
+      description: 缺少 If-Match
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    UnprocessableEntity:
+      description: 规则/语义错误（422）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: 触发限流
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    PayloadTooLarge:
+      description: 请求体超过限制
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    GatewayTimeout:
+      description: 书源操作/JS 执行超时
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    ServerError:
+      description: 内部错误或上游书源抓取失败
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    # ---------------------------------------------------------------- 通用
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - validation_error
+            - unprocessable_entity
+            - unauthorized
+            - forbidden
+            - not_found
+            - conflict
+            - progress_conflict
+            - source_disabled
+            - precondition_required
+            - unsupported_rule
+            - rule_execution_failed
+            - sandbox_output_limit
+            - relocation_failed
+            - payload_too_large
+            - rate_limited
+            - source_request_failed
+            - response_too_large
+            - redirect_limit
+            - source_timeout
+            - sandbox_timeout
+            - unsafe_url
+            - blocked_private_address
+            - sandbox_panic
+            - internal_error
+            - no_matching_source
+            - override_not_found
+        message:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+      example:
+        code: sandbox_timeout
+        message: 书源 JS 执行超过 3s，已中断
+        request_id: req_01JABCDEF
+        details:
+          source_id: 8f3d5a6e-1b2c-4d5e-9f00-1234567890ab
+          rule: toc
+          elapsed_ms: 3001
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+
+    BookImportResult:
+      type: object
+      required: [book, chapter_count, file_type, file_hash]
+      properties:
+        book: { $ref: '#/components/schemas/Book' }
+        chapter_count: { type: integer, minimum: 0 }
+        file_type: { type: string, enum: [epub, txt] }
+        file_hash: { type: string }
+        warnings:
+          type: array
+          items: { type: string }
+
+    PageMeta:
+      type: object
+      required: [page, page_size, total]
+      properties:
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+        total_pages: { type: integer, minimum: 0 }
+
+    # ---------------------------------------------------------------- 认证
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 1, maxLength: 64 }
+        password: { type: string, minLength: 8, maxLength: 128 }
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string, minLength: 32 }
+
+    TokensResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, user]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: access token 有效期（秒） }
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      required: [id, username, role, token_version, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: string }
+        display_name: { type: string, nullable: true }
+        role: { type: string, enum: [admin, user] }
+        token_version: { type: integer, minimum: 0 }
+        created_at: { type: string, format: date-time }
+        last_login_at: { type: string, format: date-time, nullable: true }
+
+    # ---------------------------------------------------------------- 书源
+    SourceRules:
+      type: object
+      description: |
+        Legado 3.0 书源规则。内部键名保持 Legado 原样（camelCase），本 API 不做重命名；
+        未知键必须原样透传（导入/导出 round-trip 不丢字段）。
+      additionalProperties: true
+      properties:
+        search:
+          $ref: '#/components/schemas/RuleGroupSearch'
+        explore:
+          $ref: '#/components/schemas/RuleGroupSearch'
+        bookInfo:
+          $ref: '#/components/schemas/RuleGroupBookInfo'
+        toc:
+          $ref: '#/components/schemas/RuleGroupToc'
+        content:
+          $ref: '#/components/schemas/RuleGroupContent'
+
+    RuleGroupSearch:
+      type: object
+      additionalProperties: true
+      properties:
+        bookList: { type: string }
+        name: { type: string }
+        author: { type: string }
+        intro: { type: string }
+        kind: { type: string }
+        lastChapter: { type: string }
+        updateTime: { type: string }
+        bookUrl: { type: string }
+        coverUrl: { type: string }
+        wordCount: { type: string }
+
+    RuleGroupBookInfo:
+      type: object
+      additionalProperties: true
+      properties:
+        init: { type: string }
+        name: { type: string }
+        author: { type: string }
+        intro: { type: string }
+        kind: { type: string }
+        lastChapter: { type: string }
+        updateTime: { type: string }
+        coverUrl: { type: string }
+        wordCount: { type: string }
+        tocUrl: { type: string }
+        canReName: { type: string }
+
+    RuleGroupToc:
+      type: object
+      additionalProperties: true
+      properties:
+        preUpdateJs: { type: string }
+        chapterList: { type: string }
+        chapterName: { type: string }
+        chapterUrl: { type: string }
+        isVolume: { type: string }
+        isVip: { type: string }
+        updateTime: { type: string }
+        nextTocUrl: { type: string }
+
+    RuleGroupContent:
+      type: object
+      additionalProperties: true
+      properties:
+        content: { type: string }
+        nextContentUrl: { type: string }
+        webJs: { type: string, description: 保留字段；Stage 4 MVP 不执行，会返回 unsupported_rule }
+        sourceRegex: { type: string }
+        replaceRegex: { type: string }
+        imageStyle: { type: string }
+
+    Source:
+      type: object
+      required:
+        - id
+        - book_source_url
+        - book_source_name
+        - book_source_group
+        - enabled
+        - weight
+        - rules
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        book_source_url: { type: string, format: uri }
+        book_source_name: { type: string, maxLength: 128 }
+        book_source_group: { type: string, maxLength: 64 }
+        book_source_type: { type: integer, minimum: 0, maximum: 3, default: 0, description: "0=HTML,1=JSON,2=CSS,3=本地书库（虚拟源）" }
+        enabled: { type: boolean }
+        enabled_explore: { type: boolean }
+        weight: { type: integer }
+        respond_time: { type: integer, description: 观测平均耗时（ms），0 表示未知 }
+        charset: { type: string, nullable: true }
+        concurrent_rate: { type: string, nullable: true, description: 'Legado concurrentRate 原值，如 "3" 或 "2/1000"' }
+        header:
+          type: object
+          additionalProperties: true
+          description: HTTP 头；敏感值在 Stage 4 以加密信封存储
+        login_url: { type: string, nullable: true }
+        login_check_js: { type: string, nullable: true }
+        rules:
+          $ref: '#/components/schemas/SourceRules'
+        failure_count: { type: integer, minimum: 0 }
+        last_checked_at: { type: string, format: date-time, nullable: true }
+        last_success_at: { type: string, format: date-time, nullable: true }
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SourceCreate:
+      type: object
+      required: [book_source_url, book_source_name]
+      properties:
+        book_source_url: { type: string, format: uri, pattern: '^https?://' }
+        book_source_name: { type: string, minLength: 1, maxLength: 128 }
+        book_source_group: { type: string, maxLength: 64, default: 默认 }
+        book_source_type: { type: integer, minimum: 0, maximum: 3, default: 0, description: "0=HTML,1=JSON,2=CSS,3=本地书库（虚拟源）" }
+        enabled: { type: boolean, default: true }
+        enabled_explore: { type: boolean, default: true }
+        weight: { type: integer, default: 0 }
+        charset: { type: string, nullable: true }
+        concurrent_rate: { type: string, nullable: true }
+        header:
+          type: object
+          additionalProperties: true
+        login_url: { type: string, nullable: true }
+        login_check_js: { type: string, nullable: true }
+        rules:
+          $ref: '#/components/schemas/SourceRules'
+
+    SourceUpdate:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer, minimum: 1 }
+        book_source_url: { type: string, format: uri }
+        book_source_name: { type: string, maxLength: 128 }
+        book_source_group: { type: string, maxLength: 64 }
+        book_source_type: { type: integer, minimum: 0, maximum: 3, description: "0=HTML,1=JSON,2=CSS,3=本地书库（虚拟源）" }
+        enabled: { type: boolean }
+        enabled_explore: { type: boolean }
+        weight: { type: integer }
+        charset: { type: string, nullable: true }
+        concurrent_rate: { type: string, nullable: true }
+        header:
+          type: object
+          additionalProperties: true
+        login_url: { type: string, nullable: true }
+        login_check_js: { type: string, nullable: true }
+        rules:
+          $ref: '#/components/schemas/SourceRules'
+
+    SourcePage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Source'
+
+    ImportRequest:
+      type: object
+      required: [format, data]
+      properties:
+        format:
+          type: string
+          enum: [legado_json, yreader_export]
+        data:
+          type: string
+          maxLength: 33554432
+          description: JSON 文本（对象数组或单对象）；上限 32 MiB / 5000 条
+        dry_run:
+          type: boolean
+          default: false
+        overwrite:
+          type: string
+          enum: [skip, update]
+          default: skip
+
+    ImportFailure:
+      type: object
+      required: [index, reason]
+      properties:
+        index: { type: integer, minimum: 0 }
+        book_source_url: { type: string }
+        reason: { type: string }
+
+    ImportResult:
+      type: object
+      required: [imported, updated, skipped, failed, dry_run]
+      properties:
+        imported: { type: integer, minimum: 0 }
+        updated: { type: integer, minimum: 0 }
+        skipped: { type: integer, minimum: 0 }
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportFailure'
+        dry_run: { type: boolean }
+
+    DebugRequest:
+      type: object
+      required: [rule_type, rule]
+      properties:
+        rule_type:
+          type: string
+          enum: [search, explore, book_info, toc, content]
+          description: >-
+            book_info 对应 SourceRules.bookInfo；其余枚举与 SourceRules 顶层键同名（search/explore/toc/content）。
+        rule:
+          type: string
+          maxLength: 65536
+        url:
+          type: string
+          format: uri
+          description: 不传则用书源 URL 的占位规则
+        variables:
+          type: object
+          additionalProperties: true
+        max_preview_bytes:
+          type: integer
+          minimum: 0
+          maximum: 4096
+          default: 512
+
+    DebugStep:
+      type: object
+      required: [index, phase, mode, expr, hit, elapsed_ms]
+      properties:
+        index: { type: integer, minimum: 1 }
+        phase: { type: string, enum: [search, explore, book_info, toc, content] }
+        mode:
+          type: string
+          enum: [default, css, xpath, json, regex, js, template]
+        expr: { type: string }
+        input_digest: { type: string, description: 输入摘要（sha256 前 8 位 + 长度） }
+        hit: { type: boolean }
+        output_preview: { type: string, maxLength: 4096 }
+        output_items: { type: integer, minimum: 0 }
+        elapsed_ms: { type: integer, minimum: 0 }
+        error_code: { type: string, nullable: true }
+
+    DebugResult:
+      type: object
+      required: [steps, trace_id, total_elapsed_ms]
+      properties:
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/DebugStep'
+        result_preview: { type: string, nullable: true }
+        trace_id: { type: string }
+        total_elapsed_ms: { type: integer, minimum: 0 }
+
+    # ---------------------------------------------------------------- 搜索
+    SearchBook:
+      type: object
+      required: [source_id, book_url, name]
+      properties:
+        source_id: { type: string, format: uuid }
+        book_url: { type: string }
+        name: { type: string }
+        author: { type: string, nullable: true }
+        cover_url: { type: string, nullable: true }
+        intro: { type: string, nullable: true }
+        kind: { type: string, nullable: true }
+        latest_chapter: { type: string, nullable: true }
+        word_count: { type: integer, nullable: true }
+
+    SearchGroup:
+      type: object
+      required: [source_id, source_name, items]
+      properties:
+        source_id: { type: string, format: uuid }
+        source_name: { type: string }
+        elapsed_ms: { type: integer, minimum: 0 }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchBook'
+
+    SearchFailure:
+      type: object
+      required: [source_id, code, message]
+      properties:
+        source_id: { type: string, format: uuid }
+        code: { type: string }
+        message: { type: string }
+
+    SearchResponse:
+      type: object
+      required: [keyword, groups, failures, total]
+      properties:
+        keyword: { type: string }
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchGroup'
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchFailure'
+        total: { type: integer, minimum: 0 }
+
+    # ---------------------------------------------------------------- 书籍
+    Book:
+      type: object
+      required:
+        - id
+        - book_type
+        - name
+        - author
+        - status
+        - total_chapters
+        - version
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        book_type: { type: string, enum: [online, local] }
+        name: { type: string }
+        author: { type: string }
+        normalized_name: { type: string, readOnly: true }
+        normalized_author: { type: string, readOnly: true }
+        cover_url: { type: string, nullable: true }
+        custom_cover_url: { type: string, nullable: true }
+        intro: { type: string, nullable: true }
+        kind: { type: string, nullable: true }
+        word_count: { type: integer, nullable: true }
+        status: { type: string, enum: [unknown, serializing, completed, paused] }
+        active_source_id: { type: string, format: uuid, nullable: true }
+        active_book_url: { type: string, nullable: true }
+        total_chapters: { type: integer, minimum: 0 }
+        latest_chapter_title: { type: string, nullable: true }
+        latest_chapter_at: { type: string, format: date-time, nullable: true }
+        last_read_at: { type: string, format: date-time, nullable: true }
+        needs_source:
+          type: boolean
+          description: active_source_id 为空（书源被删）时为 true，前端提示换源
+        override_count:
+          type: integer
+          minimum: 0
+          description: 当前生效(status=active)的章节级源覆盖数量
+        progress:
+          allOf:
+            - $ref: '#/components/schemas/Progress'
+          nullable: true
+        file_hash:
+          type: string
+          nullable: true
+          description: 本地书籍文件 SHA-256（十六进制，在线书为 null）
+        version: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    BookCreate:
+      type: object
+      required: [source_id, book_url]
+      properties:
+        source_id: { type: string, format: uuid }
+        book_url: { type: string }
+        name: { type: string, description: 可选；缺省时由详情规则解析 }
+        author: { type: string }
+
+    BookUpdate:
+      type: object
+      required: [version]
+      properties:
+        version: { type: integer, minimum: 1 }
+        name: { type: string }
+        author: { type: string }
+        custom_cover_url: { type: string, nullable: true }
+        status: { type: string, enum: [unknown, serializing, completed, paused] }
+        intro: { type: string, nullable: true }
+
+    BookPage:
+      allOf:
+        - $ref: '#/components/schemas/PageMeta'
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/Book'
+
+    # ---------------------------------------------------------------- 阅读
+    Chapter:
+      type: object
+      required: [id, sort_order, title, normalized_title, url, is_volume, word_count]
+      properties:
+        id: { type: integer, format: int64 }
+        chapter_index:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: 可读章节序号 0..N-1；卷名行（is_volume=true）为 null
+        sort_order: { type: integer, minimum: 0, description: 目录展示顺序（含卷名） }
+        title: { type: string }
+        normalized_title: { type: string }
+        url: { type: string }
+        is_volume: { type: boolean }
+        is_vip: { type: boolean }
+        word_count: { type: integer, minimum: 0 }
+        published_at: { type: string, format: date-time, nullable: true }
+        is_overridden: { type: boolean, default: false }
+        override_source_id: { type: string, format: uuid, nullable: true }
+        override_source_name: { type: string, nullable: true }
+        override_url: { type: string, format: uri, nullable: true }
+        override_status:
+          type: string
+          enum: [active, stale]
+          nullable: true
+
+    ChapterList:
+      type: object
+      required: [book_id, source_id, total, items]
+      properties:
+        book_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        total: { type: integer, minimum: 0, description: 可读章节数（不含卷名行） }
+        refreshed_at: { type: string, format: date-time, nullable: true }
+        items:
+          type: array
+          description: 按 sort_order 升序，卷名行原样保留
+          items:
+            $ref: '#/components/schemas/Chapter'
+
+    ChapterContent:
+      type: object
+      required: [chapter, content, cached, word_count]
+      properties:
+        chapter:
+          $ref: '#/components/schemas/Chapter'
+        content: { type: string }
+        prev_chapter_index: { type: integer, nullable: true }
+        next_chapter_index: { type: integer, nullable: true }
+        cached: { type: boolean }
+        word_count: { type: integer, minimum: 0 }
+        applied_replace_rule_ids:
+          type: array
+          items: { type: string, format: uuid }
+        trace_id: { type: string, nullable: true }
+        source_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 实际正文来源；override 生效时为 override.source_id，否则为 active_source_id
+        is_overridden: { type: boolean, default: false }
+
+    ChapterOverrideCreate:
+      type: object
+      required: [chapter_url]
+      properties:
+        chapter_url:
+          type: string
+          format: uri
+          pattern: '^https?://'
+          description: 目标章节的完整网页 URL。服务端在入参层执行 SSRF 校验，命中内网/保留地址返回 403 blocked_private_address（不进入书源抓取阶段）。
+        source_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: 可选；省略时按 chapter_url 的规范化 host 在用户启用书源中自动匹配；显式传入时跳过 host 匹配校验（用于镜像站场景），但仍校验该书源属于当前用户且 enabled=true
+
+    OverrideStatus:
+      type: string
+      enum: [active, stale]
+
+    ChapterOverride:
+      type: object
+      required:
+        - book_id
+        - chapter_index
+        - source_id
+        - source_name
+        - chapter_url
+        - content_preview
+        - status
+        - created_at
+        - updated_at
+      properties:
+        book_id: { type: string, format: uuid }
+        chapter_index: { type: integer, minimum: 0 }
+        source_id: { type: string, format: uuid }
+        source_name: { type: string }
+        chapter_url: { type: string, format: uri }
+        chapter_title: { type: string, nullable: true }
+        content_preview:
+          type: string
+          maxLength: 512
+          description: 试抓解析后的正文前 512 字符（Unicode code point，与 maxLength 对齐）
+        status: { $ref: '#/components/schemas/OverrideStatus' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    # ---------------------------------------------------------------- 进度
+    Progress:
+      type: object
+      required: [book_id, chapter_index, char_offset, chapter_ratio, version]
+      properties:
+        book_id: { type: string, format: uuid }
+        chapter_index: { type: integer, minimum: 0 }
+        char_offset: { type: integer, minimum: 0 }
+        chapter_title: { type: string }
+        normalized_title: { type: string }
+        chapter_ratio: { type: number, format: double, minimum: 0, maximum: 1 }
+        progress_percent: { type: number, format: double, minimum: 0, maximum: 100 }
+        client_updated_at: { type: string, format: date-time }
+        server_updated_at: { type: string, format: date-time }
+        device_id: { type: string, nullable: true }
+        version: { type: integer, minimum: 1 }
+
+    ProgressUpdate:
+      type: object
+      required: [chapter_index]
+      properties:
+        chapter_index: { type: integer, minimum: 0 }
+        char_offset: { type: integer, minimum: 0, default: 0 }
+        chapter_title: { type: string, default: '' }
+        normalized_title: { type: string, default: '' }
+        chapter_ratio: { type: number, format: double, minimum: 0, maximum: 1, default: 0 }
+        client_updated_at: { type: string, format: date-time }
+        device_id: { type: string }
+
+    ProgressConflict:
+      type: object
+      required: [error]
+      properties:
+        error:
+          allOf:
+            - $ref: '#/components/schemas/Error'
+            - type: object
+              properties:
+                details:
+                  type: object
+                  required: [current, incoming]
+                  properties:
+                    current:
+                      $ref: '#/components/schemas/Progress'
+                    incoming:
+                      $ref: '#/components/schemas/ProgressUpdate'
+
+    SwitchSourceRequest:
+      type: object
+      required: [source_id]
+      properties:
+        source_id: { type: string, format: uuid }
+        book_url: { type: string, description: 缺省时用该源已有映射的 book_url }
+        dry_run: { type: boolean, default: false }
+
+    SwitchSourceResult:
+      type: object
+      required: [book_id, source_id, strategy, confidence, chapter_index, chapter_ratio, dry_run]
+      properties:
+        book_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        strategy:
+          type: string
+          enum: [exact, fuzzy, ratio]
+          description: exact=归一化标题精确；fuzzy=trigram 相似；ratio=章节比例回退
+        confidence: { type: number, format: double, minimum: 0, maximum: 1 }
+        chapter_index: { type: integer, minimum: 0 }
+        chapter_title: { type: string }
+        chapter_ratio: { type: number, format: double, minimum: 0, maximum: 1 }
+        char_offset: { type: integer, minimum: 0 }
+        total_chapters: { type: integer, minimum: 0 }
+        dry_run: { type: boolean }
+
+    # ---------------------------------------------------------------- 映射
+    BookSourceMapping:
+      type: object
+      required: [id, book_id, source_id, book_url, sync_status]
+      properties:
+        id: { type: string, format: uuid }
+        book_id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        source_name: { type: string }
+        book_url: { type: string }
+        toc_url: { type: string, nullable: true }
+        name: { type: string, nullable: true }
+        author: { type: string, nullable: true }
+        latest_chapter_title: { type: string, nullable: true }
+        total_chapters: { type: integer, minimum: 0 }
+        sync_status: { type: string, enum: [pending, active, stale, broken] }
+        last_synced_at: { type: string, format: date-time, nullable: true }
+        is_active: { type: boolean, readOnly: true }
+
+    MappingCreate:
+      type: object
+      required: [source_id, book_url]
+      properties:
+        source_id: { type: string, format: uuid }
+        book_url: { type: string }
+
+    # ---------------------------------------------------------------- 书签
+    Bookmark:
+      type: object
+      required: [id, book_id, chapter_index, char_offset, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        book_id: { type: string, format: uuid }
+        chapter_index: { type: integer, minimum: 0 }
+        char_offset: { type: integer, minimum: 0 }
+        chapter_title: { type: string }
+        excerpt: { type: string, nullable: true }
+        note: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    BookmarkCreate:
+      type: object
+      required: [chapter_index]
+      properties:
+        chapter_index: { type: integer, minimum: 0 }
+        char_offset: { type: integer, minimum: 0, default: 0 }
+        chapter_title: { type: string, default: '' }
+        excerpt: { type: string, maxLength: 4096 }
+        note: { type: string, maxLength: 4096 }
+
+    # ---------------------------------------------------------------- 替换规则
+    ReplaceRule:
+      type: object
+      required: [id, name, pattern, replacement, scope, is_enabled, order_index]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        group_name: { type: string }
+        pattern: { type: string }
+        replacement: { type: string }
+        scope: { type: string, enum: [content, title, all] }
+        is_enabled: { type: boolean }
+        order_index: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ReplaceRuleCreate:
+      type: object
+      required: [name, pattern]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        group_name: { type: string, maxLength: 64, default: 默认 }
+        pattern: { type: string, maxLength: 4096 }
+        replacement: { type: string, maxLength: 4096, default: '' }
+        scope: { type: string, enum: [content, title, all], default: content }
+        is_enabled: { type: boolean, default: true }
+        order_index: { type: integer, default: 0 }
+
+    ReplaceRuleUpdate:
+      allOf:
+        - $ref: '#/components/schemas/ReplaceRuleCreate'
+        - type: object
+          properties:
+            is_enabled: { type: boolean }
+
+    # ---------------------------------------------------------------- 任务
+    CacheBookRequest:
+      type: object
+      properties:
+        from_chapter: { type: integer, minimum: 0 }
+        to_chapter: { type: integer, minimum: 0 }
+        source_id: { type: string, format: uuid, description: 缺省用当前激活源；显式传入时必须与 books.active_source_id 一致，否则 422（当前仅支持预热活跃源目录，多源预热见 DEF-OAS-08） }
+
+    Job:
+      type: object
+      required: [id, type, status, progress, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [toc_refresh, chapter_prefetch, full_cache, source_health, import_sources] }
+        status: { type: string, enum: [queued, running, succeeded, failed, canceled] }
+        progress: { type: integer, minimum: 0, maximum: 100 }
+        result:
+          type: object
+          additionalProperties: true
+          nullable: true
+        error_code: { type: string, nullable: true }
+        error_message: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+
+    # ---------------------------------------------------------------- 设置
+    Settings:
+      type: object
+      description: >-
+        扁平 key/value。key 必须匹配 `^[a-z0-9_.]{1,64}$`，如 `reader.font_size`、`network.allowlist`。
+      additionalProperties: true
+
+    SettingsPatch:
+      type: object
+      description: 浅合并；值为 null 表示删除该 key。
+      additionalProperties: true
+

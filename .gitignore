@@ -1,0 +1,22 @@
+# Node
+node_modules/
+.npm-cache/
+frontend/dist/
+frontend/.vite/
+
+# Go
+backend/bin/
+backend/*.exe
+
+# 本地工具链（本会话下载的便携 Go，勿提交）
+.toolchain/
+
+# 日志与临时文件
+*.log
+smoke_check.sql
+
+# Stage 1 只读参考仓库（不纳入版本控制）
+references/
+# 临时探测脚本与日志
+.tmp*
+probe.js
