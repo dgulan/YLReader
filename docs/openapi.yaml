@@ -1956,7 +1956,7 @@ components:
         type: { type: string, enum: [toc_refresh, chapter_prefetch, full_cache, source_health, import_sources] }
         status: { type: string, enum: [queued, running, succeeded, failed, canceled] }
         progress: { type: integer, minimum: 0, maximum: 100 }
-        target_source_id: { type: string, format: uuid, nullable: true, description: 仅 full_cache 且多源预热时非空，缺省/活跃源预热为 null }
+        target_source_id: { type: string, format: uuid, nullable: true, description: full_cache 任务非空（含活跃源与非活跃源）；非 full_cache 任务为 null }
         result:
           type: object
           additionalProperties: true

@@ -25,6 +25,7 @@
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
 | DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 归档 |
 | DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
+| DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入，正文缓存全量落在缓存抽象层 | 归档（v1.5 架构评估是否保留物理表） |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
 
 ---
@@ -236,6 +237,18 @@
 
 ---
 
+### DEF-CODE-09（P2 架构）：chapter_cache 物理表自 M2c 起未被写入
+
+**问题**：`chapter_cache` 物理表（schema §6）自 M2c 起未被任何代码写入；正文缓存全量落在缓存抽象层（`yreader:cache:content:<book>:<source>:<index>`，Redis 或内存），与 `architecture.md` §4.6.7 早期的「只写 `chapter_cache` 表」表述不一致。
+
+**处置决议（S5-2）**：保持高性能 Redis/内存缓存架构，不增加冗余 DB 表写入；`architecture.md` §4.6.7 已按实际改为「写入缓存键 `yreader:cache:content:<book>:<source>:<index>`」；物理表 `chapter_cache` 保留但不再写入，v1.5 架构评估是否删除该表或重新引入对象存储层缓存。
+
+**当前状态**：归档（v1.5 架构评估是否保留物理表）。
+
+**交叉引用**：`architecture.md` §4.6.7 已同步为「正文缓存键包含 source_id」的表述；物理表 `chapter_cache` 保留但不写入。
+
+---
+
 ### DEF-BEHAVIOR-01（P3 行为）：handleCommitError 三态语义变更记录
 
 **变更记录**：
@@ -260,4 +273,7 @@
 - 43 operationId 清单核验：依据 Frozen v1.3 `docs/openapi.yaml`（基线 `89f9b18`，`144a74f` 未改动该文件），按 path 前缀分组逐行统计：auth 4 / sources 8 / search 1 / books 6 / chapters 1 / chapter-override 2 / content 1 / progress 2 / switch-source 1 / mappings 3 / bookmarks 3 / replace-rules 4 / jobs 3 / settings 2 / health 2 = 43，重复 0。
 - 前序收官令措辞收窄归档：§三「85 项集成回归零衰退闭环」→「83 PASS + 2 SKIP（合计 85 项，0 FAIL）」；§二 第 1 项「224 行注释成功移除干扰字样」→「224 行注释措辞规整，非逻辑修复，diff 仅 +1/-1」。
 - 本封板令为 Stage 4 最终法定记录；后续变更须走 Stage 5 或 v1.4 契约修订流程。
-- Stage 5 S5-2（DEF-OAS-08 多源缓存预热）闭环：契约四份同步（openapi / architecture §4.6.7 + ADR-011 / schema jobs 注释 / 本台账），实现改为按「书 + 目标源」独立锁与独立缓存目录，门禁 ≥147 PASS + 2 SKIP + 0 FAIL。
+- Stage 5 S5-2（DEF-OAS-08 多源缓存预热）闭环：契约四份同步（openapi / architecture §4.6.7 + ADR-011 / schema jobs 注释 / 本台账），实现改为按「书 + 目标源」独立锁与独立缓存目录；代码提交 `86aff0f`、契约提交 `42b70bb`；实测 **151 PASS + 2 SKIP + 0 FAIL**（较 S5-1 的 143 + 8）；`TestM3b2CacheSourceMismatchRejected` 更名为 `TestM3b2CacheSourceNotInMappingsRejected`；S5-1 首周三项同收（`TestSourceImportOverwriteSeals` / `errors.Is(pgx.ErrNoRows)` / `?ids=` 精准导出）。
+- 不采纳项（记录在案）：上轮审计 P2-3「`TestCacheMultiSourcePreheat` 仅断言 `f.count() != 0`」——`succeeded` 断言已隐含每章成功抓取，且 `res.total` 断言（3 vs 4 章不同）覆盖了源区分；若 S5-4 压测发现覆盖率缺口再补。
+- 本批新登记 DEF-CODE-09（`chapter_cache` 物理表自 M2c 起未被写入 → 归档 v1.5 架构评估）。
+- 单章响应式预热（非任务型，如 `GET /content?prefetch=true`）推迟到 v1.5 设计；S5-2 只交付 Worker 预热路径 `WarmChapterForSource`。

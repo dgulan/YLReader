@@ -580,7 +580,7 @@ override **只影响该章正文来源**，不改变 `books.active_source_id`、
 #### 4.6.7 多源缓存预热与目录归属（v1.4，DEF-OAS-08）
 
 - 预热目标源由 `POST /books/{bookId}/cache` 的 `CacheBookRequest.source_id` 指定，缺省为 `books.active_source_id`；显式传入时必须属于该书 `book_source_mappings` 中已绑定的源。
-- 预热只写 `chapter_cache(book_id, target_source_id, chapter_index)`，**不改变** `books.active_source_id`，**不改变** `chapters` 表；目标源 `chapter_url` 一律取自 `chapters` 表 `(book_id, target_source_id, chapter_index)` 记录，严禁借用活跃源 URL。
+- 预热只写正文缓存键 `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`（Redis 或内存），同书不同源缓存键相互隔离，**不改变** `books.active_source_id`，**不改变** `chapters` 表；目标源 `chapter_url` 一律取自 `chapters` 表 `(book_id, target_source_id, chapter_index)` 记录，严禁借用活跃源 URL。
 - 锁粒度按书+源：`pg_advisory_xact_lock(hashtextextended('cache:' || book_id || ':' || source_id, 0))`；同书不同源可并行预热，同书同源仍返回 409。
 
 ---
@@ -947,7 +947,7 @@ RETURNING *;
 | ADR-008 | OpenAPI 驱动生成 DTO | 前后端契约单一来源 | 生成代码需纳入 Lint |
 | ADR-009 | 章节级源覆盖用独立表 `chapter_source_overrides` 而非 `chapters` 增加列 | 避免污染 `chapters`、支持级联删除语义清晰 | 多一次 JOIN 查询 |
 | ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径 | 旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
-| ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理 | 锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库，仅由 payload 解析 |
+| ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
 
 ---
 
