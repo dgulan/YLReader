@@ -17,7 +17,7 @@
 | DEF-OAS-05 | P2 契约 | cacheBook 的 Idempotency-Key 未做强幂等 | 已闭环 (v1.3) |
 | DEF-OAS-06 | P2 契约 | cancelJob 对 queued/running 任务的取消时序未细化 | 已闭环 (v1.3) |
 | DEF-OAS-07 | P2 契约 | ErrUnprocessable 返回 validation_error 的契约外行为 | 已闭环 (v1.3) |
-| DEF-OAS-08 | P2 契约 | CacheBookRequest.source_id 暂不支持多源缓存预热 | 归档（多源阅读器重构） |
+| DEF-OAS-08 | P2 契约 | CacheBookRequest.source_id 暂不支持多源缓存预热 | 已闭环 (v1.4) |
 | DEF-CODE-03 | P2 实现 | maxNameAuthorAttempts 上限对 10+ 并发不足 | 已闭环 (上限由 5 提升至 20) |
 | DEF-CODE-04 | P2 测试 | handleCommitError 状态 ③ 无法单测 | 归档（M3c 未处理，待后续架构重构时处理） |
 | DEF-CODE-05 | P3 测试 | 预检查命中 + 3 并发重试边界与命名验证 | 已闭环 |
@@ -125,9 +125,10 @@
 ### DEF-OAS-08（P2 契约）：CacheBookRequest.source_id 暂不支持多源缓存预热
 
 **问题**：`POST /books/{bookId}/cache` 接受 `source_id`，但 v1.3 实现只预热 `books.active_source_id` 目录；显式传入非活跃源返回 422。契约此前未声明该约束，客户端可能误以为可指定任意已启用源。
-**v1.3 处置**：`docs/openapi.yaml` 在 `CacheBookRequest.source_id` 与 `cacheBook` description 显式声明「显式 source_id 必须等于活跃源，否则 422」，并标注多源预热未支持；实现侧三层门禁（无活跃源 / 活跃源禁用 / 显式源不一致）与契约一致，覆盖用例 `TestM3b2CacheSourceMismatchRejected`。
-**后续演进**：多源阅读器重构时支持按 source_id 预热指定源（需同时定义目录与进度的归属语义）。
-**当前状态**：归档（多源阅读器重构版本处理）。
+**v1.3 处置**：`docs/openapi.yaml` 在 `CacheBookRequest.source_id` 与 `cacheBook` description 显式声明「显式 source_id 必须等于活跃源，否则 422」，并标注多源预热未支持；实现侧三层门禁（无活跃源 / 活跃源禁用 / 显式源不一致）与契约一致。
+**v1.4（S5-2）处置**：改为多源预热——显式 `source_id` 只要属于该书 `book_source_mappings` 且目标源存在可读章节即可预热；只写 `chapter_cache(book_id, target_source_id, chapter_index)`，不改 `books.active_source_id` 与 `chapters`；锁粒度改为 `cache:<book_id>:<source_id>`；Job 响应新增 `target_source_id`（由 payload 解析，不落库）。契约同步：`CacheBookRequest.source_id` 描述、`Job.target_source_id`、`cacheBook` 202/409/422 触发条件、architecture §4.6.7 + ADR-011、schema jobs 注释。
+**覆盖用例**：原 `TestM3b2CacheSourceMismatchRejected` 更名为 `TestM3b2CacheSourceNotInMappingsRejected`；新增多源预热、活跃源不变、无章节拒绝、同源防重、活跃源缺 mapping 容忍、同书跨源并发等用例。
+**当前状态**：已闭环 (v1.4)。
 
 ---
 
@@ -259,3 +260,4 @@
 - 43 operationId 清单核验：依据 Frozen v1.3 `docs/openapi.yaml`（基线 `89f9b18`，`144a74f` 未改动该文件），按 path 前缀分组逐行统计：auth 4 / sources 8 / search 1 / books 6 / chapters 1 / chapter-override 2 / content 1 / progress 2 / switch-source 1 / mappings 3 / bookmarks 3 / replace-rules 4 / jobs 3 / settings 2 / health 2 = 43，重复 0。
 - 前序收官令措辞收窄归档：§三「85 项集成回归零衰退闭环」→「83 PASS + 2 SKIP（合计 85 项，0 FAIL）」；§二 第 1 项「224 行注释成功移除干扰字样」→「224 行注释措辞规整，非逻辑修复，diff 仅 +1/-1」。
 - 本封板令为 Stage 4 最终法定记录；后续变更须走 Stage 5 或 v1.4 契约修订流程。
+- Stage 5 S5-2（DEF-OAS-08 多源缓存预热）闭环：契约四份同步（openapi / architecture §4.6.7 + ADR-011 / schema jobs 注释 / 本台账），实现改为按「书 + 目标源」独立锁与独立缓存目录，门禁 ≥147 PASS + 2 SKIP + 0 FAIL。

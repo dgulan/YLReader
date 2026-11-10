@@ -545,6 +545,8 @@ CREATE INDEX IF NOT EXISTS ix_jobs_run_queue ON jobs (created_at) WHERE status =
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS worker_id text;
 CREATE INDEX IF NOT EXISTS ix_jobs_worker_status ON jobs(worker_id, status) WHERE status = 'running';
 
+-- v1.4（S5-2）：payload.source_id 为 full_cache 的预热目标源；target_source_id 由 payload 解析，不落库。
+
 -- -----------------------------------------------------------------------------
 -- 7. 视图：书架列表（书籍 + 进度 + 激活书源）
 -- -----------------------------------------------------------------------------

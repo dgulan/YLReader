@@ -919,9 +919,11 @@ paths:
       operationId: cacheBook
       summary: 提交整本缓存任务
       description: >-
-        提交后返回 202 与 queued 任务，由 Worker 以 DB 权威队列消费。422 触发条件：本地书、
-        无活跃源、活跃源已禁用，或显式 source_id 与活跃源不一致（多源预热尚未支持，见 DEF-OAS-08）。
-        同书同类型存在 queued/running 任务时返回 409；防重通过 advisory lock 事务保证原子性。
+        提交后返回 202 与 queued 任务，由 Worker 以 DB 权威队列消费。
+        202：入队成功（缺省预热活跃源；显式 source_id 可预热该书任一已绑定源）。
+        409：同书同源已有 queued/running 的 full_cache 任务（advisory lock 事务原子防重）。
+        422：本地书；无活跃源；显式非活跃源不在 book_source_mappings；目标源已禁用/不存在；
+        目标源无任何可读章节（relocation_failed）。
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -1944,7 +1946,7 @@ components:
       properties:
         from_chapter: { type: integer, minimum: 0 }
         to_chapter: { type: integer, minimum: 0 }
-        source_id: { type: string, format: uuid, description: 缺省用当前激活源；显式传入时必须与 books.active_source_id 一致，否则 422（当前仅支持预热活跃源目录，多源预热见 DEF-OAS-08） }
+        source_id: { type: string, format: uuid, description: 缺省用活跃源；显式传入时必须属于该书已绑定的 book_source_mappings 的 source_id，且目标源 chapters 存在至少一条可读章节记录，否则 422 relocation_failed }
 
     Job:
       type: object
@@ -1954,6 +1956,7 @@ components:
         type: { type: string, enum: [toc_refresh, chapter_prefetch, full_cache, source_health, import_sources] }
         status: { type: string, enum: [queued, running, succeeded, failed, canceled] }
         progress: { type: integer, minimum: 0, maximum: 100 }
+        target_source_id: { type: string, format: uuid, nullable: true, description: 仅 full_cache 且多源预热时非空，缺省/活跃源预热为 null }
         result:
           type: object
           additionalProperties: true
