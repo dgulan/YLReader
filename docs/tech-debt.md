@@ -294,7 +294,7 @@
 
 **S5-4 证据边界**：`TestChaptersTitleTrigramExplain` 使用 `SET LOCAL pg_trgm.similarity_threshold = 0.85` 收敛到 10 条目标行，确定性证明 `ix_chapters_title_trgm` 可服务 `%` 谓词；该结果**不等于**生产 `relocate_fuzzy` 在 0.6 阈值下的查询计划——0.6 阈值下候选集更大，GIN cost 上升，规划器仍可能选 `(book_id, source_id)` btree 位图；且生产函数当前未加 `%` 前置谓词，GIN 无法被调用。v1.5 修复后需以生产实际阈值 0.6 重新 EXPLAIN 断言，方可宣告 GIN 生效。
 
-**GUC 硬约束**：`%` 与 `similarity >= p_threshold` 语义等价的前提是运行环境 `pg_trgm.similarity_threshold <= p_threshold`（默认 0.3 ≤ 0.6），详见 `schema.sql` §9 与 `ADR-014`。
+**GUC 硬约束**：`%` 与 `similarity >= p_threshold` 语义等价的前提是**对每次调用**运行环境 `pg_trgm.similarity_threshold <= p_threshold`（当前生产固定 `p_threshold=0.6`，默认 GUC `0.3 ≤ 0.6`）；若调用者传入更低 `p_threshold`，必须同步确认 GUC 不高于该值。详见 `docs/schema.sql` §9 与 `ADR-014`。
 
 ---
 

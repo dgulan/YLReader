@@ -22,7 +22,7 @@
 | D2 | 模板求值 | Fast-Path 纯算术子集，其余无条件回落 goja | §3.4 |
 | D3 | SSRF | `DialContext` 先解析→全量过滤→逐 IP 回退拨号；重定向 ≤5 跳逐跳校验；`netip` 完备黑名单 | §3.5 |
 | D4 | 多源书籍 | 逻辑书唯一键 `(user_id, normalized_name, normalized_author)` + `book_source_mappings` | §4.1 |
-| D5 | 换源重定位 | 精确 `normalized_title`（±20）→ trigram 模糊 → 章节比例 | §4.2 |
+| D5 | 换源重定位 | 精确 `normalized_title`（±20）→ trigram 模糊（`%` 前置谓词走 GIN + `similarity` 二次过滤，ADR-014）→ 章节比例 | §4.2 |
 | D6 | JSONB/GIN | `rules` 仅服务 `@>`/`?`/`?|`/`?&`；禁止 `->>` 等值/模糊查询后期待索引 | §4.3 |
 
 ---
@@ -454,8 +454,11 @@ erDiagram
    在 window 内找 normalized_title 完全相等者
    多个候选：取 |index-old_index| 最小 → 再取 title 字符串完全相等 → 再取 index 最小
    命中 → strategy="exact", confidence=1.0
-3) Level 2 模糊匹配（pg_trgm）
-   window = ±100；similarity(normalized_title, old_normalized_title) >= 0.6
+3) Level 2 模糊匹配（pg_trgm，ADR-014）
+   window = ±100
+   WHERE c.normalized_title % old_normalized_title                        -- GIN 前置谓词
+     AND similarity(c.normalized_title, old_normalized_title) >= 0.6      -- 二次过滤保精度
+   前提（对每次调用）：pg_trgm.similarity_threshold <= p_threshold（当前生产 0.6）
    取 similarity 最高 → 同分取距离最近
    命中 → strategy="fuzzy", confidence=similarity
 4) Level 3 比例回退
@@ -962,7 +965,7 @@ RETURNING *;
 | ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
 | ADR-012 | WorkerPool 常驻巡检：启动同步初检 + 每 10min Ticker；全部 worker/巡检统一派生 ctx；Shutdown 取消派生 ctx 后双通道 `wg.Wait()` | 跨节点宕机残留任务脱离仅靠重启自愈的局限；消灭停机等待死锁风险；`reaperInterval` 可注入便于测试 | 每节点多一个常驻 goroutine；巡检占用连接，受 `MaxConns` 预算约束 |
 | ADR-013（草案，待项目方裁定） | `chapter_cache` 物理表最终处置：**方案 A 删除该表**（缓存统一由 Redis / 对象存储承载）或 **方案 B 保留该表并重新接入对象存储层缓存** | 现状已分叉：表与索引、§6.3 失效矩阵都已定义，但服务层缓存实际写入 Redis key `yreader:cache:content:*`，该表从未写入 | 方案 A：v1.5 DDL 删除表并清理 §6.3 矩阵、补迁移脚本；方案 B：需扩展 `storage.Provider`，并承担「Redis + 对象存储」双重缓存的一致性与清理成本 |
-| ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退）。硬约束：运行环境必须保证 `pg_trgm.similarity_threshold <= p_threshold`（默认 0.3 ≤ 0.6），否则 `%` 前置谓词提前截断候选集，语义等价失效。 |
+| ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退）。硬约束：**对每次调用**，运行环境必须保证 `pg_trgm.similarity_threshold <= p_threshold`（当前生产固定 `p_threshold=0.6`，默认 GUC `0.3 ≤ 0.6`）；若调用者传入更低 `p_threshold`，必须同步确认 GUC 不高于该值，否则 `%` 前置谓词提前截断候选集，语义等价失效。 |
 
 ### 12.1 ADR-013 草案全文（DEF-CODE-09，S6-1 交付，待裁定）
 
