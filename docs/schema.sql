@@ -405,7 +405,8 @@ CREATE INDEX IF NOT EXISTS ix_chapters_title_trgm ON chapters USING gin (normali
 COMMENT ON COLUMN chapters.normalized_title IS
 '章节标题归一化键，由 Go engine/textnorm 生成（支持中文数字与「第N回」变体）：
  有阿拉伯/中文数字章节号 → "n:<数字>"；否则为去空白去标点小写标题。
- 换源重定位 Level 1 用它精确匹配，Level 2 用 pg_trgm similarity() 模糊匹配。';
+ 换源重定位 Level 1 用它精确匹配；Level 2 用 % 前置谓词（pg_trgm GIN 可服务）
+ + similarity(...) >= p_threshold 二次过滤（ADR-014）。';
 
 -- -----------------------------------------------------------------------------
 -- 5. 阅读进度（多端冲突 + 换源重定位）
