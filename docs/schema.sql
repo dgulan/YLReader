@@ -399,14 +399,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_chapters_book_source_index
   WHERE chapter_index IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_chapters_book_source_sort ON chapters (book_id, source_id, sort_order);
 CREATE INDEX IF NOT EXISTS ix_chapters_book_source_title ON chapters (book_id, source_id, normalized_title);
--- 换源「模糊匹配」级别使用 similarity()，必须走 trigram GIN
+-- 换源「模糊匹配」级别必须用 % 前置谓词走 trigram GIN；similarity() 仅做二次过滤（ADR-014）
 CREATE INDEX IF NOT EXISTS ix_chapters_title_trgm ON chapters USING gin (normalized_title gin_trgm_ops);
 
 COMMENT ON COLUMN chapters.normalized_title IS
 '章节标题归一化键，由 Go engine/textnorm 生成（支持中文数字与「第N回」变体）：
  有阿拉伯/中文数字章节号 → "n:<数字>"；否则为去空白去标点小写标题。
  换源重定位 Level 1 用它精确匹配；Level 2 用 % 前置谓词（pg_trgm GIN 可服务）
- + similarity(...) >= p_threshold 二次过滤（ADR-014）。';
+ AND similarity(...) >= p_threshold 二次过滤（ADR-014）。';
 
 -- -----------------------------------------------------------------------------
 -- 5. 阅读进度（多端冲突 + 换源重定位）
