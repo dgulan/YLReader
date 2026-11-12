@@ -25,7 +25,7 @@
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
 | DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 已闭环 (v1.4) |
 | DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
-| DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入，正文缓存全量落在缓存抽象层 | 归档（v1.5 架构评估是否保留物理表） |
+| DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入；在线正文走缓存抽象与 Fetcher 回源，本地书走 StorageProvider | 已裁定 (v1.5, ADR-013 方案 A)，待迁移实施 |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
 | DEF-CODE-10 | P2 构建 | 本机无 C 工具链，go test -race 不可用（自 M1c 起） | 已提供 CI 配置 (v1.5, S6-1)，待首次流水线日志 |
 | DEF-CODE-11 | P2 查询优化 | relocate_fuzzy 未使用 % 前置索引谓词，pg_trgm GIN 无法加速函数调用 | 已闭环 (v1.5, S6-1) |
@@ -250,13 +250,15 @@
 
 ### DEF-CODE-09（P2 架构）：chapter_cache 物理表自 M2c 起未被写入
 
-**问题**：`chapter_cache` 物理表（schema §6）自 M2c 起未被任何代码写入；正文缓存全量落在缓存抽象层（`yreader:cache:content:<book>:<source>:<index>`，Redis 或内存），与 `architecture.md` §4.6.7 早期的「只写 `chapter_cache` 表」表述不一致。
+**问题**：`chapter_cache` 物理表（schema §6）自 M2c 起未被任何代码写入；在线正文缓存全量落在缓存抽象层（`yreader:cache:content:<book>:<source>:<index>`，Redis 或内存），本地书正文经 `StorageProvider` 直接读取；与 `architecture.md` §4.6.5 早期「读写 chapter_cache」的表述不一致。
 
-**处置决议（S5-2）**：保持高性能 Redis/内存缓存架构，不增加冗余 DB 表写入；`architecture.md` §4.6.7 已按实际改为「写入缓存键 `yreader:cache:content:<book>:<source>:<index>`」；物理表 `chapter_cache` 保留但不再写入，v1.5 架构评估是否删除该表或重新引入对象存储层缓存。
+**处置决议（S5-2）**：保持高性能 Redis/内存缓存架构，不增加冗余 DB 表写入；`architecture.md` §4.6.7 已按实际改为「写入缓存键 `yreader:cache:content:<book>:<source>:<index>`」；物理表 `chapter_cache` 保留但不再写入。
 
-**当前状态**：归档（v1.5 架构评估是否保留物理表）。
+**A0 核查与补充裁定（2026-11-11 / 2026-11-12，ADR-013）**：`chapter_cache` 在本机 `yreader_test` 存在且 0 行；两条自身外向 FK（→ `books` / → `book_sources`，均 `ON DELETE CASCADE`），无入向 FK、无视图/触发器/函数依赖；Go/CI/脚本 0 引用；仓库无迁移框架，`docs/schema.sql` 为唯一升级入口。在线正文读取路径为「缓存抽象 → 未命中则 Fetcher 回源 → 写回缓存（TTL 7 天）」，本地书为 `StorageProvider.Get`，二者均不触碰该表。R01 最小权限验收由项目方人工执行并归档（`R01_GATE=PASS (MANUAL / OWNER-ATTESTED)`）。
 
-**交叉引用**：`architecture.md` §4.6.7 已同步为「正文缓存键包含 source_id」的表述；物理表 `chapter_cache` 保留但不写入。
+**当前状态**：已裁定 (v1.5, ADR-013 方案 A)，待迁移实施。
+
+**交叉引用**：`architecture.md` ADR-013（正式裁定，批准日期 2026-11-11）与 §12.1；方案 A 的契约修订（ER 图、§4.5、§4.6.5、§6.3、§7 与 `schema.sql` 中的 `DROP TABLE IF EXISTS chapter_cache;`）已完成；物理 `DROP` 属 A2，需单独授权，禁止在任何持久库预演。
 
 ---
 
@@ -335,14 +337,14 @@
 
 ## Stage 6 进展（v1.5，进行中）
 
-> S6-1 已于本批签发结项（代码 `f9054b0` + 收口提交 / 契约 `fe7a3f1` + 收口提交）；S6-2 及后续批次待项目方 4 项前置裁定（`DEF-CODE-09` 方案 A/B1/B2、`info.version` 策略、前端测试基线、提交粒度）后开工；S6-4 终审后才写「Stage 6 封板记录」。
+> S6-1 已于本批签发结项（代码 `f9054b0` + 收口提交 / 契约 `fe7a3f1` + 收口提交）；`DEF-CODE-09` 已于 2026-11-11 裁定为**方案 A**（A1 契约修订完成，A2 物理迁移未授权，状态保持「已裁定，待迁移实施」）；S6-2 仍需项目方对 `info.version` 策略、前端测试基线、提交粒度三项裁定后开工（**S6-2 保持 LOCKED**）；S6-4 终审后才写「Stage 6 封板记录」。
 
 | 编号 | 本批处置 | 状态 |
 |---|---|---|
 | DEF-CODE-04 | `ImportService.pool` 抽象为 `importPool` 窄接口 + `failingProbePool`；`TestHandleCommitError_ProbeFails` 去 Skip 实跑 | 已闭环 |
 | DEF-CODE-10 | 新增 `.github/workflows/race.yml`（PG16 + Redis 服务容器、schema 预置、`CGO_ENABLED=1 go test -race -tags integration ./...`） | 已提供 CI 配置，待首次流水线日志 |
 | DEF-CODE-11 | `relocate_fuzzy` 加 `%` 前置谓词；`TestRelocateFuzzyExplain` 以 0.6 阈值断言 GIN（宽窗口）与无 Seq Scan（窄窗口） | 已闭环 |
-| DEF-CODE-09 | 交付 ADR-013 草案（方案 A 删表 / 方案 B1 表存元数据+正文落 storage / 方案 B2 表只存 object_key），本批不改 DDL | 待项目方裁定 |
+| DEF-CODE-09 | ADR-013 裁定方案 A（废弃物理表）；A1 契约修订完成（ER 图 / §4.5 / §4.6.5 / §6.3 / §7 / `schema.sql` 幂等 `DROP TABLE IF EXISTS` 声明） | 已裁定 (v1.5, ADR-013 方案 A)，待 A2~A4 迁移实施与回归后闭环 |
 
 - 契约版本：三份顶部均为 `Draft v1.5`（S6-1 起），S6-4 终审通过后改 `Frozen v1.5`。
 - `info.version` 仍保持 `1.0.0`（是否跳跃待项目方在 S6-4 裁定）。

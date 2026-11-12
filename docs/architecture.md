@@ -400,7 +400,6 @@ erDiagram
     books ||--o| reading_progress : tracks
     books ||--o{ bookmarks : contains
     users ||--o{ replace_rules : owns
-    books ||--o{ chapter_cache : caches
     users ||--o{ jobs : queues
 ```
 
@@ -551,7 +550,6 @@ WHERE rules::text ILIKE '%ruleToc%'
 | `jobs` | 完成 30 天后归档/删除（`expires_at`） |
 | `source_failures` | `expires_at` 到期后由清理任务删除；`resolved_at` 仅作审计 |
 | `auth_sessions` | 过期或吊销 7 天后删除 |
-| `chapter_cache` | 按 `expires_at` 清理；对象存储删除失败进入重试队列 |
 | `books` 删除 | 级联 DB 行 + 异步清理对象存储前缀 `chapter/{book_id}/` |
 
 ### 4.6 章节级源覆盖（Chapter-level Source Override）
@@ -572,9 +570,22 @@ override **只影响该章正文来源**，不改变 `books.active_source_id`、
 
 ① **整本换源**（`switch-source` 且 `dry_run=false`）→ 同事务内 `DELETE` 清空该书所有 override；② **追更任务** → 不触碰 override；③ **目录刷新** → 不触碰 override，但若章节数减少导致 `chapter_index >= new_total_chapters` 越界则标记 `status='stale'`；④ **删除书源** → `ON DELETE CASCADE` 级联删除；⑤ **用户手动重置** → `DELETE` 单条。
 
-#### 4.6.5 GET /content 读取顺序与 chapter_cache 覆写规则
+#### 4.6.5 GET /content 读取顺序与缓存隔离规则
 
-`GET /content` 优先查 `status='active'` 的 override，命中则按 `(book_id, override.source_id, chapter_index)` 读写 `chapter_cache`；未命中或 stale 则回退走 `books.active_source_id`。`POST .../override` 试抓成功后立即写入/覆写 `(book_id, override.source_id, chapter_index)` 这一条 B 源缓存，**不删除也不修改**原源 A 在 `(book_id, active_source_id, chapter_index)` 下的缓存（A 源缓存由其自身 TTL 管理）；`DELETE .../override` 时只清理 B 源 `(book_id, override.source_id, chapter_index)` 那一条缓存（同步在 §6.3 缓存失效矩阵补一行）。
+`GET /content` 的实际处理顺序（实现见 `backend/internal/service/content.go`）：
+
+1. **归属校验**：Service 首行执行 `books.Get(ctx, pool, user_id, book_id)`（SQL `WHERE user_id = $1 AND id = $2`），失败直接 404，**不读取任何缓存或外部资源**。
+2. **章节元数据**：始终取自活跃源（`GetByIndex`/`GetByID` 均带 `active_source_id` 约束），保证目录高亮、标题与翻页位点一致；卷名行返回 400。
+3. **本地书分流**：`book_type='local'` 直接经 `StorageProvider.Get(ctx, local/<book_id>/<chapter_index>.txt)` 读取，只应用用户替换规则与基础整理；**不写缓存**，响应 `cached=false`、`trace_id=null`。
+4. **覆盖路由**：仅当该章存在 `status='active'` 的 override 时，正文源切换为 `override.source_id`、URL 取 `override.chapter_url`；`status='stale'` 不被采用，自动回退到 `books.active_source_id`。
+5. **缓存键**：`yreader:cache:content:<book_id>:<target_source_id>:<chapter_index>`，其中 `target_source_id` 为第 4 步选出的实际正文源——因此不同源的同章缓存天然隔离（A/B 源互不覆盖）。
+6. **命中/未命中**：命中直接装配响应（`cached=true`）；未命中经 fetcher 抓取、parser 规则求值、用户替换规则净化后写入缓存（TTL 7 天，`cached=false`）。
+
+**Override 对缓存的真实影响（依据实现，非推断）**：
+
+- `POST /books/{bookId}/chapters/{chapterIndex}/override` 只做 DB Upsert（`OverrideService.Set`），**不预抓正文、不写缓存、不删除缓存**（响应中的 `content_preview` 当前恒为空串）；下一次 `GET /content` 因 `target_source_id` 变为覆盖源而落到 B 源缓存键，未命中时再抓取并写入。
+- `DELETE .../override` 只删除 DB 行，**不删除任何缓存键**；B 源缓存行按其 TTL 自然过期。
+- 换源（`switch-source`）改变 `books.active_source_id` 并清空该书 override，但**不主动清理缓存**；旧源缓存键保留至 TTL 过期。
 
 #### 4.6.6 stale 的 UI 语义与性能演进备注
 
@@ -793,10 +804,13 @@ RETURNING *;
 | 书源更新（规则/header/并发） | 删该源 `search:*`（按 user 前缀扫描不可行 → 用版本号：`source_version:{user}` 参与 key） |
 | 目录刷新成功 | 删 `toc:{book}:{source}`，更新 `book_source_mappings.last_synced_at` |
 | 换源成功 | 删旧源 `toc`、写新进度、前端 IndexedDB 以 `book.updated_at` 判断重建 |
-| 章节级源覆盖变更（`POST/DELETE /override`） | 只删该章 B 源 `(book_id, override.source_id, chapter_index)` 的 `chapter_cache`；A 源缓存不动（§4.6.5） |
+| 章节级源覆盖 POST（`POST /override`） | 不写、不删缓存；下次 `GET /content` 以覆盖源 `source_id` 组成新键，未命中再抓取（§4.6.5） |
+| 章节级源覆盖 DELETE（`DELETE /override`） | 不删除缓存；B 源键保留至 TTL（7 天）自然过期 |
 | 替换规则变更 | 章节正文缓存不删（原文），前端按 `rules_version` 重新净化 |
 
 > 搜索 key 的 user 前缀清理代价高，因此 key 中混入 `sources_version`（用户书源集合的单调版本），书源变更时 `INCR` 即可整体失效。
+
+> 正文缓存（`yreader:cache:content:*`）的失效能力边界（依据实现）：`Cache` 接口仅提供 `Get` / `SetEX`，服务层没有任何删除或扫描调用；Memory 实现仅在 `Get` 时惰性清除过期项，Redis 实现依赖 `SETEX` 的 TTL（`contentCacheTTL` = 7 天）。因此**不存在按 Key 模式扫描清理，也不存在按 Key 集合删除**；正文缓存的所有失效都等价于 TTL 到期，或被同键覆盖写入。
 
 ---
 
@@ -805,7 +819,7 @@ RETURNING *;
 | 面 | 控制 |
 |---|---|
 | 认证 | 密码 Argon2id（m=64MiB,t=3,p=2）；JWT HS256（32B 密钥，`kid` 支持轮换）；refresh 轮换 + 复用检测（旧 token 再用 → 吊销全家族） |
-| 授权 | 所有查询强制 `user_id = $current_user`；`admin` 仅额外可管理用户，不跨租户读书。repository 层所有 `chapter_cache` 读取必须 JOIN `books` 校验 `user_id`（该表无 user_id 列） |
+| 授权 | 所有查询强制 `user_id = $current_user`；`admin` 仅额外可管理用户，不跨租户读书。`GET /content` 在读取应用层正文缓存、`StorageProvider` 对象或发起任何网络回源之前，必须在 Service 首层执行 `books.Get(ctx, pool, user_id, book_id)` 完成书籍归属校验（SQL `WHERE user_id = $1 AND id = $2`），校验通过前不加载正文内容；该结论仅覆盖本端点调用链，不构成全系统安全审计 |
 | 传输 | 仅 HTTPS（反代终止）；HSTS；Cookie（若有）`Secure; HttpOnly; SameSite=Lax` |
 | SSRF | §3.5；`blocked_private_address` 记安全审计（user/source/host/IP/时间） |
 | 沙箱 | §3.3；白名单桥接；无文件/进程/反射 |
@@ -964,30 +978,17 @@ RETURNING *;
 | ADR-010 | 书源 header 采用应用层 AES-256-GCM 信封加密 | 数据库/备份/日志不再含明文凭据；加密在 Service 层完成、Repository 透明解密、engine 不接触密钥 | 密钥管理成本；dry_run 与迁移需显式路径；旧 kid 退役：存量迁移完成后保留 ≥30 天且 `SELECT count(*) FROM book_sources WHERE header->>'__enc' LIKE 'v1:<old_kid>:%'` 为 0 才可移除；密钥丢失：迁移前 pg_dump 快照 + 启动校验至少一个 kid 可解 |
 | ADR-011 | 多源缓存预热按「书 + 目标源」独立锁与独立目录 | 同书多源预热可并行，且不污染活跃源目录归属 | 缓存行按 source_id 分裂，需按源清理；锁键 `cache:<book_id>:<source_id>`；`target_source_id` 不落库仅由 payload 解析 |
 | ADR-012 | WorkerPool 常驻巡检：启动同步初检 + 每 10min Ticker；全部 worker/巡检统一派生 ctx；Shutdown 取消派生 ctx 后双通道 `wg.Wait()` | 跨节点宕机残留任务脱离仅靠重启自愈的局限；消灭停机等待死锁风险；`reaperInterval` 可注入便于测试 | 每节点多一个常驻 goroutine；巡检占用连接，受 `MaxConns` 预算约束 |
-| ADR-013（草案，待项目方裁定） | `chapter_cache` 物理表最终处置：**方案 A 删除该表**（缓存统一由 Redis / 对象存储承载）或 **方案 B 保留该表并重新接入对象存储层缓存** | 现状已分叉：表与索引、§6.3 失效矩阵都已定义，但服务层缓存实际写入 Redis key `yreader:cache:content:*`，该表从未写入 | 方案 A：v1.5 DDL 删除表并清理 §6.3 矩阵、补迁移脚本；方案 B：需扩展 `storage.Provider`，并承担「Redis + 对象存储」双重缓存的一致性与清理成本 |
+| ADR-013（正式裁定，批准日期 2026-11-11） | 废弃 `chapter_cache` 物理表（**方案 A**）：正文缓存统一由 `pkg/cache` 的 Redis / 内存实现承载，本地书正文由 `StorageProvider` 承载 | 该表自 M2c 起无任何写入路径，契约与实现长期分叉（DEF-CODE-09）；保留表将引入第二套缓存与一致性成本 | A1 仅做契约文本修订；A2 物理清理（`DROP TABLE IF EXISTS chapter_cache;`）需单独授权，且禁止在任何持久库预演；缓存容量与清理责任完全落在 Redis/内存的 TTL 机制（无主动删除、无前缀扫描） |
 | ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退）。硬约束：**对每次调用**，运行环境必须保证 `pg_trgm.similarity_threshold <= p_threshold`（当前生产固定 `p_threshold=0.6`，默认 GUC `0.3 ≤ 0.6`）；若调用者传入更低 `p_threshold`，必须同步确认 GUC 不高于该值，否则 `%` 前置谓词提前截断候选集，语义等价失效。 |
 
-### 12.1 ADR-013 草案全文（DEF-CODE-09，S6-1 交付，待裁定）
+### 12.1 ADR-013 架构决策：废弃 chapter_cache 物理表（方案 A）
 
-**背景**：`docs/schema.sql` 定义了 `chapter_cache` 表（`book_id`/`source_id`/`chapter_index`/`content`/`cached_at`）及索引、`§6.3` 缓存失效矩阵也按该表描述；但 M2c 起的实现把正文缓存写入 Redis（key `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`），`chapter_cache` 自建库以来无任何写入路径。契约与实现长期分叉（DEF-CODE-09）。
-
-**方案 A：删除 `chapter_cache` 物理表**
-- 变更：v1.5 `schema.sql` 中 `DROP TABLE IF EXISTS chapter_cache;`（幂等脚本内以 `DO` 块形式落地），同步删除 §6.3 中该表相关失效行，改述为「Redis key 前缀 + TTL」。
-- 优点：契约与实现立即一致；无双重缓存一致性问题；减少一张具永久增长风险的宽表。
-- 代价：需要一次 DDL 变更与迁移脚本；历史 `chapter_cache` 行（本环境为空）不可回读；缓存容量规划完全落到 Redis/内存。
-- 兼容性：对外 API 无变化（正文响应字段不变）。
-
-**方案 B：保留表并重新接入对象存储层缓存（细分 B1 / B2）**
-- 变更（`storage.Provider` 已具备 `Put` / `Get` / `Delete` / `Exists` / `DeletePrefix` 五个方法，正文缓存的实际入口是 `ContentService.storeCache`，被 `Get` 与 `WarmChapterForSource` 共用）：
-  - **B1**：`ContentService.storeCache` 在写 Redis 的同时同步 `INSERT/UPDATE chapter_cache`（表只存元数据 + `object_key`），正文落 `storage`；
-  - **B2**：`chapter_cache` 表只存 `object_key` 与元数据，正文完全由 `storage` 承载，Service 负责两级缓存的读取优先级与过期清理。
-- 优点：缓存可持久化到本地盘/S3，重启与跨实例可复用；便于按书清理。
-- 代价：与 Redis 缓存并存 → 需定义两级优先级、失效顺序与容量上限；`storage.Provider` 接口与 LocalFS/S3 实现都要扩展；`§6.3` 矩阵需重写为两级。
-- 兼容性：对外 API 无变化。
-
-**待裁定项**：选 A 或 B；若选方案 B，进一步裁定选 B1 还是 B2；若选 A，是否允许在 v1.5 中直接 `DROP TABLE`（含存量环境清空确认）；若选 B，两级缓存的优先级与清理责任方（Service 统一清理 vs 各缓存自清）。
-
-**本批不落 DDL**：S6-1 仅交付本草案，`docs/schema.sql` 中 `chapter_cache` 定义保持不变。
+- **状态**：已裁定（项目方批准日期 **2026-11-11**）；A1 完成契约文本修订；**A2 物理清理未授权**。
+- **背景（A0 事实核查，2026-11-11/12）**：`docs/schema.sql` 曾定义 `chapter_cache` 表及索引，`§6.3` 矩阵也按该表描述；但 M2c 起的实现把正文缓存写入缓存抽象层（key `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`，TTL 7 天），该表自建库以来**无任何写入路径**。`A0-核查.md` 记录：表存在、0 行、两条自身外向 FK（`→ books` / `→ book_sources`，均 `ON DELETE CASCADE`）、无入向 FK、无视图/触发器/函数依赖、Go 代码 0 引用；仓库无迁移框架，`docs/schema.sql` 为唯一升级入口（情形 B）。
+- **决策**：采用**方案 A**——废弃物理表。正文缓存统一由 `pkg/cache`（Redis / 内存）承载，本地书正文由 `StorageProvider` 承载；不再保留「Redis + 物理表」双缓存。
+- **契约影响（A1 已完成）**：ER 图删除 `chapter_cache` 关系；§4.5 删除该表保留策略；§4.6.5 改为「读取顺序与缓存隔离规则」（含 Override 对缓存的真实影响）；§6.3 矩阵按实际能力（仅 TTL）重写覆盖行；§7 授权条目改为「`GET /content` 归属校验先于缓存/对象存储/网络回源」；`docs/schema.sql` 中以幂等声明 `DROP TABLE IF EXISTS chapter_cache;` 取代原建表与索引。
+- **未覆盖事项**：A0 不等于物理迁移；A2 的 `DROP TABLE` 需单独授权，且**不得在任何持久数据库（`yreader`、`yreader_test`、`yreader_m3a`、`yreader_smoke` 等）执行**；`DEF-CODE-09` 状态保持「已裁定 (v1.5, ADR-013 方案 A)，待迁移实施」，不得标为已闭环。
+- **环境边界**：dev / staging / prod 由项目方声明为 `ENV_ABSENT`（未独立部署），该定性不代表已核查过不存在的独立实例；本次核查范围仅限本机 `test`（`yreader_test`）与源码。
 
 ---
 

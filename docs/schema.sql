@@ -507,20 +507,10 @@ CREATE TABLE IF NOT EXISTS replace_rules (
 );
 CREATE INDEX IF NOT EXISTS ix_replace_rules_user_order ON replace_rules (user_id, is_enabled, order_index);
 
--- 正文缓存只存对象存储键，不存正文（正文在 StorageProvider：LocalFS/S3）
-CREATE TABLE IF NOT EXISTS chapter_cache (
-  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  book_id        uuid NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-  source_id      uuid NOT NULL REFERENCES book_sources(id) ON DELETE CASCADE,
-  chapter_index  integer NOT NULL CHECK (chapter_index >= 0),
-  object_key     text NOT NULL,
-  etag           text,
-  size_bytes     bigint NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
-  cached_at      timestamptz NOT NULL DEFAULT now(),
-  expires_at     timestamptz,
-  CONSTRAINT uq_chapter_cache_book_source_index UNIQUE (book_id, source_id, chapter_index)
-);
-CREATE INDEX IF NOT EXISTS ix_chapter_cache_expires ON chapter_cache (expires_at) WHERE expires_at IS NOT NULL;
+-- ADR-013 Scheme A:
+-- chapter_cache is deprecated.
+-- Idempotent removal for future authorized schema application.
+DROP TABLE IF EXISTS chapter_cache;
 
 CREATE TABLE IF NOT EXISTS jobs (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
