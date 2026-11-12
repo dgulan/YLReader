@@ -6,8 +6,11 @@
 GO ?= go
 PSQL ?= psql
 GOFMT ?= gofmt
+# 静态数据库目标门禁（SAFE-01 / ADR-013 S3）：纯标准库 Python，不连库、不执行 SQL。
+PYTHON ?= python3
+DB_GUARD := $(PYTHON) scripts/check-db-target.py
 
-.PHONY: build vet test lint migrate setup-test-db test-integration frontend-install frontend-type-check frontend-build compose-config
+.PHONY: build vet test lint migrate setup-test-db db-guard-migrate db-guard-setup-test-db test-integration frontend-install frontend-type-check frontend-build compose-config
 
 # 后端构建 / 静态检查 / 测试
 build:
@@ -23,16 +26,22 @@ lint:
 	@cd backend && out=$$($(GOFMT) -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 	cd backend && $(GO) vet ./...
 
-# 数据库迁移（DATABASE_URL 必填，防止静默连错默认库）
-migrate:
-	@if [ -z "$$DATABASE_URL" ]; then echo "DATABASE_URL is required"; exit 1; fi
+# 静态数据库目标门禁：解析 DATABASE_URL / TEST_DATABASE_URL 的 host/port/dbname，
+# 默认拒绝非本地测试目标。失败时 make 在进入 recipe 前即中止。
+db-guard-migrate:
+	@$(DB_GUARD) --mode migrate
+
+db-guard-setup-test-db:
+	@$(DB_GUARD) --mode setup-test-db
+
+# 数据库迁移（DATABASE_URL 必填，防止静默连错默认库；目标须通过静态门禁）。
+migrate: db-guard-migrate
 	$(PSQL) "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/schema.sql
 
 # 集成测试库（幂等）：先 DROP 再 CREATE，随后灌入权威 DDL。
-# 需要 DATABASE_URL（可连到 postgres 维护库且具备 CREATEDB）与 TEST_DATABASE_URL。
-setup-test-db:
-	@if [ -z "$$DATABASE_URL" ]; then echo "DATABASE_URL is required"; exit 1; fi
-	@if [ -z "$$TEST_DATABASE_URL" ]; then echo "TEST_DATABASE_URL is required"; exit 1; fi
+# 需要 DATABASE_URL（维护库，仅允许 postgres）与 TEST_DATABASE_URL（仅 yreader_test）。
+# 两连接串必须指向同一回环地址与端口；全部静态检查先于任何 DROP/CREATE 执行。
+setup-test-db: db-guard-setup-test-db
 	$(PSQL) "$$DATABASE_URL" -c "DROP DATABASE IF EXISTS yreader_test WITH (FORCE);"
 	$(PSQL) "$$DATABASE_URL" -c "CREATE DATABASE yreader_test;"
 	$(PSQL) "$$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/schema.sql

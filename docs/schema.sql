@@ -508,9 +508,9 @@ CREATE TABLE IF NOT EXISTS replace_rules (
 CREATE INDEX IF NOT EXISTS ix_replace_rules_user_order ON replace_rules (user_id, is_enabled, order_index);
 
 -- ADR-013 Scheme A:
--- chapter_cache is deprecated.
--- Idempotent removal for future authorized schema application.
-DROP TABLE IF EXISTS chapter_cache;
+-- chapter_cache is deprecated by the architecture decision.
+-- This general-purpose schema does not perform physical removal.
+-- Physical removal requires a separately authorized A2 migration.
 
 CREATE TABLE IF NOT EXISTS jobs (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
