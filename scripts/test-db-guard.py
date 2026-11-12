@@ -27,12 +27,16 @@ _spec.loader.exec_module(guard)
 LOCAL = "postgres://u:p@127.0.0.1:5432/"
 
 
-def migrate_env(url):
-    return {"DATABASE_URL": url}
+def migrate_env(url, **extra):
+    env = {"DATABASE_URL": url}
+    env.update(extra)
+    return env
 
 
-def setup_env(maint, test):
-    return {"DATABASE_URL": maint, "TEST_DATABASE_URL": test}
+def setup_env(maint, test, **extra):
+    env = {"DATABASE_URL": maint, "TEST_DATABASE_URL": test}
+    env.update(extra)
+    return env
 
 
 class TestDeny(unittest.TestCase):
@@ -124,6 +128,107 @@ class TestDeny(unittest.TestCase):
     def test_percent_encoded_dbname_denied(self):
         self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader%5Ftest"), "INVALID_DBNAME_DATABASE_URL")
 
+    # --- SAFE-01 v1.2.1 hardening: target-splitting environment variables ---
+
+    def test_env_pghostaddr_denied_even_when_empty(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test", PGHOSTADDR=""), "CONFLICTING_ENV_PGHOSTADDR")
+
+    def test_env_pghostaddr_value_denied(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test", PGHOSTADDR="10.0.0.5"), "CONFLICTING_ENV_PGHOSTADDR")
+
+    def test_env_pgservice_denied(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test", PGSERVICE="prod"), "CONFLICTING_ENV_PGSERVICE")
+
+    def test_env_pgservicefile_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env(LOCAL + "yreader_test", PGSERVICEFILE="/tmp/pg_service.conf"),
+            "CONFLICTING_ENV_PGSERVICEFILE",
+        )
+
+    def test_env_pgport_denied(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test", PGPORT="6000"), "CONFLICTING_ENV_PGPORT")
+
+    def test_env_pghost_denied(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test", PGHOST="10.0.0.5"), "CONFLICTING_ENV_PGHOST")
+
+    def test_env_pgdatabase_denied(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test", PGDATABASE="yreader"), "CONFLICTING_ENV_PGDATABASE")
+
+    # --- SAFE-01 v1.2.1 hardening: stricter URI validation ---
+
+    def test_missing_port_denied(self):
+        self.deny(guard.check_migrate, migrate_env("postgres://u:p@127.0.0.1/yreader_test"), "MISSING_PORT_DATABASE_URL")
+
+    def test_duplicate_query_param_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env(LOCAL + "yreader_test?sslmode=disable&sslmode=require"),
+            "DUPLICATE_PARAM_DATABASE_URL",
+        )
+
+    def test_invalid_sslmode_denied(self):
+        self.deny(guard.check_migrate, migrate_env(LOCAL + "yreader_test?sslmode=bogus"), "INVALID_SSLMODE_DATABASE_URL")
+
+    def test_negative_connect_timeout_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env(LOCAL + "yreader_test?connect_timeout=-1"),
+            "INVALID_CONNECT_TIMEOUT_DATABASE_URL",
+        )
+
+    def test_non_numeric_connect_timeout_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env(LOCAL + "yreader_test?connect_timeout=abc"),
+            "INVALID_CONNECT_TIMEOUT_DATABASE_URL",
+        )
+
+    def test_zero_connect_timeout_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env(LOCAL + "yreader_test?connect_timeout=0"),
+            "INVALID_CONNECT_TIMEOUT_DATABASE_URL",
+        )
+
+    def test_application_name_control_char_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env(LOCAL + "yreader_test?application_name=%0Aevil"),
+            "INVALID_APPLICATION_NAME_DATABASE_URL",
+        )
+
+    def test_multiple_at_signs_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env("postgres://a@b@127.0.0.1:5432/yreader_test"),
+            "AMBIGUOUS_USERINFO_DATABASE_URL",
+        )
+
+    def test_empty_username_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env("postgres://@127.0.0.1:5432/yreader_test"),
+            "AMBIGUOUS_USERINFO_DATABASE_URL",
+        )
+
+    def test_password_without_username_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env("postgres://:secret@127.0.0.1:5432/yreader_test"),
+            "AMBIGUOUS_USERINFO_DATABASE_URL",
+        )
+
+    def test_uppercase_scheme_denied(self):
+        self.deny(
+            guard.check_migrate,
+            migrate_env("POSTGRES://127.0.0.1:5432/yreader_test"),
+            "INVALID_SCHEME_DATABASE_URL",
+        )
+
+    def test_malformed_uri_denied(self):
+        self.deny(guard.check_migrate, migrate_env("postgres://[::1:5432/yreader_test"), "INVALID_URI_DATABASE_URL")
+
 
 class TestAllow(unittest.TestCase):
     def test_t15_migrate_local_test_db(self):
@@ -144,6 +249,23 @@ class TestAllow(unittest.TestCase):
     def test_safe_params_allowed(self):
         target = guard.check_migrate(migrate_env(LOCAL + "yreader_test?sslmode=disable&connect_timeout=5"))
         self.assertEqual(target["dbname"], "yreader_test")
+
+    def test_application_name_allowed(self):
+        target = guard.check_migrate(migrate_env(LOCAL + "yreader_test?application_name=yreader-migrate"))
+        self.assertEqual(target["label"], "DATABASE_URL")
+
+    def test_ipv6_loopback_allowed(self):
+        target = guard.check_migrate(migrate_env("postgres://u:p@[::1]:5432/yreader_test"))
+        self.assertEqual((target["host"], target["port"]), ("::1", 5432))
+
+    def test_no_userinfo_allowed(self):
+        target = guard.check_migrate(migrate_env("postgres://127.0.0.1:5432/yreader_test"))
+        self.assertEqual(target["dbname"], "yreader_test")
+
+    def test_setup_env_without_pg_vars_allowed(self):
+        guard.check_setup_test_db(
+            setup_env("postgres://u:p@localhost:5432/postgres", "postgres://u:p@localhost:5432/yreader_test")
+        )
 
 
 class TestSanitization(unittest.TestCase):
@@ -171,9 +293,22 @@ class TestSanitization(unittest.TestCase):
         self.assertIn("DB_GUARD=ALLOW", out)
         self.assertNotIn(self.SECRET, out)
 
+    def test_t14c_env_conflict_reason_leaks_nothing(self):
+        env = {
+            "DATABASE_URL": f"postgres://owner:{self.SECRET}@127.0.0.1:5432/yreader_test",
+            "PGHOSTADDR": "10.9.9.9",
+        }
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(buf):
+            code = guard.main(["--mode", "migrate"])
+        out = buf.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("CONFLICTING_ENV_PGHOSTADDR", out)
+        self.assertNotIn(self.SECRET, out)
+
 
 class TestMakefileWiring(unittest.TestCase):
-    """Static proof that the guard is a prerequisite (runs before any psql)."""
+    """Static proof that the guard is inlined in the same recipe as psql."""
 
     def setUp(self):
         self.text = MAKEFILE.read_text(encoding="utf-8")
@@ -186,29 +321,44 @@ class TestMakefileWiring(unittest.TestCase):
             elif current and (line.startswith("\t") or line.strip() == ""):
                 self.targets[current].append(line)
 
-    def test_migrate_requires_guard(self):
-        self.assertTrue(any("db-guard-migrate" in ln for ln in self.targets["migrate"]))
+    def recipe(self, target):
+        return "\n".join(self.targets[target])
 
-    def test_setup_test_db_requires_guard(self):
-        self.assertTrue(any("db-guard-setup-test-db" in ln for ln in self.targets["setup-test-db"]))
+    def test_migrate_inlines_guard_before_psql(self):
+        body = self.recipe("migrate")
+        self.assertIn("$(DB_GUARD) --mode migrate", body)
+        self.assertIn("$(PSQL)", body)
+        self.assertLess(body.index("$(DB_GUARD)"), body.index("$(PSQL)"))
+        self.assertIn("&&", body)
 
-    def test_guard_target_invokes_python_checker(self):
+    def test_setup_test_db_inlines_guard_before_all_psql_calls(self):
+        body = self.recipe("setup-test-db")
+        self.assertIn("$(DB_GUARD) --mode setup-test-db", body)
+        self.assertLess(body.index("$(DB_GUARD)"), body.index("$(PSQL)"))
+        self.assertEqual(body.count("$(PSQL)"), 3)
+        self.assertEqual(body.count("&&"), 3)
+
+    def test_no_prerequisite_only_guards_left(self):
+        self.assertNotIn("db-guard-migrate", self.text)
+        self.assertNotIn("db-guard-setup-test-db", self.text)
+        self.assertNotIn("migrate: db-guard", self.text)
+        self.assertNotIn("setup-test-db: db-guard", self.text)
+
+    def test_dangerous_commands_are_chained_not_separate_lines(self):
+        # Every psql line in the two DB targets must also carry the guard on the
+        # same logical recipe (continuation-joined) so `make -o` cannot skip it.
+        for target in ("migrate", "setup-test-db"):
+            body = self.recipe(target)
+            for line in body.splitlines():
+                if "$(PSQL)" in line:
+                    self.assertIn("&&", body)
+
+    def test_guard_definition_present(self):
         self.assertIn("DB_GUARD := $(PYTHON) scripts/check-db-target.py", self.text)
-        body = "\n".join(self.targets["db-guard-migrate"])
-        self.assertIn("$(DB_GUARD)", body)
-        self.assertIn("--mode migrate", body)
-        body = "\n".join(self.targets["db-guard-setup-test-db"])
-        self.assertIn("--mode setup-test-db", body)
 
     def test_no_eval_or_dynamic_execution(self):
         self.assertNotIn("eval ", self.text)
         self.assertNotIn("$$(", self.text.replace("$$($(GOFMT) -l .)", ""))
-
-    def test_psql_only_after_guard_prerequisite(self):
-        migrate = "\n".join(self.targets["migrate"])
-        self.assertIn("$(PSQL)", migrate)
-        guard_body = "\n".join(self.targets["db-guard-migrate"])
-        self.assertNotIn("$(PSQL)", guard_body)
 
     def test_schema_has_no_executable_chapter_cache_drop(self):
         sql = (ROOT / "docs" / "schema.sql").read_text(encoding="utf-8")
