@@ -984,7 +984,7 @@ RETURNING *;
 ### 12.1 ADR-013 架构决策：废弃 chapter_cache 物理表（方案 A）
 
 - **状态**：已裁定（项目方批准日期 **2026-11-11**）；A1 完成契约文本修订；**A2 物理清理未授权**。
-- **背景（A0 事实核查，2026-11-11/12）**：`docs/schema.sql` 曾定义 `chapter_cache` 表及索引，`§6.3` 矩阵也按该表描述；但 M2c 起的实现把正文缓存写入缓存抽象层（key `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`，TTL 7 天），该表自建库以来**无任何写入路径**。`A0-核查.md` 记录：表存在、0 行、两条自身外向 FK（`→ books` / `→ book_sources`，均 `ON DELETE CASCADE`）、无入向 FK、无视图/触发器/函数依赖、Go 代码 0 引用；仓库无迁移框架，`docs/schema.sql` 为唯一升级入口（情形 B）。
+- **背景（A0 事实核查，2026-11-11/12）**：`docs/schema.sql` 曾定义 `chapter_cache` 表及索引，`§6.3` 矩阵也按该表描述；但当前 HEAD 的实现把正文缓存写入缓存抽象层（key `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`，TTL 7 天），该表在当前代码库中**无任何写入路径**。由于仓库历史始于 Stage 4 压缩初始提交 `89f9b18`，M2c–S5-2 期间的实际实现过程无法完整回溯。`A0-核查.md` 记录：表存在、0 行、两条自身外向 FK（`→ books` / `→ book_sources`，均 `ON DELETE CASCADE`）、无入向 FK、无视图/触发器/函数依赖、Go 代码 0 引用；仓库无迁移框架，`docs/schema.sql` 为唯一升级入口（情形 B）。
 - **决策**：采用**方案 A**——废弃物理表。正文缓存统一由 `pkg/cache`（Redis / 内存）承载，本地书正文由 `StorageProvider` 承载；不再保留「Redis + 物理表」双缓存。
 - **契约影响（A1 已完成）**：ER 图删除 `chapter_cache` 关系；§4.5 删除该表保留策略；§4.6.5 改为「读取顺序与缓存隔离规则」（含 Override 对缓存的真实影响）；§6.3 矩阵按实际能力（仅 TTL）重写覆盖行；§7 授权条目改为「`GET /content` 归属校验先于缓存/对象存储/网络回源」；`docs/schema.sql` 中以幂等声明 `DROP TABLE IF EXISTS chapter_cache;` 取代原建表与索引。
 - **未覆盖事项**：A0 不等于物理迁移；A2 的 `DROP TABLE` 需单独授权，且**不得在任何持久数据库（`yreader`、`yreader_test`、`yreader_m3a`、`yreader_smoke` 等）执行**；`DEF-CODE-09` 状态保持「已裁定 (v1.5, ADR-013 方案 A)，待迁移实施」，不得标为已闭环。

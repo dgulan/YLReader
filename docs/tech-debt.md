@@ -25,7 +25,7 @@
 | DEF-CODE-07 | P2 部署 | MarkStaleRunningAsFailed 缺少进程标识隔离 | 已闭环 (Worker 租约 + 同机/跨机/历史任务隔离单测) |
 | DEF-CODE-08 | P2 部署 | MarkStaleRunningAsFailed 跨节点超时任务缺常驻后台巡检 | 已闭环 (v1.4) |
 | DEF-SEC-01 | P1 安全 | 书源 Header 敏感凭据缺乏应用层 AES-GCM 信封加密 | 已闭环 (v1.4) |
-| DEF-CODE-09 | P2 架构 | chapter_cache 物理表自 M2c 起未被写入；在线正文走缓存抽象与 Fetcher 回源，本地书走 StorageProvider | 已裁定 (v1.5, ADR-013 方案 A)，待迁移实施 |
+| DEF-CODE-09 | P2 架构 | chapter_cache 物理表在当前 HEAD 无代码写入路径（M2c–S5-2 早期实现历史不可完整回溯）；在线正文走缓存抽象与 Fetcher 回源，本地书走 StorageProvider | 已裁定 (v1.5, ADR-013 方案 A)，待迁移实施 |
 | DEF-BEHAVIOR-01 | P3 行为 | handleCommitError 三态语义变更记录 | 已记录 |
 | DEF-CODE-10 | P2 构建 | 本机无 C 工具链，go test -race 不可用（自 M1c 起） | 已提供 CI 配置 (v1.5, S6-1)，待首次流水线日志 |
 | DEF-CODE-11 | P2 查询优化 | relocate_fuzzy 未使用 % 前置索引谓词，pg_trgm GIN 无法加速函数调用 | 已闭环 (v1.5, S6-1) |
@@ -129,7 +129,7 @@
 
 **问题**：`POST /books/{bookId}/cache` 接受 `source_id`，但 v1.3 实现只预热 `books.active_source_id` 目录；显式传入非活跃源返回 422。契约此前未声明该约束，客户端可能误以为可指定任意已启用源。
 **v1.3 处置**：`docs/openapi.yaml` 在 `CacheBookRequest.source_id` 与 `cacheBook` description 显式声明「显式 source_id 必须等于活跃源，否则 422」，并标注多源预热未支持；实现侧三层门禁（无活跃源 / 活跃源禁用 / 显式源不一致）与契约一致。
-**v1.4（S5-2）处置**：改为多源预热——显式 `source_id` 只要属于该书 `book_source_mappings` 且目标源存在可读章节即可预热；只写 `chapter_cache(book_id, target_source_id, chapter_index)`，不改 `books.active_source_id` 与 `chapters`；锁粒度改为 `cache:<book_id>:<source_id>`；Job 响应新增 `target_source_id`（由 payload 解析，不落库）。契约同步：`CacheBookRequest.source_id` 描述、`Job.target_source_id`、`cacheBook` 202/409/422 触发条件、architecture §4.6.7 + ADR-011、schema jobs 注释。
+**v1.4（S5-2）处置**：改为多源预热——显式 `source_id` 只要属于该书 `book_source_mappings` 且目标源存在可读章节即可预热；只写 `chapter_cache(book_id, target_source_id, chapter_index)`，不改 `books.active_source_id` 与 `chapters`；注：上述「写 `chapter_cache`」为 S5-2 台账中的历史设计表述，不应直接视为已验证的实际落地行为。当前 HEAD 的正文缓存实现使用缓存键 `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`，未发现对 `chapter_cache` 物理表的代码写入路径；M2c–S5-2 期间的实现历史因早期提交压缩无法完整回溯。锁粒度改为 `cache:<book_id>:<source_id>`；Job 响应新增 `target_source_id`（由 payload 解析，不落库）。契约同步：`CacheBookRequest.source_id` 描述、`Job.target_source_id`、`cacheBook` 202/409/422 触发条件、architecture §4.6.7 + ADR-011、schema jobs 注释。
 **覆盖用例**：原 `TestM3b2CacheSourceMismatchRejected` 更名为 `TestM3b2CacheSourceNotInMappingsRejected`；新增多源预热、活跃源不变、无章节拒绝、同源防重、活跃源缺 mapping 容忍、同书跨源并发等用例。
 **当前状态**：已闭环 (v1.4)。
 
@@ -248,9 +248,9 @@
 
 ---
 
-### DEF-CODE-09（P2 架构）：chapter_cache 物理表自 M2c 起未被写入
+### DEF-CODE-09（P2 架构）：chapter_cache 物理表当前无代码写入路径（早期历史不可完整回溯）
 
-**问题**：`chapter_cache` 物理表（schema §6）自 M2c 起未被任何代码写入；在线正文缓存全量落在缓存抽象层（`yreader:cache:content:<book>:<source>:<index>`，Redis 或内存），本地书正文经 `StorageProvider` 直接读取；与 `architecture.md` §4.6.5 早期「读写 chapter_cache」的表述不一致。
+**问题**：`chapter_cache` 物理表（schema §6）在当前 HEAD 下未发现任何代码写入路径；M2c–S5-2 期间的实际实现因早期历史压缩至初始提交 89f9b18，无法完整回溯；在线正文缓存全量落在缓存抽象层（`yreader:cache:content:<book>:<source>:<index>`，Redis 或内存），本地书正文经 `StorageProvider` 直接读取；与 `architecture.md` §4.6.5 早期「读写 chapter_cache」的表述不一致。
 
 **处置决议（S5-2）**：保持高性能 Redis/内存缓存架构，不增加冗余 DB 表写入；`architecture.md` §4.6.7 已按实际改为「写入缓存键 `yreader:cache:content:<book>:<source>:<index>`」；物理表 `chapter_cache` 保留但不再写入。
 
@@ -312,7 +312,7 @@
 - 本封板令为 Stage 4 最终法定记录；后续变更须走 Stage 5 或 v1.4 契约修订流程。
 - Stage 5 S5-2（DEF-OAS-08 多源缓存预热）闭环：契约四份同步（openapi / architecture §4.6.7 + ADR-011 / schema jobs 注释 / 本台账），实现改为按「书 + 目标源」独立锁与独立缓存目录；代码提交 `86aff0f`、契约提交 `42b70bb`；实测 **151 PASS + 2 SKIP + 0 FAIL**（较 S5-1 的 143 + 8）；`TestM3b2CacheSourceMismatchRejected` 更名为 `TestM3b2CacheSourceNotInMappingsRejected`；S5-1 首周三项同收（`TestSourceImportOverwriteSeals` / `errors.Is(pgx.ErrNoRows)` / `?ids=` 精准导出）。
 - 不采纳项（记录在案）：上轮审计 P2-3「`TestCacheMultiSourcePreheat` 仅断言 `f.count() != 0`」——`succeeded` 断言已隐含每章成功抓取，且 `res.total` 断言（3 vs 4 章不同）覆盖了源区分；若 S5-4 压测发现覆盖率缺口再补。
-- 本批新登记 DEF-CODE-09（`chapter_cache` 物理表自 M2c 起未被写入 → 归档 v1.5 架构评估）。
+- 本批新登记 DEF-CODE-09（`chapter_cache` 物理表在当前 HEAD 无写入路径，早期实现历史不可完整回溯 → 归档 v1.5 架构评估）。
 - 单章响应式预热（非任务型，如 `GET /content?prefetch=true`）推迟到 v1.5 设计；S5-2 只交付 Worker 预热路径 `WarmChapterForSource`。
 
 ---
@@ -328,7 +328,7 @@
 - 测试跃迁轨迹（集成用例级，`go test -tags integration ./... -count=1 -v`）：Stage 4 基线 85 → S5-1 143 → S5-2 151 → S5-3 155 → S5-4 **160 PASS + 2 SKIP + 0 FAIL**。
 - 43 operationId 零破坏核验：S5-4 仅新增顶层 `/metrics` 与条件挂载的 `/debug/pprof/*`，`docs/openapi.yaml` 未新增任何 path，`operationId:` 计数实测 43。
 - S5-4 观测与压测收口：`backend/internal/api/metrics.go` 注册 `yreader_jobs_total` / `yreader_sandbox_executions_total` / `yreader_ssrf_blocked_total` 并预置零值 series；`/metrics` 免 JWT（反代限内网），`/debug/pprof/*` 由 `PPROF_ENABLED=true` 开启；10k 种子 EXPLAIN 断言 `ix_book_sources_rules_gin`（`rules @>`）与 `ix_chapters_title_trgm`（`%` 前置谓词）均可被选用且不出现 `Seq Scan`。
-- 遗留至 v1.5 的归档项：DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-09（`chapter_cache` 物理表未写入）、DEF-CODE-10（本机无 C 工具链，`-race` 改由 CI/Docker 执行）、DEF-CODE-11（`relocate_fuzzy` 未使用 `%` 前置索引谓词）。
+- 遗留至 v1.5 的归档项：DEF-CODE-04（状态 ③ 无法单测）、DEF-CODE-09（`chapter_cache` 物理表在当前 HEAD 无写入路径）、DEF-CODE-10（本机无 C 工具链，`-race` 改由 CI/Docker 执行）、DEF-CODE-11（`relocate_fuzzy` 未使用 `%` 前置索引谓词）。
 - 本批未触发 DEF-CODE-12：api 包 goleak `TestMain` 一次通过，仅白名单 `pgxpool.(*Pool).triggerHealthCheck`（纯字符串，无 Markdown 链接）。
 - S5-4 的 trigram EXPLAIN 为索引可选用性验证，非生产 0.6 阈值下查询计划验证。
 - 两 EXPLAIN 用例在 `enable_seqscan=off` 下断言索引可服务性；生产默认配置下规划器是否主动选索引，以 v1.5 压测实测为准。
