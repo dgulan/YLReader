@@ -16,7 +16,7 @@ export default defineConfig({
     // 开发期将 /api 代理到后端，规避 CORS
     proxy: {
       '/api': {
-        target: 'http://localhost:8080',
+        target: process.env.VITE_API_TARGET ?? 'http://localhost:8080',
         changeOrigin: true,
       },
     },
