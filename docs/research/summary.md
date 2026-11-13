@@ -140,7 +140,7 @@ graph LR
 
 ## 6. 净室合规声明
 
-- 本次 Stage 1 **未复制、未粘贴、未软链、未引入**任何参考仓库的源码到 `D:\YReader\backend\`、`frontend\`、`crates\` 或其他源码目录；所有写入仅发生在 `D:\YReader\docs\research\` 下的 7 个 `.md`。
+- 本次 Stage 1 **未复制、未粘贴、未软链、未引入**任何参考仓库的源码到 `D:\YLReader\backend\`、`frontend\`、`crates\` 或其他源码目录；所有写入仅发生在 `D:\YLReader\docs\research\` 下的 7 个 `.md`。
 - 未运行 `references/` 下任何构建、测试或安装命令；未联网抓取；未修改 `references/` 下任何文件（仅只读访问）。
 - 报告中出现的代码片段均为**单条 ≤2 行的引用**（用于证据标注），全文代码引用占比 < 10%，不构成可编译/可运行的代码复制。
 - `warpdotsys_reader-dev` 已被识别为**反编译恢复工程**（`reports/DECOMPILATION-RISK.md:5-6`、`reports/GIT-PROVENANCE.md:9-11`）。我们**不借鉴其实现代码**，只把它的行为与文档当作黑盒观察对象；任何与它相似的功能都将由我们独立设计实现。
@@ -186,4 +186,4 @@ graph LR
 | `1432433gg_reader-next.md` | 完整 | 44 | 与 reader-rust 差异 |
 | `summary.md` | — | — | 本文件 |
 
-自查结论：7 个文件全部位于 `D:\YReader\docs\research\`；`D:\YReader` 根目录仅新增 `docs/`（`references/` 未改动）；未创建 `backend/`、`frontend/`、`crates/` 等目录。
+自查结论：7 个文件全部位于 `D:\YLReader\docs\research\`；`D:\YLReader` 根目录仅新增 `docs/`（`references/` 未改动）；未创建 `backend/`、`frontend/`、`crates/` 等目录。

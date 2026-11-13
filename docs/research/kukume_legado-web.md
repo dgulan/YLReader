@@ -1,6 +1,6 @@
 # kukume_legado-web 研究报告
 
-> 仓库：`D:\YReader\references\kukume_legado-web` | 线上：https://github.com/kukume/legado-web
+> 仓库：`D:\YLReader\references\kukume_legado-web` | 线上：https://github.com/kukume/legado-web
 > 技术栈：Kotlin 2.4.21 / JVM 21 / Ktor 3.6.0（Netty，含 JWT、SSE、WebSockets、CORS、压缩）/ Exposed 1.5.1 + HikariCP 7.1 + SQLite（默认）/ PostgreSQL / bcrypt / Gson / OkHttp 5.5.0 / Jsoup 1.23.2 + JsoupXpath 2.5.5 + json-path 3.0.0 / Rhino（`org.htmlunit:htmlunit-core-js:5.3.0-legado.4`，自研封装 `com.script.rhino`）/ 前端 Vue 3.5 + TypeScript + Vite 8 + naive-ui 2.45 + Pinia 4 + PWA
 > 代码规模：445 个文件；最大文件 `ShelfService.kt` 985 行、`AnalyzeRule.kt` 1,053 行、`AnalyzeUrl.kt` 1,050 行、`JsExtensions.kt` 1,353 行、`ReviewRuleParser.kt` 451 行、`Tables.kt` 289 行；`com/script/rhino/` 共 18 个文件（`RhinoScriptEngine.kt` 360、`RhinoContext.kt` 354、`RhinoClassShutter.kt` 222）
 > 分析范围与方法：读 `server/build.gradle.kts`、`Application.kt`、`db/{Tables,DatabaseFactory,DbEngineStore}.kt`、`security/NetworkGuard.kt`、`com/script/rhino/*` 关键段、`app/model/analyzeRule/{AnalyzeRule,RuleAnalyzer,AnalyzeByJSoup,ReviewRuleParser}.kt`、`app/help/{ConcurrentRateLimiter,HttpHelper,HttpLogSanitizer,SSLHelper}.kt`、`data/entities/{BookSource,rule/ReviewRule}.kt`、`web/routes/*` 清单、`web/service/*` 清单、`web/package.json`。未覆盖：`ShelfService`/`SourceConfigService` 全量业务、`BrowserBridge`(637)/`RemoteBrowser`(693) 的 CDP 协议细节、`local/EpubParser`、i18n 资源。

@@ -25,16 +25,16 @@
 
 | 文件 | SHA-256 |
 |---|---|
-| docs/architecture.md | cc07a5021fdf992723dffb721d07fda9ed1ee63a57f814c00fda922be77acf3a |
-| docs/schema.sql | 51dce055e7f7363f88433c067484ab75334c298f1078991400486c30d0942c3b |
-| docs/openapi.yaml | dbf2a02adf2e1d5497d2ed46aba25b68c9193bf454975407b207f8cdececb503 |
-| docs/research/1432433gg_reader-next.md | f9a2d19e736f3df8a130dba13f31fa2d73c2589eeef23308970c1b7ad3a82568 |
-| docs/research/changshengyu_openreader.md | 56e25f4cce3ee4ea2e696fdb9d496fecb438df143971a1e29c2b7a7854038f52 |
-| docs/research/changshengyu_reader-dev.md | 68bf7b1f9bcdca41aa73c416dbb41a98db4b6a7a29c7243b1ffb5c10d74e16d0 |
-| docs/research/givenge_reader-rust.md | b0760b5923f1313b90ccfa10147eb72026df1bb0984adcf47371ee77270782be |
-| docs/research/kukume_legado-web.md | cfe8ee5c93fd8aa3f2a017c05770c98903d0c1f485e372c5e61d50388148bcac |
-| docs/research/summary.md | 9ab80243ca20f70dfade3a75f06406110c3b8fc5f9b4e9eb482a48d60b3dd927 |
-| docs/research/warpdotsys_reader-dev.md | b0ca90c399a3edb9ba71836b24f2b5a682a21e0882aaab3bda0fc08fb55167d4 |
+| docs/architecture.md | b58c64696ef5310863244b64fd0c6a62b876d7098b1f07c1b2451853ccccaaa9 |
+| docs/schema.sql | fa26a8e596a4f2c89bd2ef9713ff1028aeb42925377c25ae26f957a165ba07b0 |
+| docs/openapi.yaml | 98d9425aa38e5b239b48e19dd81572c469380e96b2b4fd45ed1377982b9caddc |
+| docs/research/1432433gg_reader-next.md | f47d1e87516b6980d86ed7a4b84f3db526770f422c4786b7aa1df5a2c65cb678 |
+| docs/research/changshengyu_openreader.md | 909606b90fe636aeac64ac0cd2e745d960915bba534a5bcae0c2e248778bcde8 |
+| docs/research/changshengyu_reader-dev.md | eaf8a857590c548a3a835c45309f5615f0c6d711afc8bb1649ef8caa8256d9fa |
+| docs/research/givenge_reader-rust.md | 28329b84333a1788eeaaea9418630ea6705c016d9a3d569f6973dfefe658ceb7 |
+| docs/research/kukume_legado-web.md | beb9abf848cce686a0a610dd618501acfd165977fcd287e231eb1b1ddfd9013b |
+| docs/research/summary.md | 891befc65a48d99cff966ee176353ee8b3b1ad12c5934bd0df936b311ddf09aa |
+| docs/research/warpdotsys_reader-dev.md | 1e023d2ec33a6d00d8073ba633d2c639db7d55eaffbf4d91598c20af586fe6fe |
 
 
 ## ADR-017 修订 1（2026-11-13）
@@ -49,3 +49,7 @@
 ## 跨平台换行补记（2026-11-13）
 
 发布前验证发现Windows工作树中的冻结文档含CRLF，而Git自动转换会令Linux检出摘要不同。仅将冻结研究/架构/OpenAPI文档统一为LF，并更新上表摘要；.gitattributes约束文档换行。内容、Frozen v1.5修订2语义、API 1.0.0、数据库版本1及已发布SQL迁移基线均不变。
+
+## 项目更名补记（2026-11-13）
+
+按用户指定，将项目展示名、文档和路径改为YLReader（D:\YLReader），远端为https://github.com/dgulan/YLReader。仅展示名称和文档注释变化，更新本记录摘要；API操作、DDL、数据库版本不变。已发布001_baseline.sql字节与校验和保持不可变，其历史产品标签保留；基线对照测试只归一化这一处标签注释。Go模块、IndexedDB、环境变量、数据库/存储标识保留兼容名；Compose显式name: yreader，避免目录改名误建空卷。

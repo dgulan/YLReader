@@ -1,13 +1,13 @@
 openapi: 3.0.3
 
 info:
-  title: YReader API
+  title: YLReader API
   version: 1.0.0
   description: |
     ## 状态
     - Frozen v1.5（契约设计冻结；发布验收未完成，见 contract-freeze-v1.5.md）
 
-    YReader（Clean-Room Reader）前后端契约。
+    YLReader（Clean-Room Reader）前后端契约。
 
     ## 全局约定
     - 所有路径前缀 `/api/v1`（健康检查除外）。
@@ -27,7 +27,7 @@ info:
     - HTTP 响应体 16 MiB；重定向 ≤ 5 跳；重试 ≤ 2 次（共 3 attempts）。
     - 目标站命中内网/保留地址一律 403 `blocked_private_address`。
   contact:
-    name: YReader
+    name: YLReader
   license:
     name: Proprietary
 

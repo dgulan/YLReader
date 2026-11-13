@@ -1,4 +1,4 @@
-# YReader 统一构建/测试/Lint/迁移入口
+# YLReader 统一构建/测试/Lint/迁移入口
 # 约定：所有命令在仓库根目录执行。
 # 工具链解耦：默认使用 PATH 中的 go/psql/gofmt；
 #   本机可用 `make GO=./.toolchain/go/bin/go ...` 覆盖 go，`make PSQL="..."` 覆盖 psql。

@@ -1,6 +1,6 @@
 # warpdotsys_reader-dev 研究报告
 
-> 仓库：`D:\YReader\references\warpdotsys_reader-dev` | 线上：https://github.com/warpdotsys/reader-dev
+> 仓库：`D:\YLReader\references\warpdotsys_reader-dev` | 线上：https://github.com/warpdotsys/reader-dev
 > 技术栈：Kotlin 1.5.21 + Java 8 字节码（class major 52）/ Spring Boot 2.1.6.RELEASE + Vert.x 3.8.x / OkHttp 4.9.1 / Rhino 1.7.13 / Jsoup 1.14.1 + JsoupXpath 2.5.0 + json-path 2.6.0 / Guava（`InternetDomainName`）/ Vue 3.5.42 + Element Plus 2.10 + Pinia 3 + Vite 7（`web-vue3/`，同时保留 Vue 2 旧前端）/ 内置 Camoufox（Python 子进程浏览器）/ 独立 `license-server`（Java 11 + SQLite）
 > 代码规模：1,857 个文件；`src/test` 下 103 个测试文件；`docs/` 100+ 篇日期化交付文档、`reports/` 20+ 篇取证/差分报告；规则内核相对基线有增减（`AnalyzeRule.kt` 734→756、`AnalyzeUrl.kt` 629→703、`WebBook.kt` 246→294、`BookContent.kt` 149→159、`JsExtensions.kt` 910→945），存储层 `VertExt.kt` 268→594，`BookController.kt` 3,261→3,642
 > 分析范围与方法：以 `changshengyu_reader-dev` 为基线做**逐文件哈希比对 + `Compare-Object` 行级差分**，只深读有差异的文件（`analyzeRule/*`、`webBook/*`、`adapters/*`、`utils/{VertExt,BrowserCookieJar,BrowserNetworkPolicy,CamoufoxWebviewRenderer}.kt`、`entities/{Book,BookSource}.kt`、`api/YueduApi.kt`）；另读 `reports/{JAR-STRUCTURE-AND-VERSION,GIT-PROVENANCE,DECOMPILATION-RISK}.md` 作为来源证据。未覆盖：`license-server` 业务实现、`browser-poc` 的 Python worker 全量、`semantic-review/`、`web-vue3` 组件细节、Camoufox 协议逐字段。

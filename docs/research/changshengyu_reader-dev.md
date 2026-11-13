@@ -1,6 +1,6 @@
 # changshengyu_reader-dev 研究报告
 
-> 仓库：`D:\YReader\references\changshengyu_reader-dev` | 线上：https://github.com/changshengyu/reader-dev
+> 仓库：`D:\YLReader\references\changshengyu_reader-dev` | 线上：https://github.com/changshengyu/reader-dev
 > 技术栈：Kotlin 1.5.21 + Java 11 / Spring Boot 2.1.6.RELEASE + Vert.x 3.8.1（`RestVerticle` 注册路由）/ JavaFX WebView 11.0.2（`ReaderUIApplication`）/ OkHttp 4.9.1 / Jsoup 1.14.1 + JsoupXpath 2.5.0 + json-path 2.6.0 / Rhino 1.7.13（`src/lib/rhino-1.7.13-1.jar`）/ Gson + Jackson / 前端 Vue 2.6 + Element UI 2.15（`web/`）/ Gradle Kotlin DSL
 > 代码规模：486 个文件；120 个 `.kt` + 94 个 `.java`；核心规则引擎 `analyzeRule` 共 7 个 Kotlin 文件约 2,200 行（`AnalyzeRule.kt` 734、`AnalyzeUrl.kt` 629、`AnalyzeByJSoup.kt` 494、`RuleAnalyzer.kt` 381、`AnalyzeByJSonPath.kt` 183、`AnalyzeByXPath.kt` 148、`AnalyzeByRegex.kt` 59），`JsExtensions.kt` 910 行，`BookController.kt` 3,261 行，`BaseController.kt` 403 行
 > 分析范围与方法：完整读取 `model/analyzeRule/` 全部 7 个文件的关键段落、`model/webBook/{WebBook,BookContent}.kt`、`help/http/{HttpHelper,OkHttpUtils,EncodeConverter}.kt`、`help/JsExtensions.kt` 签名清单、`help/CacheManager.kt`、`data/entities/**`、`com/htmake/reader/api/controller/{BookController,BaseController}.kt` 的存储与进度段落、`utils/VertExt.kt` 的 `saveStorage/getStorage`、`build.gradle.kts`。检索手段：`grep` 规则前缀（`@css:`/`@XPath:`/`@Json:`/`@js:`/`<js>`/`{{`/`%%`/`##`/`@put:`/`@get:`）、`grep` 网络/编码/SSRF/正则编译模式。未覆盖：`web/` 下 25 个 `.vue` 交互细节、`WebdavController.kt`(750 行) 的 DAV 协议实现、`RssSource` 抓取执行链、`localBook/*` 本地书解析、JavaFX UI。

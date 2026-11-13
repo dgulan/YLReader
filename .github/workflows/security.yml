@@ -17,6 +17,20 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Verify frozen contract bytes across platforms
+        run: |
+          python - <<'PY'
+          import hashlib, pathlib, re
+          record = pathlib.Path('docs/contract-freeze-v1.5.md').read_text(encoding='utf-8')
+          entries = re.findall(r'^\| (docs/[^|]+) \| ([a-f0-9]{64}) \|$', record, re.M)
+          if len(entries) != 10 or len({p for p, _ in entries}) != 10:
+              raise SystemExit('missing or duplicate frozen contract entries')
+          for path, expected in entries:
+              actual = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit('frozen contract checksum mismatch: ' + path)
+          print('10 frozen contract checksums match')
+          PY
       - uses: actions/setup-go@v5
         with:
           go-version-file: backend/go.mod

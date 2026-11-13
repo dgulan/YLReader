@@ -1,6 +1,6 @@
 # 1432433gg_reader-next 研究报告
 
-> 仓库：`D:\YReader\references\1432433gg_reader-next` | 线上：https://github.com/1432433gg/reader-next
+> 仓库：`D:\YLReader\references\1432433gg_reader-next` | 线上：https://github.com/1432433gg/reader-next
 > 技术栈：Rust（edition 2021，`reader-next 1.1.6`）/ Axum 0.7 + Tokio / sqlx 0.7（SQLite）/ reqwest 0.12（rustls）/ rquickjs 0.7（QuickJS）/ scraper + jsonpath_lib + sxd-xpath / `regex`（线性时间）/ **新增 `lopdf`(PDF) + `mobi`(MOBI) + `image`(jpeg/png/webp) + `json5`** / 前端 Vue 3.5（`frontend/`）+ 文档站 VitePress（`docs/`）
 > 代码规模：305 个文件；`src/api/handlers/book.rs` 3,875 行、`src/service/book_service.rs` 2,387 行、`src/parser/rule_engine.rs` 2,525 行、`src/parser/html.rs` 855 行、`src/parser/js.rs` 511 行；`docs/` 下 20+ 篇 VitePress 文档（`book-source/{spec,javascript,rules,search-rule,book-info,content-rule,toc-rule}.md`）；`tests/book_source_compat.rs` 703 行
 > 分析范围与方法：**以 `givenge_reader-rust` 为基线做逐文件哈希 + `Compare-Object` 行级差分**，只深读有差异的文件；另读 `docs/book-source/spec.md`、`docs/book-source/javascript.md`、`src/api/handlers/book.rs` 差异段、`src/service/book_service.rs` 新增函数清单、`src/crawler/*`。未覆盖：`local_*` 本地书、AI 相关、`frontend/` 组件、`docs/.vitepress` 站点配置。

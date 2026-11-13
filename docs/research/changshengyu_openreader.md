@@ -1,6 +1,6 @@
 # changshengyu_openreader 研究报告
 
-> 仓库：`D:\YReader\references\changshengyu_openreader` | 线上：https://github.com/changshengyu/openreader
+> 仓库：`D:\YLReader\references\changshengyu_openreader` | 线上：https://github.com/changshengyu/openreader
 > 技术栈：Go 1.26.10 / Gin 1.10 / GORM 1.25 + **SQLite（`mattn/go-sqlite3`，cgo）** / JWT（`golang-jwt/v5`）/ goquery 1.9.2 + `antchfx/htmlquery` 1.3.4 + `PaesslerAG/jsonpath` / 自研 ICU 风格 charset 检测（`charset_icu.go` + 508 行表）/ **无 JS 引擎（`@js:` 被显式禁用）** / 前端 Vue 3.5 + Element Plus 2.10 + Pinia 3 + Vite 8
 > 代码规模：1,163 个文件；`backend/engine` 下 42 个 Go 文件，核心 `source_parser.go` 1,891 行、`source_rule_evaluator.go` 1,198 行、`fetcher.go` 786 行、`source_network_policy.go` 613 行、`source_request.go` 470 行、`charset_icu.go` 453 行；契约测试极多（`parser_test.go` 1,333 行、`source_network_policy_contract_test.go` 695 行、`source_rule_evaluator_test.go` 662 行）
 > 分析范围与方法：读 `backend/go.mod`、`engine/{source_rule_evaluator,source_parser,fetcher,source_network_policy,source_request,charset_icu}.go` 关键段、`models/models.go`、`db/db.go`、`docs/security-review-checklist.md`、`docs/upstream-alignment-audit.md`；用 `grep` 验证 JS/SSRF/限流/迁移模式。未覆盖：`epub_parser.go`/`txt_parser.go`/`umd_parser.go` 的格式细节、`services/*` 全部、前端组件。

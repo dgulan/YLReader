@@ -12,6 +12,8 @@ func TestBaselineMatchesAuthoritativeSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// The product-label comment may change; the published migration checksum must not.
+	text = strings.Replace(text, "-- YLReader (Clean-Room Reader)", "-- YReader (Clean-Room Reader)", 1)
 	start := strings.Index(text, "-- ADR-017 baseline registration")
 	end := strings.LastIndex(text, "COMMIT;")
 	if start < 0 || end < start {

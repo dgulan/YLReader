@@ -1,6 +1,6 @@
 # givenge_reader-rust 研究报告
 
-> 仓库：`D:\YReader\references\givenge_reader-rust` | 线上：https://github.com/givenge/reader-rust
+> 仓库：`D:\YLReader\references\givenge_reader-rust` | 线上：https://github.com/givenge/reader-rust
 > 技术栈：Rust 1.0.8 / edition 2021 / Axum 0.7 + Tokio / sqlx 0.7（**SQLite only**，`migrate`）/ reqwest 0.12（rustls-tls，gzip/brotli/deflate/cookies）/ **rquickjs 0.7（QuickJS，执行 `@js:` 规则）** / scraper 0.20 + `jsonpath_lib` 0.3 + `sxd-xpath` 0.4 / `regex` 1.x（**线性时间引擎**）/ encoding_rs / aes + cbc / feed-rs / zip；前端 Vue 3.5 + Vite 8（`frontend/`），另保留 `web/` 旧 Vue2 客户端
 > 代码规模：331 个文件；最大文件 `src/api/handlers/book.rs` 3,185 行、`src/parser/rule_engine.rs` 2,508 行、`src/service/book_service.rs` 1,717 行、`src/service/user_service.rs` 1,306 行、`src/parser/html.rs` 847 行、`src/crawler/url_analyzer.rs` 665 行、`src/parser/js.rs` 528 行；`src/storage/db/migrations/` 仅 3 个 SQL（20/14/43 行）
 > 分析范围与方法：读 `Cargo.toml`、`src/parser/{rule_analyzer,rule_engine,html,js}.rs` 关键段、`src/model/book_source.rs`、`src/storage/db/migrations/*.sql`、`src/storage/cache/file_cache.rs`、`src/crawler/{url_analyzer,http_client,fetcher}.rs` 关键点、`src/api/router.rs` 路由清单；用 `grep` 验证 JS 限额/SSRF/重试/模式识别。未覆盖：`service/local_epub_book.rs`(1,213)/`local_txt_book.rs`、AI 相关 handler、`web/` 旧前端、`tests/yckceo_live_sources.rs` 的真实源清单。

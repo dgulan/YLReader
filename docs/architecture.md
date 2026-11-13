@@ -1,4 +1,4 @@
-# YReader 系统架构与书源沙箱设计
+# YLReader 系统架构与书源沙箱设计
 
 > 状态：Frozen v1.5（契约设计冻结；产品仍在开发，发布验收未完成，见 contract-freeze-v1.5.md）
 > 对应交付物：本文件、[schema.sql](schema.sql)、[openapi.yaml](openapi.yaml)

@@ -1,6 +1,8 @@
-# YReader 本地编排（App + PostgreSQL + Redis + Frontend 静态托管）
+# YLReader 本地编排（App + PostgreSQL + Redis + Frontend 静态托管）
 # 注意：宿主机 5432 已被本机 PostgreSQL 16.15 占用，故 postgres 服务不暴露宿主端口（仅容器内网）。
 # frontend 提供 SPA 托管与 /api 同源代理。启动步骤见 docs/deployment.md。
+name: yreader
+
 services:
   app:
     build: ./backend

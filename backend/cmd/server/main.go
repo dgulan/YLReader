@@ -1,4 +1,4 @@
-// Package main 是 YReader 后端 Web API 入口：装配 PG 连接池、认证、书源服务、
+// Package main 是 YLReader 后端 Web API 入口：装配 PG 连接池、认证、书源服务、
 // 引擎（fetcher/sandbox/parser）与 HTTP 路由。
 package main
 

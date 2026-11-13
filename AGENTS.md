@@ -15,18 +15,18 @@
 
 | 本地目录 | 线上仓库 |
 |---|---|
-| `D:\YReader\references\warpdotsys_reader-dev` | https://github.com/warpdotsys/reader-dev |
-| `D:\YReader\references\changshengyu_openreader` | https://github.com/changshengyu/openreader |
-| `D:\YReader\references\givenge_reader-rust` | https://github.com/givenge/reader-rust |
-| `D:\YReader\references\1432433gg_reader-next` | https://github.com/1432433gg/reader-next |
-| `D:\YReader\references\kukume_legado-web` | https://github.com/kukume/legado-web |
-| `D:\YReader\references\changshengyu_reader-dev` | https://github.com/changshengyu/reader-dev |
+| `D:\YLReader\references\warpdotsys_reader-dev` | https://github.com/warpdotsys/reader-dev |
+| `D:\YLReader\references\changshengyu_openreader` | https://github.com/changshengyu/openreader |
+| `D:\YLReader\references\givenge_reader-rust` | https://github.com/givenge/reader-rust |
+| `D:\YLReader\references\1432433gg_reader-next` | https://github.com/1432433gg/reader-next |
+| `D:\YLReader\references\kukume_legado-web` | https://github.com/kukume/legado-web |
+| `D:\YLReader\references\changshengyu_reader-dev` | https://github.com/changshengyu/reader-dev |
 
-**路径红线**：所有参考仓库均位于 `D:\YReader\references\` 下，使用绝对路径访问。严禁将 `references\` 下的任何代码复制、粘贴、软链或引入到本项目的 `backend\`、`frontend\`、`crates\` 等源码目录。
+**路径红线**：所有参考仓库均位于 `D:\YLReader\references\` 下，使用绝对路径访问。严禁将 `references\` 下的任何代码复制、粘贴、软链或引入到本项目的 `backend\`、`frontend\`、`crates\` 等源码目录。
 
 ### 铁律 1：净室设计原则 (Clean-Room Isolation)
 
-- **只复刻成熟功能与用户体验，绝不盲目复制旧代码**：外部 6 个参考仓库（位于 `D:\YReader\references\`，只读）仅在**阶段 1（研究）**供 REA 插件提取业务逻辑、状态机与规则边界。
+- **只复刻成熟功能与用户体验，绝不盲目复制旧代码**：外部 6 个参考仓库（位于 `D:\YLReader\references\`，只读）仅在**阶段 1（研究）**供 REA 插件提取业务逻辑、状态机与规则边界。
 - **彻底切断运行时与代码依赖**：严禁将旧项目中的 Kotlin/Java/Rust/旧版 Vue 代码直接复制粘贴到本仓库；严禁沿用旧版基于本地零散 JSON 文件落盘的存储架构。
 
 ### 铁律 2：契约先行与克制选型 (Contract-First & Pragmatism)
@@ -40,7 +40,7 @@
 
 Agent 必须根据当前所处阶段严格限制自身读写边界：
 
-1. **Stage 1: 研究 (Research)** — 仅调用 `REA` 分析 `D:\YReader\references\` 下的 6 个参考仓库，产出物**仅限**写入 `docs/research/*.md`。禁止创建业务源码。
+1. **Stage 1: 研究 (Research)** — 仅调用 `REA` 分析 `D:\YLReader\references\` 下的 6 个参考仓库，产出物**仅限**写入 `docs/research/*.md`。禁止创建业务源码。
 2. **Stage 2: 设计 (Design)** — 产出并评审 `docs/architecture.md`、`docs/schema.sql`、`docs/openapi.yaml`。禁止编写前后端实现代码。
 3. **Stage 3: 重构/脚手架 (Scaffold)** — 初始化干净的 Monorepo 工程底座、Linter、Dockerfile 与 `docker-compose.yml`。
 4. **Stage 4: 开发 (Develop)** — 按垂直模块优先级推进：`M1 书源解析核心 -> M2 阅读器与书架 -> M3 本地书库与外围同步`。每完成一个子模块必须编写并通过单元测试。
@@ -87,7 +87,7 @@ Agent 必须根据当前所处阶段严格限制自身读写边界：
 Agent 在创建或修改文件时，必须严格遵循以下目录拓扑，不得随意在根目录散落源码文件：
 
 ```text
-D:\YReader\
+D:\YLReader\
 ├── AGENTS.md                   # 本架构宪章（Agent 必读）
 ├── docker-compose.yml          # 容器编排配置 (App + PostgreSQL + Redis)
 ├── Makefile                    # 统一构建、测试、Lint 与迁移脚本

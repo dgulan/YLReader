@@ -1,5 +1,5 @@
 -- =============================================================================
--- YReader (Clean-Room Reader) — PostgreSQL 权威 DDL
+-- YLReader (Clean-Room Reader) — PostgreSQL 权威 DDL
 -- 状态：Frozen v1.5（契约设计冻结；发布验收未完成，见 contract-freeze-v1.5.md）
 --
 -- 设计约束（与 docs/architecture.md 一一对应）：
