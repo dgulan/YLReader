@@ -1,5 +1,7 @@
 # 依赖安全整改交付（2026-11-13）
 
+后续实际Linux race、arm64镜像及远程CI验证见[发布前验证](pre-release-verification-2026-11-13.md)；本记录下方为当轮历史证据。
+
 依据 dependency-security-design.md 实施；不读取/复制参考源码。Frozen v1.5修订2、43个API操作、数据库版本1与已发布迁移基线不变。
 
 ## 版本与范围
