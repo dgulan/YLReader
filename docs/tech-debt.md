@@ -1,5 +1,17 @@
 # 技术债务与契约待办（Tech Debt & Contract Backlog）
 
+> 当前：设计契约 Frozen v1.5，前端按冻结契约推进；原 S6-2 LOCKED 与等待 S6-4 冻结的记录由 ADR-016 替代。产品发布未封板，延期项见 contract-freeze-v1.5.md。
+
+> 2026-11-13 依赖安全整改：Go1.26.11、JWT/XPath等公告修复及生产镜像zlib/libxslt补丁已完成，新增独立安全CI。最终amd64镜像与双架构Go源码扫描0发现；196项顶层集成、50项前端单测及生产Nginx上11项浏览器流程通过。远程CI、race和arm64实际镜像仍待验收，见 [dependency-security-verification.md](dependency-security-verification.md)。
+
+> ADR-017 修订 1：已实现版本 1 账本、schema status/check/up、事务锁及校验和检查；新库登记与存量升级路径已在隔离库验收，详见 migration-verification.md。前批“没有版本表”属于历史状态；生产迁移入口和旧版数据导入仍延期。
+
+> ADR-018 修订 2：同步导入预算已可配置，504/import_timeout 与前端结果未确认提示已实现，详见 import-budget-verification.md。P1-5 的异步导入、独立性能门禁及并行负载稳定性仍未闭环，不以放宽原测试阈值结项。
+
+> 2026-11-13 审计第一批整改：就绪/Redis、配置校验、kv 门禁、正文回填降级已补齐；存量库增加只读启动保护，版本化迁移及大书预算仍未闭环。详细验证与剩余项见 [audit-remediation-2026-11-13.md](audit-remediation-2026-11-13.md)。
+
+> 历史阅读约定：以下 Stage / Draft / “最新补交”段落均按当时阶段归档；当前状态以上述冻结记录及审计整改为准，不把历史测试数字当作当前复验结果。
+
 本文件归档「实现已落地、但契约或实现存在已知边界」的条目，供 v1.3 契约修订与后续压测阶段
 统一处理。**只记录，不在此处修改 `docs/openapi.yaml` / `docs/schema.sql`。**
 
@@ -349,3 +361,31 @@
 - 契约版本：三份顶部均为 `Draft v1.5`（S6-1 起），S6-4 终审通过后改 `Frozen v1.5`。
 - `info.version` 仍保持 `1.0.0`（是否跳跃待项目方在 S6-4 裁定）。
 - 门禁基线：Stage 5 封板 160 PASS + 2 SKIP；S6-1 因 DEF-CODE-04 去 Skip，SKIP 由 2 降至 1，另新增 relocate 相关 3 项，实测 164 PASS + 1 SKIP + 0 FAIL。
+
+## v1.5 冻结前复核（2026-11-12）
+
+本轮审查结果见 [v1.5-contract-review.md](v1.5-contract-review.md)，状态仍为 Draft。
+
+纠正前文历史表述：通用 `schema.sql` 已不含 `DROP TABLE chapter_cache`，也不创建该表；A2 物理删除仍需单独授权。本轮没有连接、迁移或清空任何数据库。历史封板测试数字保留为历史记录，不代表本轮复测。
+
+新增待办：access TTL 契约 15 分钟/实现 30 分钟；书架内嵌 Progress 缺真实 version/char_offset；Idempotency-Key 的长度校验与日志承诺缺少显式实现证据；跨平台 go generate 指令不可执行。上述差异修复并验证前不得冻结。
+
+后续跟进：四项实现已修正并补充单测，详见复核报告“实现修复跟进”。数据库进度回归已编写但缺测试库实测，生成同步因外网连接超时未验证；不得据此将 v1.5 标为 Frozen。
+
+
+最新隔离验证：171 个顶层测试全部通过（含子测试 237 个通过事件），0 失败、0 测试跳过；本机后端冒烟通过。已修复取消终态覆盖竞态及索引测试夹具时序。Docker 引擎已启动，但镜像下载认证连接被关闭，容器部署和 race 仍待验证。此前未配置数据库的描述为历史状态，最新证据见 [verification-2026-11-12.md](verification-2026-11-12.md)。v1.5 保持 Draft。
+
+
+最新补交（Xray 代理复验）：前后端生产镜像、隔离 Compose、Nginx 代理/路由、非 root 文件卷写入、重启持久化、SIGTERM 在途上传排空均通过；旧视图升级及重复应用通过；OpenAPI 完整验证通过，Spectral 为 0 error / 40 description warning。Linux 容器全量 race：171 个顶层测试通过，0 失败、0 测试跳过、0 DATA RACE。此前 Docker/race 阻塞已解除，CI 首次流水线日志仍未产生。临时资源已清理，详见 [验证记录](verification-2026-11-12.md)。契约仍保持 Draft，前端业务和发布范围未宣告完成。
+
+
+前端进展：登录、书源导入/搜索、书架、本地导入、原生阅读、五章缓存和显式进度冲突已交付首个闭环；12 项单测与开发/生产 Nginx 上的 3 项端到端测试通过。剩余管理/换源等界面与最终发布仍待完成，详见 frontend-progress.md。
+
+
+## DEF-MAP-01（P1 行为）：整本换源的三级重定位（已修复）
+
+历史发现：`backend/internal/service/mapping.go` 的 Switch 曾固定返回 exact / confidence=0，未实际重定位。2026-11-12 已接通精确、模糊、比例三级策略，返回真实位置和置信度；空目标目录返回 relocation_failed，预览不落库。
+
+专项覆盖三级策略、字符偏移延迟换算、目标目录缺失、并发进度更新和覆盖清理回滚。前端修正 chapter_ratio 为章内比例，保留预览、确认及缓存隔离。实现符合既有冻结语义，没有修改冻结契约或复制参考代码。验证结果和剩余限制见 [relocation-verification.md](relocation-verification.md)。
+
+前端本轮新增书源编辑/删除/调试与手动换源；16 单测、5 浏览器场景（开发与生产镜像）通过，详见 frontend-progress.md。冻结文件未变更。

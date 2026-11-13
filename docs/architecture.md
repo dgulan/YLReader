@@ -1,6 +1,6 @@
 # YReader 系统架构与书源沙箱设计
 
-> 状态：Draft v1.5（Stage 6 S6-1：DEF-CODE-04/10/11 清偿与 DEF-CODE-09 草案；S6-4 终审后冻结）
+> 状态：Frozen v1.5（契约设计冻结；产品仍在开发，发布验收未完成，见 contract-freeze-v1.5.md）
 > 对应交付物：本文件、[schema.sql](schema.sql)、[openapi.yaml](openapi.yaml)
 > 上游依据：[summary.md](research/summary.md) 与 6 份单仓研究报告
 > 范围：M1 书源解析核心（优先）、M2 阅读器与书架、M3 本地书库与外围同步的**契约边界**；不含实现代码。
@@ -986,7 +986,7 @@ RETURNING *;
 - **状态**：已裁定（项目方批准日期 **2026-11-11**）；A1 完成契约文本修订；**A2 物理清理未授权**。
 - **背景（A0 事实核查，2026-11-11/12）**：`docs/schema.sql` 曾定义 `chapter_cache` 表及索引，`§6.3` 矩阵也按该表描述；但当前 HEAD 的实现把正文缓存写入缓存抽象层（key `yreader:cache:content:<book_id>:<source_id>:<chapter_index>`，TTL 7 天），该表在当前代码库中**无任何写入路径**。由于仓库历史始于 Stage 4 压缩初始提交 `89f9b18`，M2c–S5-2 期间的实际实现过程无法完整回溯。`A0-核查.md` 记录：表存在、0 行、两条自身外向 FK（`→ books` / `→ book_sources`，均 `ON DELETE CASCADE`）、无入向 FK、无视图/触发器/函数依赖、Go 代码 0 引用；仓库无迁移框架，`docs/schema.sql` 为唯一升级入口（情形 B）。
 - **决策**：采用**方案 A**——废弃物理表。正文缓存统一由 `pkg/cache`（Redis / 内存）承载，本地书正文由 `StorageProvider` 承载；不再保留「Redis + 物理表」双缓存。
-- **契约影响（A1 已完成）**：ER 图删除 `chapter_cache` 关系；§4.5 删除该表保留策略；§4.6.5 改为「读取顺序与缓存隔离规则」（含 Override 对缓存的真实影响）；§6.3 矩阵按实际能力（仅 TTL）重写覆盖行；§7 授权条目改为「`GET /content` 归属校验先于缓存/对象存储/网络回源」；`docs/schema.sql` 中以幂等声明 `DROP TABLE IF EXISTS chapter_cache;` 取代原建表与索引。
+- **契约影响（A1 已完成）**：ER 图删除 `chapter_cache` 关系；§4.5 删除该表保留策略；§4.6.5 改为「读取顺序与缓存隔离规则」（含 Override 对缓存的真实影响）；§6.3 矩阵按实际能力（仅 TTL）重写覆盖行；§7 授权条目改为「`GET /content` 归属校验先于缓存/对象存储/网络回源」；`docs/schema.sql` 已移除原建表与索引，不包含物理 DROP；物理清理由单独授权的 A2 迁移承担。
 - **未覆盖事项**：A0 不等于物理迁移；A2 的 `DROP TABLE` 需单独授权，且**不得在任何持久数据库（`yreader`、`yreader_test`、`yreader_m3a`、`yreader_smoke` 等）执行**；`DEF-CODE-09` 状态保持「已裁定 (v1.5, ADR-013 方案 A)，待迁移实施」，不得标为已闭环。
 - **环境边界**：dev / staging / prod 由项目方声明为 `ENV_ABSENT`（未独立部署），该定性不代表已核查过不存在的独立实例；本次核查范围仅限本机 `test`（`yreader_test`）与源码。
 
@@ -1015,3 +1015,25 @@ RETURNING *;
 已拍板，详见 §4.6。
 
 
+
+### ADR-015：v1.5 冻结前一致性复核（2026-11-12）
+
+本轮只澄清现有边界，不签发冻结：OpenAPI 总述按 §5.1 明确幂等键尚无 24h 强去重；通用 schema 不执行 chapter_cache 物理删除。access token 的契约仍为 15 分钟，实现 30 分钟属于待修复差异，不通过改文档延长契约。书架内嵌 Progress 必须满足同一 Progress schema，不能作为不完整摘要返回。完整差异、验证范围及冻结清单见 [v1.5-contract-review.md](v1.5-contract-review.md)。
+
+后续实现跟进：access TTL 已按既定契约统一为 15 分钟；`v_bookshelf` 末尾追加 `progress_char_offset` 与 `progress_version`，仓库与 DTO 同步传递。该视图升级不涉及物理删除，已有库必须先迁移后运行新版。实现验证状态见复核报告，仍不签发冻结。
+
+### ADR-016：设计冻结与产品发布验收分离
+
+2026-11-12，本轮采用现有 OpenAPI API 版本 1.0.0、设计修订号 v1.5；前端测试基线为 strict TypeScript、构建、Vitest 业务单测及 Playwright 主流程测试，按契约/实现/验证分组组织变更，未经明确要求不创建 Git 提交。
+
+研究报告、DDL 与 API 经一致性复核、集成/race、容器及升级验证后冻结设计，作为前端开发基线。前文“必须等 S6-4 发布终审才冻结”的进度约定由本决策替代，以遵守 AGENTS.md 的设计先于实现顺序；设计冻结不代表 Stage 6 封板。BookCreate.name 按既有实现设为必填，客户端提供搜索结果或用户输入名称；readyz 描述按实际 PG 与可选 Redis 探针修正。43 个操作说明补齐，不增加端点。
+
+A2 物理删除仍未授权，S3、旧版迁移 CLI、前端完整功能、CI 首次运行证据等保持独立待办，不伪装为已完成。冻结范围和证据见 contract-freeze-v1.5.md；后续破坏性变更仍须走契约变更流程。
+
+### ADR-017：版本化数据库迁移（2026-11-13）
+
+Frozen v1.5 修订 1：新增迁移账本、内嵌基线及只读版本校验，详见 [migration-design.md](migration-design.md)。迁移使用事务与咨询锁，校验和漂移/未知版本拒绝；启动不自动升级。API 操作与响应不变，生产迁移及旧版数据导入保持独立延期。
+
+### ADR-018：同步导入预算与超时（2026-11-13）
+
+Frozen v1.5 修订 2：默认 90s 保持不变，提供 LOCAL_IMPORT_TIMEOUT（1s–10m），超时返回 504/import_timeout 和 Retry-After: 10，结果可能未确认，不自动重试。详见 [import-budget-design.md](import-budget-design.md)。DDL 和迁移基线不变，异步及续传另行设计。

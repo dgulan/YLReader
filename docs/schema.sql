@@ -1,6 +1,6 @@
 -- =============================================================================
 -- YReader (Clean-Room Reader) — PostgreSQL 权威 DDL
--- 状态：Draft v1.5（Stage 6 S6-1：债务清偿进行中，S6-4 终审后冻结）
+-- 状态：Frozen v1.5（契约设计冻结；发布验收未完成，见 contract-freeze-v1.5.md）
 --
 -- 设计约束（与 docs/architecture.md 一一对应）：
 --   * PostgreSQL 16+；所有时间列使用 timestamptz（UTC 存储）。
@@ -10,7 +10,7 @@
 --     Stage 4 可在此之上追加 RLS。
 --   * 章节标题归一化（normalized_title）与书籍名归一化（normalized_name）
 --     由 Go 服务写入，SQL 侧仅提供「兜底/回填」函数，避免两套语义漂移。
---   * 本文件只定义结构，不包含种子数据；schema_migrations 由后续 Stage 3 迁移工具创建。
+--   * 本文件不包含业务种子；ADR-017 迁移账本与基线登记供新库初始化。
 --
 -- ⚠️ JSONB + GIN 使用契约（违反即视为契约缺陷，详见 §JSONB 契约注释）：
 --   book_sources.rules 上的 GIN(jsonb_ops) 只服务 @>、?、?|、?& 四类谓词。
@@ -19,6 +19,13 @@
 -- =============================================================================
 
 BEGIN;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version bigint PRIMARY KEY,
+  name text NOT NULL,
+  checksum char(64) NOT NULL,
+  applied_at timestamptz NOT NULL DEFAULT now()
+);
 
 -- -----------------------------------------------------------------------------
 -- 0. 扩展与类型
@@ -511,6 +518,7 @@ CREATE INDEX IF NOT EXISTS ix_replace_rules_user_order ON replace_rules (user_id
 -- chapter_cache is deprecated by the architecture decision.
 -- This general-purpose schema does not perform physical removal.
 -- Physical removal requires a separately authorized A2 migration.
+-- ADR-015 review: this boundary is unchanged; see docs/v1.5-contract-review.md.
 
 CREATE TABLE IF NOT EXISTS jobs (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -569,7 +577,9 @@ SELECT
   p.chapter_title    AS progress_chapter_title,
   p.chapter_ratio    AS progress_ratio,
   p.progress_percent,
-  p.server_updated_at AS progress_updated_at
+  p.server_updated_at AS progress_updated_at,
+  p.char_offset AS progress_char_offset,
+  p.version AS progress_version
 FROM books b
 LEFT JOIN book_sources s ON s.id = b.active_source_id
 LEFT JOIN reading_progress p ON p.book_id = b.id AND p.user_id = b.user_id;
@@ -658,5 +668,9 @@ LANGUAGE sql STABLE AS $$
   ORDER BY sim DESC, abs(c.chapter_index - p_old_index) ASC
   LIMIT 1
 $$;
+
+-- ADR-017 baseline registration (excluded from checksum).
+-- ADR-018: import budget revision changes no DDL or published migration checksum.
+INSERT INTO schema_migrations(version,name,checksum) VALUES(1,'baseline_v1_5','7e275f0f5dc37fa7b0834bd3d80da7c192f7bc7b854041f2f1e99b0cae3c3e51') ON CONFLICT(version) DO NOTHING;
 
 COMMIT;

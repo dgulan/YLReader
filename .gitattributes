@@ -1,0 +1,5 @@
+docs/schema.sql text eol=lf
+docs/**/*.md text eol=lf
+docs/*.md text eol=lf
+docs/openapi.yaml text eol=lf
+backend/internal/migration/*.sql text eol=lf

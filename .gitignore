@@ -20,3 +20,13 @@ references/
 # 临时探测脚本与日志
 .tmp*
 probe.js
+
+# Frontend verification artifacts
+frontend/test-results/
+frontend/playwright-report/
+frontend/.test-artifacts/
+
+__pycache__/
+.env
+.env.*
+!.env.example

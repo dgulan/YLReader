@@ -1,5 +1,7 @@
 # Stage 1 汇总：6 个参考仓库的跨仓库对比与结论
 
+> 状态：Frozen（2026-11-12 行为研究基线，覆盖本目录六份报告；不表示全部 Legado 语法已实现）。
+
 > 产出：本文件 + 6 份单仓库报告（`docs/research/<repo-name>.md`），均为 Stage 1（研究）交付物。
 > 方法：REA 逐仓库读取 + grep 证据定位；对 `warpdotsys_reader-dev` / `1432433gg_reader-next` 分别以 `changshengyu_reader-dev` / `givenge_reader-rust` 为基线做**文件哈希 + 行级差分**，确保「增量」而非重复叙述。所有结论可回溯到 `文件:行号`，单仓报告各含 ≥20 条证据索引。
 

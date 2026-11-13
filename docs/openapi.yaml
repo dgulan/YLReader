@@ -5,7 +5,7 @@ info:
   version: 1.0.0
   description: |
     ## 状态
-    - Draft v1.5（Stage 6 S6-1：债务清偿进行中；S6-4 终审后冻结）
+    - Frozen v1.5（契约设计冻结；发布验收未完成，见 contract-freeze-v1.5.md）
 
     YReader（Clean-Room Reader）前后端契约。
 
@@ -15,7 +15,7 @@ info:
     - 认证：`Authorization: Bearer <access_jwt>`；access 15 分钟，refresh 30 天并轮换。
     - 分页：`page` 从 1 起，`page_size` 默认 20、最大 100。
     - 时间：RFC 3339 UTC。
-    - 幂等：创建类 POST 支持 `Idempotency-Key`（24h）。
+    - 幂等：部分创建类 POST 预留 `Idempotency-Key`；当前未启用 24h 强去重，防重取决于端点业务规则。
     - 并发：进度写必须带 `If-Match: "<version>"`；书源/书籍写以请求体 `version` 做乐观锁。
 
     ## 错误模型
@@ -71,6 +71,7 @@ paths:
       security: []
       operationId: login
       summary: 用户名密码登录
+      description: 校验用户名和密码，成功返回 access/refresh token 与用户信息；凭据失败统一返回 401。
       requestBody:
         required: true
         content:
@@ -97,6 +98,7 @@ paths:
       security: []
       operationId: refreshToken
       summary: 刷新 access token（refresh 轮换）
+      description: 提交当前 refresh token 换取新 token 对；旧 refresh token 随轮换失效。
       requestBody:
         required: true
         content:
@@ -118,6 +120,7 @@ paths:
       tags: [auth]
       operationId: logout
       summary: 吊销当前 refresh token
+      description: 吊销提交的 refresh token；不延长或重新签发 access token。
       requestBody:
         required: true
         content:
@@ -135,6 +138,7 @@ paths:
       tags: [auth]
       operationId: getCurrentUser
       summary: 当前用户
+      description: 返回当前 Bearer token 所属用户的信息。
       responses:
         '200':
           description: 用户信息
@@ -150,6 +154,7 @@ paths:
       tags: [sources]
       operationId: listSources
       summary: 书源列表
+      description: 分页返回当前用户书源，可按契约提供的检索与分组条件筛选。
       parameters:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
@@ -182,6 +187,7 @@ paths:
       tags: [sources]
       operationId: createSource
       summary: 新建书源
+      description: 创建当前用户的书源配置；规则保存不代表目标站点可用。
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -209,6 +215,7 @@ paths:
       tags: [sources]
       operationId: importSources
       summary: 导入 Legado 书源 JSON（不执行任何规则）
+      description: 解析并导入 Legado 书源数组，按 dry_run 参数决定是否落库；不执行导入规则。
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -236,6 +243,7 @@ paths:
       tags: [sources]
       operationId: exportSources
       summary: 导出为 Legado 兼容 JSON（未知键原样保留）
+      description: 导出当前用户书源为 Legado JSON，保留兼容字段及未知字段。
       parameters:
         - name: ids
           in: query
@@ -265,6 +273,7 @@ paths:
       tags: [sources]
       operationId: getSource
       summary: 书源详情
+      description: 按书源 ID 读取当前用户拥有的完整书源配置。
       responses:
         '200':
           description: 书源
@@ -278,6 +287,7 @@ paths:
       tags: [sources]
       operationId: updateSource
       summary: 更新书源（`version` 乐观锁）
+      description: 以请求体 version 校验并更新书源；版本冲突返回 409。
       requestBody:
         required: true
         content:
@@ -303,6 +313,7 @@ paths:
       tags: [sources]
       operationId: deleteSource
       summary: 删除书源（关联书进入「待换源」状态）
+      description: 删除用户书源及关联映射；受影响的在线书可能需要重新选择活跃源。
       responses:
         '204':
           description: 已删除
@@ -318,6 +329,7 @@ paths:
       tags: [sources]
       operationId: debugSourceRule
       summary: 规则调试（逐级 StepTrace）
+      description: 对指定输入执行规则调试并返回逐步骤 trace；仍受沙箱预算和网络限制。
       requestBody:
         required: true
         content:
@@ -343,6 +355,7 @@ paths:
       tags: [search]
       operationId: searchBooks
       summary: 多源并行搜索（部分失败不整体失败）
+      description: 并行搜索所选书源并聚合结果；单个源的失败单独列出。
       parameters:
         - name: keyword
           in: query
@@ -376,6 +389,7 @@ paths:
       tags: [books]
       operationId: listBooks
       summary: 书架列表（含进度摘要）
+      description: 分页查询当前用户书架；返回的进度包含真实版本和字符偏移。
       parameters:
         - $ref: '#/components/parameters/Page'
         - $ref: '#/components/parameters/PageSize'
@@ -404,6 +418,7 @@ paths:
       tags: [books]
       operationId: addBook
       summary: 加入书架（同书已存在时只新增源映射，返回 200）
+      description: 使用名称、作者和来源加入书架；同名同作者已存在时合并来源映射。MVP 必须提供 name。
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -444,6 +459,8 @@ paths:
         同一用户重复导入同一文件（SHA-256 命中）返回 200 且不重复建书。
         当省略或传入空白 title 时，若与同用户已有书籍同名同作者，服务端自动追加 (n) 后缀以保证唯一性，
         返回 201 Created；仅在显式传入非空 title 冲突或达到重命名尝试上限时返回 409 Conflict。
+        接收文件后解析/落库预算默认 90s，可由 LOCAL_IMPORT_TIMEOUT 配置为 1s–10m。
+        预算超时返回 504/import_timeout 和 Retry-After: 10，结果可能尚未确认；先刷新书架再决定是否重传同一文件，不自动重试。
       parameters:
         - name: filename
           in: query
@@ -483,6 +500,15 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '413':
           $ref: '#/components/responses/PayloadTooLarge'
+        '504':
+          description: 导入处理预算耗尽，结果可能未确认
+          headers:
+            Retry-After:
+              schema: { type: integer, example: 10 }
+              description: 建议等待秒数，不表示会自动重试
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '422':
           $ref: '#/components/responses/UnprocessableEntity'
 
@@ -493,6 +519,7 @@ paths:
       tags: [books]
       operationId: getBook
       summary: 书籍详情
+      description: 返回当前用户书籍详情及已保存的阅读进度。
       responses:
         '200':
           description: 书籍
@@ -506,6 +533,7 @@ paths:
       tags: [books]
       operationId: updateBook
       summary: 更新书籍元数据（自定义封面/状态/分组）
+      description: 以 version 乐观锁修改用户书籍元数据。
       requestBody:
         required: true
         content:
@@ -527,6 +555,7 @@ paths:
       tags: [books]
       operationId: deleteBook
       summary: 删除书（级联 DB 行；对象存储异步清理）
+      description: 删除当前用户书籍及关联数据库记录；文件清理行为遵循服务端存储策略。
       responses:
         '204':
           description: 已删除
@@ -540,6 +569,7 @@ paths:
       tags: [reader]
       operationId: listChapters
       summary: 章节目录
+      description: 返回书籍目录，卷名保留但不占用可读章节序号；刷新行为由请求参数控制。
       parameters:
         - name: source_id
           in: query
@@ -575,6 +605,7 @@ paths:
       tags: [reader]
       operationId: setChapterOverride
       summary: 设置或更新单章源覆盖（Upsert：匹配书源并试抓正文，成功后落库并刷新缓存）
+      description: 试抓目标章节成功后写入单章覆盖；仍校验书籍归属和目标地址安全。
       requestBody:
         required: true
         content:
@@ -604,6 +635,7 @@ paths:
       tags: [reader]
       operationId: deleteChapterOverride
       summary: 重置单章覆盖（移除覆盖并清理该章 override 缓存，恢复原激活源）
+      description: 删除单章覆盖并恢复该章节使用书籍活跃源。
       responses:
         '204':
           description: 已重置
@@ -617,6 +649,7 @@ paths:
       tags: [reader]
       operationId: getChapterContent
       summary: 章节正文（`chapter_index` 与 `chapter_id` 二选一）
+      description: 按 chapter_index 或 chapter_id 读取正文，两者必须且只能提供一个；返回实际来源与相邻章节。
       parameters:
         - name: chapter_index
           in: query
@@ -660,6 +693,7 @@ paths:
       tags: [progress]
       operationId: getProgress
       summary: 当前阅读进度
+      description: 返回当前用户该书的进度；尚未保存时返回初始位置及可用于首次写入的版本。
       responses:
         '200':
           description: 进度（无记录时返回 0 值）
@@ -673,6 +707,7 @@ paths:
       tags: [progress]
       operationId: updateProgress
       summary: 更新进度（必须 If-Match，冲突返回双方进度）
+      description: 以 If-Match 校验进度版本，成功返回新版本；冲突返回当前与提交的双方进度。
       parameters:
         - $ref: '#/components/parameters/IfMatchRequired'
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -705,6 +740,7 @@ paths:
       tags: [progress]
       operationId: switchSource
       summary: 换源（三级重定位）
+      description: 按精确标题、模糊标题、比例依次重定位；dry_run 仅预览，不更新活跃源和进度。
       requestBody:
         required: true
         content:
@@ -732,6 +768,7 @@ paths:
       tags: [books]
       operationId: listMappings
       summary: 书籍的多源绑定
+      description: 列出当前书籍已绑定的来源和对应书籍地址。
       responses:
         '200':
           description: 映射列表
@@ -747,6 +784,7 @@ paths:
       tags: [books]
       operationId: addMapping
       summary: 追加备用书源
+      description: 向当前用户书籍追加备用源映射，不自动切换活跃源。
       requestBody:
         required: true
         content:
@@ -776,6 +814,7 @@ paths:
       tags: [books]
       operationId: deleteMapping
       summary: 移除备用源（当前激活源不可移除）
+      description: 删除备用源映射；当前活跃源不可直接移除。
       responses:
         '204':
           description: 已移除
@@ -791,6 +830,7 @@ paths:
       tags: [bookmarks]
       operationId: listBookmarks
       summary: 书签列表
+      description: 返回当前用户指定书籍的书签。
       responses:
         '200':
           description: 书签
@@ -804,6 +844,7 @@ paths:
       tags: [bookmarks]
       operationId: createBookmark
       summary: 新建书签
+      description: 为当前用户书籍保存指定章节及字符位置的书签。
       requestBody:
         required: true
         content:
@@ -830,6 +871,7 @@ paths:
       tags: [bookmarks]
       operationId: deleteBookmark
       summary: 删除书签
+      description: 删除当前用户指定书签。
       responses:
         '204':
           description: 已删除
@@ -841,6 +883,7 @@ paths:
       tags: [replace-rules]
       operationId: listReplaceRules
       summary: 替换规则列表
+      description: 返回当前用户正文替换规则及执行顺序。
       parameters:
         - name: enabled
           in: query
@@ -858,6 +901,7 @@ paths:
       tags: [replace-rules]
       operationId: createReplaceRule
       summary: 新建替换规则
+      description: 创建替换规则，正则表达式必须通过服务端校验。
       requestBody:
         required: true
         content:
@@ -884,6 +928,7 @@ paths:
       tags: [replace-rules]
       operationId: updateReplaceRule
       summary: 更新替换规则
+      description: 更新替换规则配置，非法表达式返回校验错误。
       requestBody:
         required: true
         content:
@@ -905,6 +950,7 @@ paths:
       tags: [replace-rules]
       operationId: deleteReplaceRule
       summary: 删除替换规则
+      description: 删除当前用户替换规则。
       responses:
         '204':
           description: 已删除
@@ -956,6 +1002,7 @@ paths:
       tags: [jobs]
       operationId: getJob
       summary: 任务状态
+      description: 返回当前用户任务的状态、进度及结果或失败原因。
       responses:
         '200':
           description: 任务
@@ -983,6 +1030,7 @@ paths:
       tags: [settings]
       operationId: getSettings
       summary: 获取用户设置（扁平 key/value）
+      description: 返回当前用户扁平 key/value 设置。
       responses:
         '200':
           description: 设置
@@ -994,6 +1042,7 @@ paths:
       tags: [settings]
       operationId: patchSettings
       summary: 合并更新设置（浅合并）
+      description: 对允许的设置键执行浅合并；未提交的键保持原值。
       requestBody:
         required: true
         content:
@@ -1018,6 +1067,7 @@ paths:
       security: []
       operationId: healthz
       summary: 存活检查
+      description: 返回进程存活状态，不代表数据库或缓存已就绪。
       servers:
         - url: /
       responses:
@@ -1036,7 +1086,8 @@ paths:
       tags: [health]
       security: []
       operationId: readyz
-      summary: 就绪检查（PG/Redis/Storage）
+      summary: 就绪检查（PG 与已配置的 Redis）
+      description: 检查 PostgreSQL、已配置 Redis 及数据库迁移版本/校验和/所需视图结构；不可用时返回 503，不自动迁移（ADR-017）。
       servers:
         - url: /
       responses:
@@ -1190,6 +1241,7 @@ components:
             - response_too_large
             - redirect_limit
             - source_timeout
+            - import_timeout
             - sandbox_timeout
             - unsafe_url
             - blocked_private_address
@@ -1643,11 +1695,11 @@ components:
 
     BookCreate:
       type: object
-      required: [source_id, book_url]
+      required: [source_id, book_url, name]
       properties:
         source_id: { type: string, format: uuid }
         book_url: { type: string }
-        name: { type: string, description: 可选；缺省时由详情规则解析 }
+        name: { type: string, minLength: 1, description: MVP 必填；使用搜索结果名称或用户输入名称 }
         author: { type: string }
 
     BookUpdate:
