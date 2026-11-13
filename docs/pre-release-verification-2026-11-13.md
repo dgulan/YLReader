@@ -55,3 +55,7 @@ backend/Dockerfile.verify使用Go1.26.11、build-base和CGO_ENABLED=1。将精�
 真实缺陷：缓存任务运行中，子按钮的显式disabled=false覆盖表单禁用上下文，目录加载完成后提交按钮显示可用；请求层原有active守卫仍阻止重复提交。页面统一计算formDisabled并显式应用于源/范围/提交控件。测试先等目录完成，再断言按钮禁用；加强后的测试在本地同样先失败，不延长超时或删除断言。修复后本地strict TypeScript、50项单测及Vite配合实际arm64隔离后端的11项浏览器流程全部通过（约1.1分钟）；远程最终结果以审阅分支的CI和PR验收记录为准。
 
 原始失败证据保留为`.toolchain/pre-release-cache-button-before.log`，修复后的本地全量为`.toolchain/pre-release-frontend-final.log`。最终GitHub检查链接将写入PR验收说明，避免为记录结果而反复变更已经验证的源码提交。
+
+## 规则开关用例的异步边界
+
+PR首轮缓存任务场景已通过，远程安全5项和race也通过；前端另在规则停用/重新启用时失败。保存包含HTTP写入、IndexedDB正文清理和busy复位；只等服务端正文变化不能证明开关已恢复可交互，过早press可能被禁用控件忽略。测试补充开关enabled/checked状态与保存按钮恢复的等待，保留真实正文双向变化断言及原超时。此项只修测试同步，不放宽应用校验。
