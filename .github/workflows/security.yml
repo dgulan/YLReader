@@ -1,0 +1,96 @@
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install fixed official scanner
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: Scan Go production targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          cd backend
+          status=0
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/server -scan module 2>&1 | tee "../security-reports/go-modules-$arch.txt" || status=1
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -show verbose ./... 2>&1 | tee "../security-reports/go-linux-$arch.txt" || status=1
+          done
+          exit "$status"
+      - name: Audit complete frontend lock
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          cd frontend
+          npm audit --package-lock-only --json > ../security-reports/npm.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-security-reports
+          path: security-reports
+          if-no-files-found: error
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build exact production image without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.component }}
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: yreader-security:${{ matrix.component }}-${{ matrix.arch }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Scan final image (OS and application packages)
+        # v0.36.0, verified release commit; no ignore-unfixed or broad exceptions.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: yreader-security:${{ matrix.component }}-${{ matrix.arch }}
+          format: json
+          output: image-security.json
+          exit-code: '1'
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: 'false'
+          version: v0.76.2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: image-security-${{ matrix.component }}-${{ matrix.arch }}
+          path: image-security.json
+          if-no-files-found: error

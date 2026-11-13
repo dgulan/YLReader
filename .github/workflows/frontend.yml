@@ -1,0 +1,87 @@
+name: frontend
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: yreader_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
+      REDIS_ADDR: 127.0.0.1:6379
+      REDIS_URL: redis://127.0.0.1:6379/0
+      ENVIRONMENT: production
+      PORT: "8080"
+      YREADER_HEADER_KEY_KID: primary
+      SEED_USERNAME: reader-ci
+      E2E_USERNAME: reader-ci
+      E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
+      E2E_API_TARGET: http://127.0.0.1:8080
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Create temporary test credentials
+        run: |
+          python - <<'PY'
+          import os, secrets, base64
+          password = secrets.token_urlsafe(24)
+          values = {'JWT_SECRET': secrets.token_hex(32), 'YREADER_HEADER_KEY_primary': base64.b64encode(secrets.token_bytes(32)).decode(), 'SEED_PASSWORD': password, 'E2E_PASSWORD': password}
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              for key, value in values.items():
+                  print('::add-mask::' + value)
+                  f.write(key + '=' + value + '\n')
+              f.write('STORAGE_DIR=' + os.path.join(os.environ['RUNNER_TEMP'], 'yreader-storage') + '\n')
+          PY
+      - name: Initialize isolated database
+        run: python scripts/check-db-target.py --mode migrate && psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f docs/schema.sql
+      - name: Check database version
+        working-directory: backend
+        run: go run ./cmd/migrator schema check
+      - name: Install frontend
+        working-directory: frontend
+        run: npm ci
+      - name: Generated types are synchronized
+        working-directory: frontend
+        run: npm run generate:api && git diff --exit-code -- src/api/schema.d.ts
+      - name: Frontend checks
+        working-directory: frontend
+        run: npm run type-check && npm test && npm run build
+      - name: Start test backend
+        run: |
+          cd backend
+          go build -o "$RUNNER_TEMP/yreader-ci" ./cmd/server
+          nohup "$RUNNER_TEMP/yreader-ci" > "$RUNNER_TEMP/yreader-ci.log" 2>&1 &
+          timeout 45 bash -c 'until curl --fail --silent http://127.0.0.1:8080/readyz; do sleep 1; done'
+      - name: Install browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Browser main flows
+        working-directory: frontend
+        run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: frontend-failure-screenshots
+          path: frontend/test-results
