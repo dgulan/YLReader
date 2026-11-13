@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,7 @@ type ChapterContentView struct {
 
 // cachedPayload 是写入 Redis 的正文缓存结构。
 type cachedPayload struct {
+	RulesFingerprint      string      `json:"rules_fingerprint"`
 	Content               string      `json:"content"`
 	WordCount             int         `json:"word_count"`
 	AppliedReplaceRuleIDs []uuid.UUID `json:"applied_replace_rule_ids"`
@@ -92,11 +94,8 @@ func NewContentService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox, c ca
 }
 
 // Get 读取章节正文。chapterIndex 与 chapterID 必须且只能提供一个（由 handler 校验）。
-func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, chapterIndex *int, chapterID *int64) (*ChapterContentView, error) {
-	book, err := s.books.Get(ctx, s.pool, userID, bookID)
-	if err != nil {
-		return nil, err
-	}
+func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chapterIndex *int, chapterID *int64, book *repository.Book) (*ChapterContentView, error) {
+	var err error
 	if book.ActiveSourceID == nil {
 		return nil, ErrNoMatchingSource
 	}
@@ -139,18 +138,24 @@ func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, chap
 	}
 
 	key := fmt.Sprintf("%s:%s:%s:%d", contentCachePrefix, bookID, targetSourceID, curIndex)
-	if payload, ok := s.loadCache(ctx, key, targetSourceID); ok {
+	userRules, err := s.rules.ListEnabledForContent(ctx, s.pool, userID)
+	if err != nil {
+		return nil, err
+	}
+	fingerprint := contentRulesFingerprint(src.Rules, userRules)
+	if payload, ok := s.loadCache(ctx, key, targetSourceID); ok && payload.RulesFingerprint == fingerprint {
 		return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, payload.Content, payload.WordCount,
 			payload.AppliedReplaceRuleIDs, payload.TraceID, isOverridden, true)
 	}
 
-	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, targetURL)
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, targetURL, userRules)
 	if err != nil {
 		return nil, err
 	}
 	wordCount := utf8.RuneCountInString(content)
 	s.storeCache(ctx, key, cachedPayload{
-		Content: content, WordCount: wordCount, AppliedReplaceRuleIDs: appliedIDs,
+		RulesFingerprint: fingerprint,
+		Content:          content, WordCount: wordCount, AppliedReplaceRuleIDs: appliedIDs,
 		SourceID: targetSourceID, TraceID: traceID,
 	})
 	return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, content, wordCount, appliedIDs, traceID, isOverridden, false)
@@ -167,14 +172,20 @@ func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookI
 		return fmt.Errorf("%w: chapter %d has empty url", repository.ErrInvalidArgument, *ch.ChapterIndex)
 	}
 	key := fmt.Sprintf("%s:%s:%s:%d", contentCachePrefix, bookID, src.ID, *ch.ChapterIndex)
-	if _, ok := s.loadCache(ctx, key, src.ID); ok {
+	userRules, err := s.rules.ListEnabledForContent(ctx, s.pool, userID)
+	if err != nil {
+		return err
+	}
+	fingerprint := contentRulesFingerprint(src.Rules, userRules)
+	if payload, ok := s.loadCache(ctx, key, src.ID); ok && payload.RulesFingerprint == fingerprint {
 		return nil
 	}
-	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, ch.URL)
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, ch.URL, userRules)
 	if err != nil {
 		return err
 	}
 	s.storeCache(ctx, key, cachedPayload{
+		RulesFingerprint:      fingerprint,
 		Content:               content,
 		WordCount:             utf8.RuneCountInString(content),
 		AppliedReplaceRuleIDs: appliedIDs,
@@ -293,7 +304,7 @@ func (s *ContentService) storeCache(ctx context.Context, key string, p cachedPay
 }
 
 // fetchAndClean 完成抓取、多页拼接、书源正则与用户替换规则净化、段落标准化。
-func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, src *repository.BookSource, startURL string) (string, string, []uuid.UUID, error) {
+func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, src *repository.BookSource, startURL string, userRules []*repository.ReplaceRule) (string, string, []uuid.UUID, error) {
 	rules := parseContentRules(src.Rules)
 	traceID := "tr_" + uuid.NewString()
 
@@ -307,7 +318,7 @@ func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, sr
 	}
 
 	appliedIDs := make([]uuid.UUID, 0, 8)
-	content, appliedIDs = s.applyUserRules(ctx, userID, content)
+	content, appliedIDs = applyRuleList(userRules, content)
 
 	content = normalizeContent(content)
 	if strings.TrimSpace(content) == "" {
@@ -393,6 +404,18 @@ func (s *ContentService) applyUserRules(ctx context.Context, userID uuid.UUID, c
 		s.log.Warn("load replace rules failed", "err", err)
 		return content, []uuid.UUID{}
 	}
+	return applyRuleList(rules, content)
+}
+
+func contentRulesFingerprint(source json.RawMessage, rules []*repository.ReplaceRule) string {
+	encoded, _ := json.Marshal(struct {
+		Source json.RawMessage
+		Rules  []*repository.ReplaceRule
+	}{source, rules})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func applyRuleList(rules []*repository.ReplaceRule, content string) (string, []uuid.UUID) {
 	applied := make([]uuid.UUID, 0, len(rules))
 	for _, r := range rules {
 		re, err := regexp.Compile(r.Pattern)
@@ -474,4 +497,70 @@ func parseContentRules(raw json.RawMessage) contentRules {
 		out.ReplaceRegex = firstNonEmpty(rawText(obj, "ruleContentReplaceRegex"), nestedText(obj, "ruleContent", "replaceRegex"))
 	}
 	return out
+}
+
+// Get resolves a deferred chapter-local offset only for the exact version read
+// before fetching content. A concurrent progress/source change always wins.
+func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, index *int, chapterID *int64) (*ChapterContentView, error) {
+	book, err := s.books.Get(ctx, s.pool, userID, bookID)
+	if err != nil {
+		return nil, err
+	}
+	var p *repository.ReadingProgress
+	if book.BookType != repository.BookTypeLocal {
+		p, err = repository.NewProgressRepository().Get(ctx, s.pool, userID, bookID)
+		if err != nil {
+			s.log.Warn("deferred offset snapshot unavailable", "book_id", bookID, "error", err)
+		}
+	}
+	view, err := s.get(ctx, userID, bookID, index, chapterID, book)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil || view.IsOverridden || view.Chapter.ChapterIndex == nil || p.ChapterIndex != *view.Chapter.ChapterIndex || p.CharOffset != 0 || p.ChapterRatio <= 0 {
+		return view, nil
+	}
+	offset := relocationOffset(p.ChapterRatio, utf8.RuneCountInString(view.Content))
+	if offset == 0 {
+		return view, nil
+	}
+	fillCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if err := s.fillDeferredOffset(fillCtx, userID, bookID, view.SourceID, p, offset); err != nil {
+		s.log.Warn("deferred offset update skipped; content remains available", "book_id", bookID, "error", err)
+	}
+	return view, nil
+}
+
+func (s *ContentService) fillDeferredOffset(ctx context.Context, userID, bookID, sourceID uuid.UUID, p *repository.ReadingProgress, offset int32) error {
+	progress := repository.NewProgressRepository()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = s.books.Lock(ctx, tx, userID, bookID); err != nil {
+		return err
+	}
+	current, err := s.books.Get(ctx, tx, userID, bookID)
+	if err != nil {
+		return err
+	}
+	if current.ActiveSourceID == nil || *current.ActiveSourceID != sourceID {
+		return nil
+	}
+	exists, err := progress.Exists(ctx, tx, userID, bookID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	p.CharOffset = offset
+	if err = progress.Update(ctx, tx, p, p.Version); errors.Is(err, repository.ErrVersionConflict) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

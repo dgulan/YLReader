@@ -282,6 +282,36 @@ func TestProgressZeroValueAndConflict(t *testing.T) {
 		t.Fatalf("updated progress = %+v, want version 2 / index 3 / offset 120", p)
 	}
 
+	// Shelf must carry the same persisted position and optimistic-lock version.
+	status, shelfRaw := doJSON(t, http.MethodGet, base+"/books", token, nil)
+	var shelf struct {
+		Items []struct {
+			ID       uuid.UUID `json:"id"`
+			Progress struct {
+				Version    int `json:"version"`
+				CharOffset int `json:"char_offset"`
+			} `json:"progress"`
+		} `json:"items"`
+	}
+	if status != http.StatusOK {
+		t.Fatalf("shelf status %d: %s", status, shelfRaw)
+	}
+	if err := json.Unmarshal(shelfRaw, &shelf); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range shelf.Items {
+		if item.ID == book.ID {
+			found = true
+			if item.Progress.Version != 2 || item.Progress.CharOffset != 120 {
+				t.Fatalf("shelf progress lost: %+v", item.Progress)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("updated book missing from shelf")
+	}
+
 	// 陈旧 If-Match: "1" → 409 + current/incoming
 	status, raw = doJSONH(t, http.MethodPut, base+"/books/"+book.ID.String()+"/progress", token,
 		mustJSON(t, map[string]any{"chapter_index": 9}), map[string]string{"If-Match": `"1"`})
@@ -331,6 +361,14 @@ func TestSwitchSourceDryRunAndOverrideCleanup(t *testing.T) {
 		t.Fatalf("standby create status = %d", status)
 	}
 
+	for _, source := range []uuid.UUID{s1, s2} {
+		if _, err := pool.Exec(context.Background(), `INSERT INTO chapters(book_id,source_id,chapter_index,sort_order,title,normalized_title,url,url_hash) SELECT $1,$2,i,i,'章'||i,'n:'||i,'https://example.com/c/'||i,encode(sha256(i::text::bytea),'hex') FROM generate_series(0,200) i`, book.ID, source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(context.Background(), `UPDATE books SET total_chapters=201 WHERE id=$1`, book.ID); err != nil {
+		t.Fatal(err)
+	}
 	// 第 5 章单章覆盖
 	status, raw := doJSON(t, http.MethodPost, base+"/books/"+book.ID.String()+"/chapters/5/override", token,
 		mustJSON(t, map[string]any{"chapter_url": "https://src1.example.com/c/5", "source_id": s2.String()}))
@@ -363,9 +401,9 @@ func TestSwitchSourceDryRunAndOverrideCleanup(t *testing.T) {
 	if err := json.Unmarshal(raw, &res); err != nil {
 		t.Fatalf("decode switch result: %v: %s", err, raw)
 	}
-	if !res.DryRun || res.Strategy != "exact" || res.Confidence != 0 ||
+	if !res.DryRun || res.Strategy != "exact" || res.Confidence != 1 ||
 		res.ChapterIndex != 120 || res.ChapterRatio != 0.42 {
-		t.Fatalf("dry run result = %+v, want dry_run true / exact / 0 / 120 / 0.42", res)
+		t.Fatalf("dry run result = %+v, want dry_run true / exact / 1 / 120 / 0.42", res)
 	}
 	if got := dbString(t, pool, `SELECT active_source_id::text FROM books WHERE id = $1`, book.ID); got != s1.String() {
 		t.Fatalf("dry run mutated active source to %s, want %s", got, s1)

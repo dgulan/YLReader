@@ -94,6 +94,8 @@ func messageForCode(code string) string {
 		return "source request failed"
 	case "source_timeout":
 		return "source timeout"
+	case "import_timeout":
+		return "local book import timed out; check bookshelf before retrying"
 	case "response_too_large":
 		return "response too large"
 	case "redirect_limit":

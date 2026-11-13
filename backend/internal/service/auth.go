@@ -59,6 +59,8 @@ type TokenPair struct {
 	User         *User
 }
 
+const DefaultAccessTTL = 15 * time.Minute
+
 // AuthService 实现登录、刷新轮换、登出与 access token 校验。
 type AuthService struct {
 	pool       *pgxpool.Pool
@@ -73,7 +75,7 @@ func NewAuthService(pool *pgxpool.Pool, secret []byte, accessTTL, refreshTTL tim
 		secret = []byte("dev-insecure-secret-change-me")
 	}
 	if accessTTL <= 0 {
-		accessTTL = 30 * time.Minute
+		accessTTL = DefaultAccessTTL
 	}
 	if refreshTTL <= 0 {
 		refreshTTL = 30 * 24 * time.Hour

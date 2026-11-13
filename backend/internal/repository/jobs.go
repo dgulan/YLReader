@@ -120,14 +120,14 @@ func (r *JobRepository) MarkSucceeded(ctx context.Context, q Querier, jobID uuid
 		raw = b
 	}
 	_, err := q.Exec(ctx, `UPDATE jobs SET status = 'succeeded', progress = $2, result = $3,
-		finished_at = now() WHERE id = $1`, jobID, progress, raw)
+		finished_at = now() WHERE id = $1 AND status IN ('queued','running')`, jobID, progress, raw)
 	return err
 }
 
 // MarkFailed 标记失败。
 func (r *JobRepository) MarkFailed(ctx context.Context, q Querier, jobID uuid.UUID, code, message string) error {
 	_, err := q.Exec(ctx, `UPDATE jobs SET status = 'failed', error_code = $2, error_message = $3,
-		finished_at = now() WHERE id = $1`, jobID, code, message)
+		finished_at = now() WHERE id = $1 AND status IN ('queued','running')`, jobID, code, message)
 	return err
 }
 

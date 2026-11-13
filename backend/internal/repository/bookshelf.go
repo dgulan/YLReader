@@ -19,7 +19,7 @@ const bookshelfColumns = `id, user_id, name, author, book_type, status, cover_ur
 	latest_chapter_title, last_read_at, active_source_id, active_book_url, version, created_at, updated_at,
 	needs_source, override_count, active_source_name,
 	progress_chapter_index, progress_chapter_title, progress_ratio::float8,
-	progress_percent::float8, progress_updated_at`
+	progress_percent::float8, progress_updated_at, progress_char_offset, progress_version`
 
 func scanBookshelf(row pgx.Row) (*BookshelfEntry, error) {
 	var e BookshelfEntry
@@ -28,7 +28,7 @@ func scanBookshelf(row pgx.Row) (*BookshelfEntry, error) {
 		&e.LatestChapterTitle, &e.LastReadAt, &e.ActiveSourceID, &e.ActiveBookURL, &e.Version, &e.CreatedAt, &e.UpdatedAt,
 		&e.NeedsSource, &e.OverrideCount, &e.ActiveSourceName,
 		&e.ProgressChapterIndex, &e.ProgressChapterTitle, &e.ProgressRatio,
-		&e.ProgressPercent, &e.ProgressUpdatedAt,
+		&e.ProgressPercent, &e.ProgressUpdatedAt, &e.ProgressCharOffset, &e.ProgressVersion,
 	)
 	if err != nil {
 		return nil, err

@@ -308,7 +308,7 @@ class TestSanitization(unittest.TestCase):
 
 
 class TestMakefileWiring(unittest.TestCase):
-    """Static proof that the guard is inlined in the same recipe as psql."""
+    """Static proof that target validation precedes each write operation."""
 
     def setUp(self):
         self.text = MAKEFILE.read_text(encoding="utf-8")
@@ -327,8 +327,8 @@ class TestMakefileWiring(unittest.TestCase):
     def test_migrate_inlines_guard_before_psql(self):
         body = self.recipe("migrate")
         self.assertIn("$(DB_GUARD) --mode migrate", body)
-        self.assertIn("$(PSQL)", body)
-        self.assertLess(body.index("$(DB_GUARD)"), body.index("$(PSQL)"))
+        self.assertIn("./cmd/migrator schema up", body)
+        self.assertLess(body.index("$(DB_GUARD)"), body.index("./cmd/migrator schema up"))
         self.assertIn("&&", body)
 
     def test_setup_test_db_inlines_guard_before_all_psql_calls(self):
@@ -382,6 +382,37 @@ class TestGuardExitCodes(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DATABASE_URL": "postgres://127.0.0.1:5432/yreader_test"}, clear=True), contextlib.redirect_stdout(buf):
             self.assertEqual(guard.main(["--mode", "migrate"]), 0)
         self.assertIn("MODE=migrate", buf.getvalue())
+
+
+class TestConninfo(unittest.TestCase):
+    base = "host=127.0.0.1 port=5432 dbname=yreader_test "
+
+    def test_credentials_and_quoting(self):
+        for credentials in ["user=postgres password=x!@", "user = 'reader name' password='a b\\'c'", r"password=a\ b user=u", "password='://not-a-target'", "password=''", "application_name='migration check'"]:
+            with self.subTest(credentials=credentials):
+                target = guard.check_migrate(migrate_env(self.base + credentials))
+                self.assertEqual((target['host'], target['port'], target['dbname']), ('127.0.0.1', 5432, 'yreader_test'))
+
+    def test_dangerous_or_ambiguous_targets_denied(self):
+        for text in [self.base + 'host=10.0.0.1', self.base + 'service=remote', self.base + 'hostaddr=10.0.0.1', self.base + "options='-c role=other'", self.base + "password='unterminated", self.base + "password='a'junk", self.base + 'password=trailing\\', 'host=localhost dbname=yreader_test', 'host=10.0.0.1 port=5432 dbname=yreader_test', 'host=127.0.0.1 port=5432 dbname=yreader', "host=127.0.0.1 port=5432 dbname='postgres://remote/db'", 'host=127.0.0.1 port=5432 dbname=yreader_test,yreader', self.base + 'sslmode=invalid', self.base + 'connect_timeout=0']:
+            with self.subTest(text=text), self.assertRaises(guard.Deny):
+                guard.check_migrate(migrate_env(text))
+
+    def test_env_cannot_redirect_conninfo(self):
+        for name in guard.TARGET_ENV_VARS:
+            with self.subTest(name=name), self.assertRaises(guard.Deny):
+                guard.check_migrate(migrate_env(self.base, **{name: ''}))
+
+    def test_setup_uses_same_host_and_port(self):
+        guard.check_setup_test_db(setup_env('host=127.0.0.1 port=5432 dbname=postgres', self.base))
+        with self.assertRaises(guard.Deny):
+            guard.check_setup_test_db(setup_env('host=127.0.0.1 port=5433 dbname=postgres', self.base))
+
+    def test_denial_does_not_print_credentials(self):
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {'DATABASE_URL': self.base + 'password=SECRET!@ service=remote'}, clear=True), contextlib.redirect_stdout(output):
+            self.assertEqual(guard.main(['--mode', 'migrate']), 1)
+        self.assertNotIn('SECRET', output.getvalue())
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # YReader 本地编排（App + PostgreSQL + Redis + Frontend 静态托管）
 # 注意：宿主机 5432 已被本机 PostgreSQL 16.15 占用，故 postgres 服务不暴露宿主端口（仅容器内网）。
-# frontend 容器仅做静态托管（nginx:80）；生产网关需在 nginx 或反向代理层将 /api 转发到 app:8080。
+# frontend 提供 SPA 托管与 /api 同源代理。启动步骤见 docs/deployment.md。
 services:
   app:
     build: ./backend
@@ -8,9 +8,17 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
+      LOCAL_IMPORT_TIMEOUT: ${LOCAL_IMPORT_TIMEOUT:-90s}
       DATABASE_URL: postgres://yreader:yreader@postgres:5432/yreader?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       STORAGE_DIR: /var/lib/yreader/storage
+      ENVIRONMENT: production
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      YREADER_HEADER_KEY_KID: primary
+      YREADER_HEADER_KEY_primary: ${YREADER_HEADER_KEY_primary:?Set base64 encoded 32-byte header key}
+      SEED_USERNAME: ${SEED_USERNAME:?Set initial username}
+      SEED_PASSWORD: ${SEED_PASSWORD:?Set initial password}
+    stop_grace_period: 65s
     volumes:
       - storagedata:/var/lib/yreader/storage
     depends_on:
@@ -19,7 +27,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -41,6 +49,7 @@ services:
       POSTGRES_DB: yreader
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U yreader -d yreader"]
       interval: 5s

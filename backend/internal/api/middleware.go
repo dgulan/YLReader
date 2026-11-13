@@ -4,10 +4,34 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
+
+// IdempotencyKeyValidation enforces the optional header on contracted operations.
+// It does not provide response deduplication.
+func IdempotencyKeyValidation(log *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/"), "/")
+			contracted := r.Method == http.MethodPost && (r.URL.Path == "/api/v1/sources" || r.URL.Path == "/api/v1/sources/import" || r.URL.Path == "/api/v1/books")
+			if len(parts) == 3 && parts[0] == "books" {
+				contracted = (r.Method == http.MethodPut && parts[2] == "progress") || (r.Method == http.MethodPost && parts[2] == "cache")
+			}
+			if values, present := r.Header["Idempotency-Key"]; contracted && present {
+				if len(values) != 1 || !utf8.ValidString(values[0]) || utf8.RuneCountInString(values[0]) < 8 || utf8.RuneCountInString(values[0]) > 128 {
+					writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+					return
+				}
+				log.Info("idempotency key received", "idempotency_key", values[0], "request_id", requestIDFrom(r.Context()))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
 // ctxKey 是本包私有的 context key 类型，避免与其它包冲突。
 type ctxKey int

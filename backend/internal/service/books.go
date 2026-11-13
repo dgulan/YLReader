@@ -159,6 +159,24 @@ func (s *BookService) Create(ctx context.Context, userID uuid.UUID, in CreateBoo
 
 // Update 乐观锁更新书籍元数据（version 由触发器维护，SQL 中绝不 SET version）。
 func (s *BookService) Update(ctx context.Context, userID, bookID uuid.UUID, patch repository.BookPatch, expectedVersion int64) (*repository.Book, error) {
+	if patch.Name != nil {
+		value := strings.TrimSpace(*patch.Name)
+		if value == "" {
+			return nil, fmt.Errorf("%w: name cannot be blank", repository.ErrInvalidArgument)
+		}
+		patch.Name = &value
+	}
+	if patch.Author != nil {
+		value := strings.TrimSpace(*patch.Author)
+		patch.Author = &value
+	}
+	if patch.Status != nil {
+		switch *patch.Status {
+		case repository.BookStatusUnknown, repository.BookStatusSerializing, repository.BookStatusCompleted, repository.BookStatusPaused:
+		default:
+			return nil, fmt.Errorf("%w: invalid book status", repository.ErrInvalidArgument)
+		}
+	}
 	return s.books.UpdateMeta(ctx, s.pool, userID, bookID, patch, expectedVersion)
 }
 

@@ -12,16 +12,18 @@ import (
 	"yreader/backend/internal/repository"
 )
 
-// SwitchSourceResult 是换源结果（M2a 不做网络三级重定位，strategy 固定 exact、
-// confidence 固定 0.0，诚实表达「未做内容比对」）。
+// SwitchSourceResult reports the selected target chapter and relocation confidence.
 type SwitchSourceResult struct {
-	BookID       uuid.UUID
-	SourceID     uuid.UUID
-	Strategy     string
-	Confidence   float64
-	ChapterIndex int32
-	ChapterRatio float64
-	DryRun       bool
+	BookID        uuid.UUID
+	SourceID      uuid.UUID
+	Strategy      string
+	Confidence    float64
+	ChapterIndex  int32
+	ChapterRatio  float64
+	CharOffset    int32
+	ChapterTitle  string
+	TotalChapters int
+	DryRun        bool
 }
 
 // MappingService 编排整本换源（含单章覆盖的级联清空）。
@@ -49,10 +51,10 @@ func NewMappingService(pool *pgxpool.Pool) *MappingService {
 // Switch 在单个事务内完成换源：
 //  1. 校验书籍归属与目标源（属于当前用户且 enabled）；
 //  2. 解析 targetBookURL（显式优先，否则继承该书在该源的历史 mapping URL；都没有 → 400）；
-//  3. UpdateActiveSource 四步流转；
-//  4. 级联清空单章覆盖（v1.1 §4.6.4）；
+//  3. 在目标目录按精确/模糊/整书比例定位；
+//  4. 原子更新活跃源、进度与元数据，清空单章覆盖；
 //  5. dry_run 回滚，否则提交；
-//  6. 返回当前进度位点（无进度为 0）。
+//  6. 返回真实策略、置信度与目标位置，不在事务内发起网络抓取。
 func (s *MappingService) Switch(ctx context.Context, userID, bookID, sourceID uuid.UUID, bookURL *string, dryRun bool) (*SwitchSourceResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -60,6 +62,9 @@ func (s *MappingService) Switch(ctx context.Context, userID, bookID, sourceID uu
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := s.books.Lock(ctx, tx, userID, bookID); err != nil {
+		return nil, err
+	}
 	book, err := s.books.Get(ctx, tx, userID, bookID)
 	if err != nil {
 		return nil, err
@@ -99,26 +104,50 @@ func (s *MappingService) Switch(ctx context.Context, userID, bookID, sourceID uu
 		target = m.BookURL
 	}
 
-	if err := s.books.UpdateActiveSource(ctx, tx, userID, bookID, sourceID, target); err != nil {
-		return nil, err
-	}
-	if err := s.overrides.DeleteBookOverrides(ctx, tx, userID, bookID); err != nil {
-		return nil, err
-	}
 	prog, err := s.progress.Get(ctx, tx, userID, bookID)
 	if err != nil {
 		return nil, err
 	}
-
-	res := &SwitchSourceResult{
-		BookID:       bookID,
-		SourceID:     sourceID,
-		Strategy:     "exact",
-		Confidence:   0.0,
-		ChapterIndex: prog.ChapterIndex,
-		ChapterRatio: prog.ChapterRatio,
-		DryRun:       dryRun,
+	ch, strategy, confidence, total, err := relocateChapter(ctx, tx, userID, book, sourceID, prog)
+	if err != nil {
+		return nil, err
 	}
+	// TOC word_count may be estimated; only the displayed body is authoritative.
+	offset := int32(0)
+	res := &SwitchSourceResult{BookID: bookID, SourceID: sourceID, Strategy: strategy, Confidence: confidence, ChapterIndex: *ch.ChapterIndex, ChapterRatio: prog.ChapterRatio, CharOffset: offset, ChapterTitle: ch.Title, TotalChapters: total, DryRun: dryRun}
+	if !dryRun {
+		if err := s.books.UpdateActiveSource(ctx, tx, userID, bookID, sourceID, target); err != nil {
+			return nil, err
+		}
+		if err := s.overrides.DeleteBookOverrides(ctx, tx, userID, bookID); err != nil {
+			return nil, err
+		}
+		exists, err := s.progress.Exists(ctx, tx, userID, bookID)
+		if err != nil {
+			return nil, err
+		}
+		expected := prog.Version
+		prog.ChapterIndex = *ch.ChapterIndex
+		prog.ChapterTitle = ch.Title
+		prog.NormalizedTitle = ch.NormalizedTitle
+		prog.CharOffset = offset
+		prog.ProgressPercent = (float64(prog.ChapterIndex) + prog.ChapterRatio) / float64(total) * 100
+		if exists {
+			err = s.progress.Update(ctx, tx, prog, expected)
+		} else {
+			err = s.progress.InsertInitial(ctx, tx, prog)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE books SET total_chapters=$3 WHERE user_id=$1 AND id=$2`, userID, bookID, total); err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE book_source_mappings SET last_synced_at=now() WHERE book_id=$1 AND source_id=$2 AND book_url=$3`, bookID, sourceID, target); err != nil {
+			return nil, err
+		}
+	}
+
 	if dryRun {
 		return res, nil // deferred rollback
 	}

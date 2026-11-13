@@ -95,6 +95,7 @@ const (
 	ErrorCodeBlockedPrivateAddress ErrorCode = "blocked_private_address"
 	ErrorCodeConflict              ErrorCode = "conflict"
 	ErrorCodeForbidden             ErrorCode = "forbidden"
+	ErrorCodeImportTimeout         ErrorCode = "import_timeout"
 	ErrorCodeInternalError         ErrorCode = "internal_error"
 	ErrorCodeNoMatchingSource      ErrorCode = "no_matching_source"
 	ErrorCodeNotFound              ErrorCode = "not_found"
@@ -161,6 +162,7 @@ const (
 	ProgressConflictErrorCodeBlockedPrivateAddress ProgressConflictErrorCode = "blocked_private_address"
 	ProgressConflictErrorCodeConflict              ProgressConflictErrorCode = "conflict"
 	ProgressConflictErrorCodeForbidden             ProgressConflictErrorCode = "forbidden"
+	ProgressConflictErrorCodeImportTimeout         ProgressConflictErrorCode = "import_timeout"
 	ProgressConflictErrorCodeInternalError         ProgressConflictErrorCode = "internal_error"
 	ProgressConflictErrorCodeNoMatchingSource      ProgressConflictErrorCode = "no_matching_source"
 	ProgressConflictErrorCodeNotFound              ProgressConflictErrorCode = "not_found"
@@ -286,8 +288,8 @@ type BookCreate struct {
 	Author  *string `json:"author,omitempty"`
 	BookUrl string  `json:"book_url"`
 
-	// Name 可选；缺省时由详情规则解析
-	Name     *string            `json:"name,omitempty"`
+	// Name MVP 必填；使用搜索结果名称或用户输入名称
+	Name     string             `json:"name"`
 	SourceId openapi_types.UUID `json:"source_id"`
 }
 
@@ -559,7 +561,7 @@ type Job struct {
 	StartedAt    *time.Time              `json:"started_at"`
 	Status       JobStatus               `json:"status"`
 
-	// TargetSourceId 仅 full_cache 且多源预热时非空，缺省/活跃源预热为 null
+	// TargetSourceId full_cache 任务非空（含活跃源与非活跃源）；非 full_cache 任务为 null
 	TargetSourceId *openapi_types.UUID `json:"target_source_id"`
 	Type           JobType             `json:"type"`
 }
@@ -2110,7 +2112,7 @@ type ServerInterface interface {
 	// 任务状态
 	// (GET /jobs/{jobId})
 	GetJob(w http.ResponseWriter, r *http.Request, jobId openapi_types.UUID)
-	// 就绪检查（PG/Redis/Storage）
+	// 就绪检查（PG 与已配置的 Redis）
 	// (GET /readyz)
 	Readyz(w http.ResponseWriter, r *http.Request)
 	// 替换规则列表
@@ -2326,7 +2328,7 @@ func (_ Unimplemented) GetJob(w http.ResponseWriter, r *http.Request, jobId open
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// 就绪检查（PG/Redis/Storage）
+// 就绪检查（PG 与已配置的 Redis）
 // (GET /readyz)
 func (_ Unimplemented) Readyz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)

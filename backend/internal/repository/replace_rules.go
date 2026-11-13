@@ -39,7 +39,7 @@ func (r *ReplaceRuleRepository) ListEnabledForContent(ctx context.Context, q Que
 		SELECT id, name, group_name, pattern, replacement, scope, is_enabled, order_index
 		FROM replace_rules
 		WHERE user_id = $1 AND scope IN ('content', 'all') AND is_enabled = true
-		ORDER BY order_index ASC`, userID)
+		ORDER BY order_index ASC, id ASC`, userID)
 	if err != nil {
 		return nil, err
 	}

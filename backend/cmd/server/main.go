@@ -8,9 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,11 +24,23 @@ import (
 	"yreader/backend/internal/pkg/cache"
 	"yreader/backend/internal/pkg/crypto"
 	"yreader/backend/internal/pkg/storage"
+	"yreader/backend/internal/repository"
 	"yreader/backend/internal/service"
 )
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	importTimeout, err := parseImportTimeout(os.Getenv("LOCAL_IMPORT_TIMEOUT"))
+	if err != nil {
+		log.Error("invalid import timeout", "error", err)
+		return err
+	}
 
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
@@ -48,6 +58,13 @@ func main() {
 	if err := pool.Ping(ctx); err != nil {
 		log.Error("ping postgres", "error", err)
 		os.Exit(1)
+	}
+	schemaCtx, schemaCancel := context.WithTimeout(ctx, 5*time.Second)
+	err = repository.CheckSchema(schemaCtx, pool)
+	schemaCancel()
+	if err != nil {
+		log.Error("database schema is not ready; migration required", "error", err)
+		return err
 	}
 
 	secret := os.Getenv("JWT_SECRET")
@@ -77,7 +94,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	authSvc := service.NewAuthService(pool, []byte(secret), 30*time.Minute, 30*24*time.Hour)
+	authSvc := service.NewAuthService(pool, []byte(secret), service.DefaultAccessTTL, 30*24*time.Hour)
 
 	seedUser := strings.TrimSpace(os.Getenv("SEED_USERNAME"))
 	seedPass := os.Getenv("SEED_PASSWORD")
@@ -95,13 +112,19 @@ func main() {
 	ft := fetcher.New(fetcher.Config{})
 	sb := sandbox.New(sandbox.Config{}, sandboxFetcher{ft: ft})
 
-	// 正文缓存：配置 REDIS_ADDR 时使用 Redis（TTL 7 天由 service 控制），
-	// 未配置则降级为进程内缓存并告警（单节点开发/测试）。
+	// 缓存与就绪探针共享一个 Redis 客户端，避免双配置探测错位。
 	var contentCache cache.Cache
-	if addr := strings.TrimSpace(os.Getenv("REDIS_ADDR")); addr != "" {
-		contentCache = cache.NewRedis(addr, time.Second)
+	redisCache, err := cache.ConfiguredRedis(os.Getenv("REDIS_URL"), os.Getenv("REDIS_ADDR"), time.Second)
+	if err != nil {
+		log.Error("invalid Redis configuration", "error", err)
+		return err
+	}
+	var redisPing func(context.Context) error
+	if redisCache != nil {
+		contentCache = redisCache
+		redisPing = redisCache.Ping
 	} else {
-		log.Warn("REDIS_ADDR not set; content cache falls back to in-memory")
+		log.Warn("Redis not configured; content cache falls back to in-memory and readiness omits Redis")
 		contentCache = cache.NewMemory()
 	}
 
@@ -134,25 +157,27 @@ func main() {
 	}()
 
 	srv := api.NewServer(api.Deps{
-		Auth:         authSvc,
-		Sources:      service.NewSourceService(pool),
-		Debug:        service.NewDebugService(pool, ft, sb),
-		Search:       service.NewSearchService(pool, ft, sb),
-		Books:        service.NewBookService(pool, storageProvider, log),
-		Progress:     service.NewProgressService(pool),
-		Mapping:      service.NewMappingService(pool),
-		Overrides:    service.NewOverrideService(pool),
-		TOC:          service.NewTOCService(pool, ft, sb),
-		Content:      contentSvc,
-		Import:       service.NewImportService(pool, storageProvider, log),
-		Settings:     service.NewSettingsService(pool, log),
-		Bookmarks:    service.NewBookmarkService(pool, log),
-		ReplaceRules: service.NewReplaceRuleService(pool, log),
-		Jobs:         jobSvc,
-		Storage:      storageProvider,
-		DBPing:       func(c context.Context) error { return pool.Ping(c) },
-		RedisPing:    redisPingFromEnv(),
-		Log:          log,
+		Auth:          authSvc,
+		Sources:       service.NewSourceService(pool),
+		Debug:         service.NewDebugService(pool, ft, sb),
+		Search:        service.NewSearchService(pool, ft, sb),
+		Books:         service.NewBookService(pool, storageProvider, log),
+		Progress:      service.NewProgressService(pool),
+		Mapping:       service.NewMappingService(pool),
+		Overrides:     service.NewOverrideService(pool),
+		TOC:           service.NewTOCService(pool, ft, sb),
+		Content:       contentSvc,
+		Import:        service.NewImportService(pool, storageProvider, log),
+		ImportTimeout: importTimeout,
+		Settings:      service.NewSettingsService(pool, log),
+		Bookmarks:     service.NewBookmarkService(pool, log),
+		ReplaceRules:  service.NewReplaceRuleService(pool, log),
+		Jobs:          jobSvc,
+		Storage:       storageProvider,
+		DBPing:        func(c context.Context) error { return pool.Ping(c) },
+		RedisPing:     redisPing,
+		SchemaPing:    func(c context.Context) error { return repository.CheckSchema(c, pool) },
+		Log:           log,
 	})
 
 	port := os.Getenv("PORT")
@@ -165,9 +190,33 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Info("yreader backend listening", "port", port)
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := serveUntilCanceled(shutdownCtx, httpSrv); err != nil {
 		log.Error("server exited", "error", err)
-		os.Exit(1)
+		return err
+	}
+	return nil
+}
+
+// Wait for Shutdown to finish draining requests before releasing service dependencies.
+func serveUntilCanceled(ctx context.Context, srv *http.Server) error {
+	done := make(chan error, 1)
+	go func() { done <- srv.ListenAndServe() }()
+	select {
+	case err := <-done:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			_ = srv.Close()
+			<-done
+			return err
+		}
+		<-done
+		return nil
 	}
 }
 
@@ -186,34 +235,4 @@ func (s sandboxFetcher) Do(ctx context.Context, method, rawURL string, body []by
 		return nil, err
 	}
 	return resp.Body, nil
-}
-
-// redisPingFromEnv 在配置 REDIS_URL 时返回一个 TCP+PING 探针（不引入 Redis 客户端依赖）。
-func redisPingFromEnv() func(context.Context) error {
-	raw := strings.TrimSpace(os.Getenv("REDIS_URL"))
-	if raw == "" {
-		return nil
-	}
-	return func(ctx context.Context) error {
-		host := raw
-		if u, err := url.Parse(raw); err == nil && u.Host != "" {
-			host = u.Host
-		}
-		if !strings.Contains(host, ":") {
-			host += ":6379"
-		}
-		dialer := net.Dialer{Timeout: time.Second}
-		conn, err := dialer.DialContext(ctx, "tcp", host)
-		if err != nil {
-			return err
-		}
-		defer conn.Close()
-		_ = conn.SetDeadline(time.Now().Add(time.Second))
-		if _, err := conn.Write([]byte("PING\r\n")); err != nil {
-			return err
-		}
-		buf := make([]byte, 32)
-		_, err = conn.Read(buf)
-		return err
-	}
 }

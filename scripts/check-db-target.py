@@ -19,9 +19,9 @@ Policy is default-deny:
   environment, so an inherited ``PGHOSTADDR`` can redirect the TCP target
   while the URI still looks local, and ``PGSERVICE`` can pull in a service
   file that supplies parameters the URI never mentions;
-* the URI must start with an explicit lowercase ``postgres://`` or
-  ``postgresql://``, carry an explicit port, a loopback host and an
-  allow-listed database name;
+* URI form uses explicit lowercase ``postgres://`` or ``postgresql://``;
+  a strict keyword/value conninfo subset is also accepted. Both forms require
+  explicit port, loopback host and an allow-listed database name;
 * query parameters are limited to ``sslmode`` / ``connect_timeout`` /
   ``application_name`` with validated values and no duplicates.
 
@@ -106,6 +106,8 @@ def _parse_target(raw, label: str, env) -> dict:
         raise Deny("MISSING_" + label)
     _deny_on_target_env(env)
     text = raw.strip()
+    if "=" in text and not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", text):
+        return _parse_conninfo(text, label)
     # Case-sensitive on purpose: libpq only documents these two spellings and
     # an ambiguous spelling must fail closed rather than be normalised.
     if not text.startswith(ALLOWED_SCHEMES):
@@ -149,6 +151,84 @@ def _parse_target(raw, label: str, env) -> dict:
     if normalized_host not in ALLOWED_HOSTS:
         raise Deny("HOST_NOT_ALLOWED_" + label)
     return {"host": normalized_host, "port": port, "dbname": dbname, "label": label}
+
+
+def _parse_conninfo(text: str, label: str) -> dict:
+    """Strict libpq keyword/value subset: explicit target, no services/indirection.
+
+    Quoted values and backslash escaping follow libpq conninfo syntax. Repeated
+    keys and every unrecognised parameter are rejected instead of interpreted.
+    """
+    allowed = {"host", "port", "dbname", "user", "password"} | set(ALLOWED_PARAMS)
+    whitespace = " \t\n\r\v\f"
+    values = {}
+    pos, size = 0, len(text)
+    while pos < size:
+        while pos < size and text[pos] in whitespace:
+            pos += 1
+        if pos == size:
+            break
+        start = pos
+        while pos < size and text[pos] not in whitespace + "=":
+            pos += 1
+        key = text[start:pos]
+        if key not in allowed:
+            raise Deny("CONFLICTING_PARAM_" + label)
+        if key in values:
+            raise Deny("DUPLICATE_PARAM_" + label)
+        while pos < size and text[pos] in whitespace:
+            pos += 1
+        if pos == size or text[pos] != "=":
+            raise Deny("INVALID_CONNINFO_" + label)
+        pos += 1
+        while pos < size and text[pos] in whitespace:
+            pos += 1
+        quoted = pos < size and text[pos] == "'"
+        if quoted:
+            pos += 1
+        result = []
+        closed = not quoted
+        while pos < size:
+            char = text[pos]
+            if char == "\\":
+                pos += 1
+                if pos == size:
+                    raise Deny("INVALID_CONNINFO_" + label)
+                result.append(text[pos]); pos += 1
+            elif quoted and char == "'":
+                pos += 1; closed = True; break
+            elif not quoted and char in whitespace:
+                break
+            else:
+                result.append(char); pos += 1
+        if not closed or (quoted and pos < size and text[pos] not in whitespace):
+            raise Deny("INVALID_CONNINFO_" + label)
+        value = "".join(result)
+        if "\x00" in value:
+            raise Deny("INVALID_CONNINFO_" + label)
+        values[key] = value
+    host = values.get("host", "").lower()
+    if not host:
+        raise Deny("MISSING_HOST_" + label)
+    if host not in ALLOWED_HOSTS:
+        raise Deny("HOST_NOT_ALLOWED_" + label)
+    port = values.get("port", "")
+    if not port:
+        raise Deny("MISSING_PORT_" + label)
+    if not re.fullmatch(r"[0-9]+", port) or not 1 <= int(port) <= 65535:
+        raise Deny("INVALID_PORT_" + label)
+    dbname = values.get("dbname", "")
+    if not re.fullmatch(r"[a-z0-9_]+", dbname):
+        raise Deny("INVALID_DBNAME_" + label)
+    if "sslmode" in values and values["sslmode"] not in ALLOWED_SSLMODES:
+        raise Deny("INVALID_SSLMODE_" + label)
+    if "connect_timeout" in values:
+        timeout = values["connect_timeout"]
+        if not re.fullmatch(r"[0-9]+", timeout) or not 1 <= int(timeout) <= MAX_CONNECT_TIMEOUT:
+            raise Deny("INVALID_CONNECT_TIMEOUT_" + label)
+    if any(ord(char) < 0x20 for char in values.get("application_name", "")):
+        raise Deny("INVALID_APPLICATION_NAME_" + label)
+    return {"host": host, "port": int(port), "dbname": dbname, "label": label}
 
 
 def check_migrate(env) -> dict:

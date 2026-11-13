@@ -16,7 +16,9 @@ func (s *Server) SwitchSource(w http.ResponseWriter, r *http.Request, bookId Boo
 		writeError(w, r, err)
 		return
 	}
+	offset, total, title := int(res.CharOffset), res.TotalChapters, res.ChapterTitle
 	out := SwitchSourceResult{
+		CharOffset: &offset, TotalChapters: &total, ChapterTitle: &title,
 		BookId:       res.BookID,
 		SourceId:     res.SourceID,
 		Strategy:     SwitchSourceResultStrategy(res.Strategy),

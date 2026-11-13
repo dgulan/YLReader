@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -41,9 +42,14 @@ func (s *ProgressService) Update(ctx context.Context, userID uuid.UUID, p *repos
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := s.books.Get(ctx, tx, userID, p.BookID); err != nil {
+	if err := s.books.Lock(ctx, tx, userID, p.BookID); err != nil {
 		return nil, err
 	}
+	book, err := s.books.Get(ctx, tx, userID, p.BookID)
+	if err != nil {
+		return nil, err
+	}
+	p.ProgressPercent = math.Min(100, math.Max(0, (float64(p.ChapterIndex)+p.ChapterRatio)/float64(max(book.TotalChapters, 1))*100))
 	// 无持久化记录时，GET 对外承诺的是合成 version=1；首次 PUT 视为基于
 	// 该状态的一次推进，落库为 version=2（与契约 1→2 对齐）。
 	exists, err := s.progress.Exists(ctx, tx, userID, p.BookID)

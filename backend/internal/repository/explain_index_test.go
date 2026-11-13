@@ -40,6 +40,11 @@ func TestBookSourcesRulesGINExplain(t *testing.T) {
 		  FROM generate_series(0, 9999) AS i`, userID); err != nil {
 		t.Fatalf("seed sources: %v", err)
 	}
+	// Flush GIN pending entries so the fixture measures a maintained index,
+	// rather than depending on whether autovacuum happened to run after seeding.
+	if _, err := pool.Exec(ctx, `SELECT gin_clean_pending_list('ix_book_sources_rules_gin'::regclass)`); err != nil {
+		t.Fatalf("flush GIN pending list: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `ANALYZE book_sources`); err != nil {
 		t.Fatalf("analyze: %v", err)
 	}
@@ -128,6 +133,11 @@ func TestChaptersTitleTrigramExplain(t *testing.T) {
 		                    ELSE 'n:' || i || ':普通章节标题' || i END AS t
 		          FROM generate_series(0, 9999) AS i) AS x`, bookID, sourceID); err != nil {
 		t.Fatalf("seed chapters: %v", err)
+	}
+	// Flush GIN pending entries so the fixture measures a maintained index,
+	// rather than depending on whether autovacuum happened to run after seeding.
+	if _, err := pool.Exec(ctx, `SELECT gin_clean_pending_list('ix_chapters_title_trgm'::regclass)`); err != nil {
+		t.Fatalf("flush GIN pending list: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `ANALYZE chapters`); err != nil {
 		t.Fatalf("analyze: %v", err)
@@ -225,6 +235,11 @@ func TestRelocateFuzzyExplain(t *testing.T) {
 		                    ELSE 'n:' || i || ':普通章节标题' || i END AS t
 		          FROM generate_series(0, 9999) AS i) AS x`, bookID, sourceID); err != nil {
 		t.Fatalf("seed chapters: %v", err)
+	}
+	// Flush GIN pending entries so the fixture measures a maintained index,
+	// rather than depending on whether autovacuum happened to run after seeding.
+	if _, err := pool.Exec(ctx, `SELECT gin_clean_pending_list('ix_chapters_title_trgm'::regclass)`); err != nil {
+		t.Fatalf("flush GIN pending list: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `ANALYZE chapters`); err != nil {
 		t.Fatalf("analyze: %v", err)

@@ -193,4 +193,6 @@ type BookshelfEntry struct {
 	ProgressRatio        *float64
 	ProgressPercent      *float64
 	ProgressUpdatedAt    *time.Time
+	ProgressCharOffset   *int32
+	ProgressVersion      *int64
 }

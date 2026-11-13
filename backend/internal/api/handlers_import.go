@@ -11,14 +11,18 @@ import (
 	"os"
 	"path"
 	"strings"
-	"time"
 
+	"github.com/google/uuid"
 	"yreader/backend/internal/repository"
 	"yreader/backend/internal/service"
 )
 
 // maxLocalImportBytes 单文件导入上限（100 MiB）。
 const maxLocalImportBytes = 100 << 20
+
+type LocalImporter interface {
+	ImportBook(context.Context, uuid.UUID, *os.File, int64, string, string, string, *string, *string) (*service.ImportBookResult, error)
+}
 
 // ImportLocalBook 导入本地 EPUB / TXT（原始字节流 + query 元数据）。
 func (s *Server) ImportLocalBook(w http.ResponseWriter, r *http.Request, params ImportLocalBookParams) {
@@ -65,12 +69,17 @@ func (s *Server) ImportLocalBook(w http.ResponseWriter, r *http.Request, params 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), s.importTimeout)
 	defer cancel()
 
 	result, err := s.Import.ImportBook(ctx, userIDFrom(r.Context()), tmp, size,
 		fileHash, filename, fileType, params.Title, params.Author)
 	if err != nil {
+		if r.Context().Err() == nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded)) {
+			w.Header().Set("Retry-After", "10")
+			writeErrorCode(w, r, http.StatusGatewayTimeout, "import_timeout")
+			return
+		}
 		if errors.Is(err, service.ErrDRMProtected) {
 			writeJSON(w, http.StatusUnprocessableEntity, ErrorResponse{
 				Error: Error{

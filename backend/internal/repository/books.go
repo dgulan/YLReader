@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"yreader/backend/internal/pkg/textnorm"
 )
 
 // BookRepository 负责 books（逻辑书）的读写。
@@ -159,6 +160,15 @@ type BookPatch struct {
 // 这里绝不写 SET version = version + 1。
 // 返回 ErrNotFound（书不存在）/ ErrVersionConflict（版本不一致）。
 func (r *BookRepository) UpdateMeta(ctx context.Context, q Querier, userID, bookID uuid.UUID, p BookPatch, expectedVersion int64) (*Book, error) {
+	var normalizedName, normalizedAuthor *string
+	if p.Name != nil {
+		value := textnorm.NormalizeBook(*p.Name)
+		normalizedName = &value
+	}
+	if p.Author != nil {
+		value := textnorm.NormalizeAuthor(*p.Author)
+		normalizedAuthor = &value
+	}
 	var status *string
 	if p.Status != nil {
 		s := string(*p.Status)
@@ -172,10 +182,12 @@ func (r *BookRepository) UpdateMeta(ctx context.Context, q Querier, userID, book
 			author = COALESCE($4, author),
 			custom_cover_url = COALESCE($5, custom_cover_url),
 			intro = COALESCE($6, intro),
-			status = COALESCE($7::book_status, status)
+			status = COALESCE($7::book_status, status),
+			normalized_name = COALESCE($9, normalized_name),
+			normalized_author = COALESCE($10, normalized_author)
 		WHERE id = $1 AND user_id = $2 AND version = $8
 		RETURNING version, updated_at`,
-		bookID, userID, p.Name, p.Author, p.CustomCoverURL, p.Intro, status, expectedVersion,
+		bookID, userID, p.Name, p.Author, p.CustomCoverURL, p.Intro, status, expectedVersion, normalizedName, normalizedAuthor,
 	).Scan(&version, &updatedAt)
 	if err == nil {
 		b, gerr := r.Get(ctx, q, userID, bookID)
@@ -185,6 +197,9 @@ func (r *BookRepository) UpdateMeta(ctx context.Context, q Querier, userID, book
 		return b, nil
 	}
 	if err != pgx.ErrNoRows {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: %w", ErrDuplicate, err)
+		}
 		return nil, err
 	}
 	// 未命中：区分「书不存在(404)」与「版本不一致(409)」。
@@ -404,4 +419,14 @@ func (r *MappingRepository) DeleteByID(ctx context.Context, q Querier, userID, b
 		return ErrNotFound
 	}
 	return nil
+}
+
+// Lock serializes progress and source changes using the same book-first lock order.
+func (r *BookRepository) Lock(ctx context.Context, q Querier, userID, bookID uuid.UUID) error {
+	var id uuid.UUID
+	err := q.QueryRow(ctx, `SELECT id FROM books WHERE user_id=$1 AND id=$2 FOR UPDATE`, userID, bookID).Scan(&id)
+	if err == pgx.ErrNoRows {
+		return ErrNotFound
+	}
+	return err
 }

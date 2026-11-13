@@ -64,10 +64,7 @@ func (s *Server) AddBook(w http.ResponseWriter, r *http.Request, _ AddBookParams
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
-	name := ""
-	if req.Name != nil {
-		name = strings.TrimSpace(*req.Name)
-	}
+	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
@@ -203,6 +200,12 @@ func toAPIBookFromShelf(e *repository.BookshelfEntry) Book {
 			ChapterTitle:    e.ProgressChapterTitle,
 			ProgressPercent: e.ProgressPercent,
 			ServerUpdatedAt: e.ProgressUpdatedAt,
+		}
+		if e.ProgressCharOffset != nil {
+			prog.CharOffset = int(*e.ProgressCharOffset)
+		}
+		if e.ProgressVersion != nil {
+			prog.Version = int(*e.ProgressVersion)
 		}
 		if e.ProgressRatio != nil {
 			prog.ChapterRatio = *e.ProgressRatio

@@ -3,6 +3,7 @@ package cache
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -12,8 +13,12 @@ import (
 // Redis 是最小 RESP 客户端，仅实现正文缓存所需的 GET / SETEX。
 // 每次调用建立一次短连接（缓存访问频率低、超时短），保持实现简单可靠。
 type Redis struct {
-	addr    string
-	timeout time.Duration
+	addr      string
+	timeout   time.Duration
+	username  string
+	password  string
+	database  int
+	tlsConfig *tls.Config
 }
 
 // NewRedis 创建 Redis 缓存客户端。
@@ -215,11 +220,52 @@ func readBulk(br *bufio.Reader) (string, error) {
 
 func (r *Redis) dial(ctx context.Context) (net.Conn, error) {
 	d := net.Dialer{Timeout: r.timeout}
-	conn, err := d.DialContext(ctx, "tcp", r.addr)
+	var conn net.Conn
+	var err error
+	if r.tlsConfig != nil {
+		conn, err = (&tls.Dialer{NetDialer: &d, Config: r.tlsConfig}).DialContext(ctx, "tcp", r.addr)
+	} else {
+		conn, err = d.DialContext(ctx, "tcp", r.addr)
+	}
 	if err != nil {
 		return nil, err
 	}
-	_ = conn.SetDeadline(time.Now().Add(r.timeout))
+	deadline := time.Now().Add(r.timeout)
+	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
+		deadline = limit
+	}
+	_ = conn.SetDeadline(deadline)
+	br := bufReader(conn)
+	setup := func(args ...string) error {
+		if err := writeCommand(conn, args...); err != nil {
+			return err
+		}
+		line, err := readLine(br)
+		if err != nil {
+			return err
+		}
+		if line != "+OK" {
+			return fmt.Errorf("Redis connection setup rejected")
+		}
+		return nil
+	}
+	if r.password != "" {
+		args := []string{"AUTH"}
+		if r.username != "" {
+			args = append(args, r.username)
+		}
+		args = append(args, r.password)
+		if err := setup(args...); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
+	if r.database != 0 {
+		if err := setup("SELECT", strconv.Itoa(r.database)); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
 	return conn, nil
 }
 
@@ -230,7 +276,7 @@ func readLine(br *bufio.Reader) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(line) < 2 || line[len(line)-2] != '\r' {
+	if len(line) < 3 || line[len(line)-2] != '\r' {
 		return "", fmt.Errorf("redis: malformed line %q", line)
 	}
 	return line[:len(line)-2], nil
