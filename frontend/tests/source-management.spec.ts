@@ -21,7 +21,7 @@ test('switch preview does not mutate active source and confirmed switch invalida
   const r = await page.request.post('/api/v1/books', { headers, data: { source_id: a.id, name: `换源测试${Date.now()}`, author: '测试作者', book_url: a.book_source_url + '/book' } }); expect(r.ok()).toBeTruthy(); const book = await r.json()
   const mapping = await page.request.post(`/api/v1/books/${book.id}/mappings`, { headers, data: { source_id: b.id, book_url: b.book_source_url + '/book' } }); expect(mapping.ok()).toBeTruthy()
   const sql = `INSERT INTO chapters(book_id,source_id,chapter_index,sort_order,title,normalized_title,url,url_hash) SELECT '${book.id}'::uuid,s,i,i,'第'||(i+1)||'章','n:'||(i+1),'https://example.com/'||i,encode(sha256(i::text::bytea),'hex') FROM unnest(ARRAY['${a.id}'::uuid,'${b.id}'::uuid]) s CROSS JOIN generate_series(0,1) i; UPDATE books SET total_chapters=2 WHERE id='${book.id}'::uuid;`
-  if (process.env.E2E_DB_CONTAINER) execFileSync('docker', ['exec','-i',process.env.E2E_DB_CONTAINER,'psql','-U','yreader','-d','yreader','-v','ON_ERROR_STOP=1'], { input: sql })
+  if (process.env.E2E_DB_CONTAINER) execFileSync('docker', ['exec','-i',process.env.E2E_DB_CONTAINER,'psql','-U',process.env.E2E_DB_USER ?? 'yreader','-d',process.env.E2E_DB_NAME ?? 'yreader','-v','ON_ERROR_STOP=1'], { input: sql })
   else if (process.env.E2E_DATABASE_URL) execFileSync(process.env.E2E_PSQL ?? 'psql', ['-d',process.env.E2E_DATABASE_URL,'-v','ON_ERROR_STOP=1'], { input: sql })
   else throw new Error('Switch integration tests require an isolated E2E_DB_CONTAINER or E2E_DATABASE_URL')
   await page.route(`**/api/v1/books/${book.id}/chapters?*`, async route => { const requested = new URL(route.request().url()).searchParams.get('source_id'); const current = await (await page.request.get(`/api/v1/books/${book.id}`, { headers })).json(); return route.fulfill({ json: { book_id: book.id, source_id: requested ?? current.active_source_id, total: 2, items: [0,1].map(i => ({ id: i + 1, chapter_index: i, sort_order: i, title: `第${i + 1}章`, normalized_title: `n:${i + 1}`, url: 'https://example.com/chapter', is_volume: false, word_count: 10 })) } }) })
@@ -33,6 +33,11 @@ test('switch preview does not mutate active source and confirmed switch invalida
   const cachedSources = await page.evaluate(() => new Promise<string[]>((resolve, reject) => { const req = indexedDB.open('yreader-offline-v1'); req.onerror = () => reject(req.error); req.onsuccess = () => { const d = req.result, get = d.transaction('chapters').objectStore('chapters').getAll(); get.onsuccess = () => { resolve(get.result.map(c => c.content.source_id)); d.close() } } }))
   expect(cachedSources).not.toContain(a.id)
   await page.route(`**/api/v1/books/${book.id}/chapters?*`, async route => { const requested = new URL(route.request().url()).searchParams.get('source_id'); if (!requested) return route.fulfill({ status: 502, json: { error: { code: 'source_request_failed' } } }); return route.fallback() })
-  await page.reload(); await expect(page.getByRole('alert').filter({ hasText: '书源请求失败' })).toBeVisible(); await page.getByRole('button', { name: '换源', exact: true }).click(); await expect(page.getByRole('dialog').locator('.virtual-list button')).toHaveCount(1)
+  // A recoverable TOC failure now uses the matching cached directory. Prove
+  // the injected failure occurred without requiring the obsolete fatal alert.
+  const failedTOC = page.waitForResponse(r => r.url().includes(`/books/${book.id}/chapters?`) && r.status() === 502)
+  await page.reload(); await failedTOC
+  await expect(page.locator('.chapter-body')).toHaveText('源B正文')
+  await page.getByRole('button', { name: '换源', exact: true }).click(); await expect(page.getByRole('dialog').locator('.virtual-list button')).toHaveCount(1)
 
 })

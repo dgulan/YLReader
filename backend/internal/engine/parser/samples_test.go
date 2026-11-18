@@ -648,6 +648,9 @@ func TestLegadoSyntaxEvaluateRate(t *testing.T) {
 			continue
 		}
 		ok, reason := evaluateSample(ctx, e, s, content)
+		if !ok {
+			t.Logf("sample %s: %s", s.Name, reason)
+		}
 		r.ok, r.reason = ok, reason
 		if ok {
 			pass++

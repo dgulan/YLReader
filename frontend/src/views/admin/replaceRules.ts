@@ -12,12 +12,12 @@ export function ruleInput(draft: RuleDraft): RuleDraft {
   return value
 }
 export function useReplaceRules() {
-  const owner = getSession()!.user.id, items = ref<Model<'ReplaceRule'>[]>([]), busy = ref(false), error = ref(''), notice = ref(''), savedId = ref<string>()
+  const owner = getSession()?.user.id ?? '', items = ref<Model<'ReplaceRule'>[]>([]), busy = ref(false), error = ref(''), notice = ref(''), savedId = ref<string>()
   let generation = 0
   onScopeDispose(() => { generation++ })
-  const valid = (token: number) => token === generation && getSession()?.user.id === owner
+  const valid = (token: number) => Boolean(owner) && token === generation && getSession()?.user.id === owner
   async function load() {
-    if (busy.value) return
+    if (!valid(generation) || busy.value) return
     const token = generation; busy.value = true; error.value = ''
     try { const list = await api.replaceRules(); if (valid(token)) items.value = list }
     catch (e) { if (valid(token)) error.value = errorText(e) }
@@ -28,7 +28,7 @@ export function useReplaceRules() {
     catch { if (valid(token)) notice.value = '服务端已保存，但本机正文缓存清理失败，请保持联网并重新打开章节' }
   }
   async function save(id: string | undefined, draft: RuleDraft) {
-    if (busy.value) return false
+    if (!valid(generation) || busy.value) return false
     const token = generation; error.value = ''; notice.value = ''
     try {
       const input = ruleInput(draft); busy.value = true
@@ -41,7 +41,7 @@ export function useReplaceRules() {
     finally { if (valid(token)) busy.value = false }
   }
   async function remove(id: string) {
-    if (busy.value) return false
+    if (!valid(generation) || busy.value) return false
     const token = generation; busy.value = true; error.value = ''; notice.value = ''
     try {
       try { await api.deleteReplaceRule(id) } catch (e) { if (!(e instanceof ApiError && e.status === 404)) throw e }

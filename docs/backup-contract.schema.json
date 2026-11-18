@@ -1,0 +1,662 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "YLReader backup contracts v1; LocalFS isolated experiment only",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/manifest"
+    },
+    {
+      "$ref": "#/$defs/config"
+    },
+    {
+      "$ref": "#/$defs/plan"
+    },
+    {
+      "$ref": "#/$defs/operation"
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/)[^\\u0000-\\u001f\\u007f]*$"
+    },
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\\\:\\u0000-\\u001f\\u007f]+(?:/[^\\\\:\\u0000-\\u001f\\u007f]+)*$",
+      "not": {
+        "pattern": "//|/$"
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "root",
+        "namespace"
+      ],
+      "properties": {
+        "provider": {
+          "const": "localfs"
+        },
+        "root": {
+          "$ref": "#/$defs/path"
+        },
+        "namespace": {
+          "$ref": "#/$defs/key"
+        }
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "name",
+        "checksum"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "name": {
+          "const": "baseline_v1_5"
+        },
+        "checksum": {
+          "const": "7e275f0f5dc37fa7b0834bd3d80da7c192f7bc7b854041f2f1e99b0cae3c3e51"
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "archive_name",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "archive_name": {
+          "const": "database.dump"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 214748364800
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "opaque_id",
+        "key",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "opaque_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{32}$"
+        },
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10737418240
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instance_id",
+        "database_dsn_file",
+        "storage"
+      ],
+      "properties": {
+        "instance_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "database_dsn_file": {
+          "$ref": "#/$defs/path"
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_ciphertext_bytes",
+        "max_plaintext_bytes",
+        "max_manifest_bytes",
+        "max_objects",
+        "max_object_bytes"
+      ],
+      "properties": {
+        "max_ciphertext_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "max_plaintext_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        },
+        "max_manifest_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        },
+        "max_objects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "max_object_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10737418240
+        }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "format_version",
+        "backup_id",
+        "source_instance_id",
+        "created_at",
+        "snapshot_at",
+        "app_revision",
+        "schema_version",
+        "migrations",
+        "postgres_major",
+        "required_header_kids",
+        "database",
+        "objects",
+        "counts",
+        "object_count",
+        "total_plaintext_bytes"
+      ],
+      "properties": {
+        "format": {
+          "const": "ylreader-instance-backup"
+        },
+        "format_version": {
+          "const": 1
+        },
+        "backup_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "source_instance_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "created_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "snapshot_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "app_revision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "migrations": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "$ref": "#/$defs/migration"
+          }
+        },
+        "postgres_major": {
+          "const": 16
+        },
+        "required_header_kids": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          }
+        },
+        "database": {
+          "$ref": "#/$defs/database"
+        },
+        "objects": {
+          "type": "array",
+          "maxItems": 1000000,
+          "items": {
+            "$ref": "#/$defs/object"
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_migrations",
+            "users",
+            "auth_sessions",
+            "app_settings",
+            "book_sources",
+            "source_failures",
+            "books",
+            "book_source_mappings",
+            "chapters",
+            "reading_progress",
+            "chapter_source_overrides",
+            "bookmarks",
+            "replace_rules",
+            "jobs"
+          ],
+          "properties": {
+            "schema_migrations": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "users": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "auth_sessions": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "app_settings": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "book_sources": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_failures": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "books": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "book_source_mappings": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "chapters": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "reading_progress": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "chapter_source_overrides": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "bookmarks": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "replace_rules": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "jobs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "object_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "total_plaintext_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1099511627776
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "config_format",
+        "config_version",
+        "source",
+        "target",
+        "backup",
+        "control",
+        "temporary",
+        "encryption",
+        "quiescence_file",
+        "limits"
+      ],
+      "properties": {
+        "config_format": {
+          "const": "ylreader-backup-localfs-experiment"
+        },
+        "config_version": {
+          "const": 1
+        },
+        "source": {
+          "$ref": "#/$defs/endpoint"
+        },
+        "target": {
+          "$ref": "#/$defs/endpoint"
+        },
+        "backup": {
+          "$ref": "#/$defs/storage"
+        },
+        "control": {
+          "$ref": "#/$defs/storage"
+        },
+        "temporary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "root"
+          ],
+          "properties": {
+            "root": {
+              "$ref": "#/$defs/path"
+            }
+          }
+        },
+        "encryption": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {
+            "recipient_file": {
+              "$ref": "#/$defs/path"
+            },
+            "identity_file": {
+              "$ref": "#/$defs/path"
+            }
+          },
+          "anyOf": [
+            {
+              "required": [
+                "recipient_file"
+              ]
+            },
+            {
+              "required": [
+                "identity_file"
+              ]
+            }
+          ]
+        },
+        "quiescence_file": {
+          "$ref": "#/$defs/path"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_format",
+        "plan_version",
+        "operation_id",
+        "backup_id",
+        "package_sha256",
+        "manifest_sha256",
+        "schema_version",
+        "migration_checksum",
+        "source_instance_id",
+        "target_instance_id",
+        "target_database",
+        "target_storage_fingerprint",
+        "control_fingerprint",
+        "temporary_fingerprint",
+        "limits",
+        "created_at",
+        "expires_at",
+        "steps",
+        "plan_digest"
+      ],
+      "properties": {
+        "plan_format": {
+          "const": "ylreader-restore-plan"
+        },
+        "plan_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "backup_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "package_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "migration_checksum": {
+          "const": "7e275f0f5dc37fa7b0834bd3d80da7c192f7bc7b854041f2f1e99b0cae3c3e51"
+        },
+        "source_instance_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "target_instance_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "target_database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "port",
+            "database"
+          ],
+          "properties": {
+            "host": {
+              "enum": [
+                "127.0.0.1",
+                "::1",
+                "localhost"
+              ]
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "database": {
+              "type": "string",
+              "pattern": "^yreader_a1_iso_[a-z0-9_]{1,24}$"
+            }
+          }
+        },
+        "target_storage_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "control_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "temporary_fingerprint": {
+          "$ref": "#/$defs/sha256"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        },
+        "created_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "steps": {
+          "const": [
+            "verify_package",
+            "verify_target",
+            "stage_objects",
+            "load_data",
+            "validate",
+            "revoke_sessions",
+            "write_report"
+          ]
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation_format",
+        "operation_version",
+        "operation_id",
+        "backup_id",
+        "plan_digest",
+        "generation",
+        "phase",
+        "created_at",
+        "updated_at",
+        "heartbeat_at",
+        "finished_at",
+        "failure_code",
+        "cancel_requested",
+        "owner_id"
+      ],
+      "properties": {
+        "operation_format": {
+          "const": "ylreader-restore-operation"
+        },
+        "operation_version": {
+          "const": 1
+        },
+        "operation_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "backup_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "phase": {
+          "enum": [
+            "planned",
+            "staging",
+            "validating",
+            "ready_for_cutover",
+            "completed",
+            "failed",
+            "canceled"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "heartbeat_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/utc"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure_code": {
+          "enum": [
+            null,
+            "operation_interrupted",
+            "integrity_failed",
+            "schema_incompatible",
+            "storage_failed",
+            "database_failed",
+            "validation_failed",
+            "internal_error"
+          ]
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "owner_id": {
+          "$ref": "#/$defs/uuid"
+        }
+      }
+    }
+  }
+}

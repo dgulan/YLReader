@@ -273,6 +273,17 @@ func (e *Engine) EvalField(ctx context.Context, node RuleNode, rule string) (str
 	}
 
 	mode, _ := detectFieldMode(rule)
+	if mode != ModeJS {
+		// 使用与标准管线一致的模板分类，避免 /novel/{{$.id}} 在
+		// NodeJSON 上尚未回填就被当作跨类型 XPath 拒绝。
+		classified := sourceRule{raw: rule}
+		if err := e.initRule(&classified); err != nil {
+			return "", err
+		}
+		if classified.literal && classified.fromTemplate {
+			mode = ModeRegex
+		}
+	}
 	// （1）跨类型不兼容预检。
 	switch node.Kind {
 	case NodeHTML:

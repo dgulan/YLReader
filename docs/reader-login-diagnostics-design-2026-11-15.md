@@ -1,0 +1,13 @@
+# 登录成功后的导航诊断
+
+保持冻结API/DDL和15秒登录/精确路径检查不变，不部署/提交/推送，不预热目标模块、不过滤异常或自动重试。先在当前已构建镜像上采集同一轮客户端证据，再决定业务修复。
+
+测试侧仅记录登录fetch响应头到达、JSON解析开始/结束、会话写入是否成功、路由beforeEach/beforeResolve/afterEach阶段、静态模块请求开始/完成/失败及最终路径/可见性/是否存在有效会话。禁止记录请求体、密码、令牌、响应JSON、用户标识及查询参数。事件有界，页面关闭前保存到既有独占证据目录。
+
+区分认证响应正文尚未完成、会话未写入、异步路由模块等待和守卫拒绝；Nginx返回200不能单独证明浏览器已完成模块加载。诊断代码只在Playwright中运行，不改变生产安全策略或应用路由。不将Windows WebKit环境延迟直接归因于iPhone或真正CORS缺陷。
+
+`--login-only`只执行桌面/移动两个冷上下文登录，报告verification_mode=login_navigation，不记为EPUB/TXT阅读通过。原生模块导入探针仅在原断言失败后执行，不能预热成功检查。中间诊断曾错误提前访问document.head，该轮作废；改在Node.prototype观察head实际追加样式的时序。
+
+有效失败轮发现网络responseEnd很快，但Playwright requestfinished及浏览器样式load分隔约5秒，断言结束后的诊断命令发出后模块立即结束。检查本机Playwright实现，函数式toHaveURL走waitForURL导航事件等待，而完整URL字符串走服务端to.have.url检查。先做同镜像对照：只将谓词换为完整同源/bookshelf字符串，仍15秒、拒绝/login?redirect=/bookshelf，不改业务、预热或放宽异常；如果通过，仅能确认当前环境下等待方式相关，不能宣称所有Safari网络问题已修复。
+
+最小HTML/模块样例很快，而同前端构建加模拟API的原生loopback复现中，WebKit仍需数秒解析路由，Chromium为毫秒。允许做有对照的构建优化实验：将管理端共享Element Plus及其界面依赖合并到独立懒加载chunk，用onlyExplicitManualChunks防止吸入Vue/阅读核心依赖。保留原构建快照，比较初次登录及书架路由总时长、传输字节和请求数；若只是把成本前移或引入阅读器管理CSS，撤回候选，不将其作为已证实的底层根因修复。

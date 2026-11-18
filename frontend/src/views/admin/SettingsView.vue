@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import 'element-plus/dist/index.css'
 import { ElAlert, ElButton, ElForm, ElFormItem, ElInputNumber, ElOption, ElSelect, ElMessageBox } from 'element-plus'
 import { useReaderConfig } from '@/stores/readerConfig'
 const config = useReaderConfig()

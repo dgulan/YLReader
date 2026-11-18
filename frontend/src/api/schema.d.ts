@@ -668,8 +668,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 就绪检查（PG 与已配置的 Redis）
-         * @description 检查 PostgreSQL、已配置 Redis 及数据库迁移版本/校验和/所需视图结构；不可用时返回 503，不自动迁移（ADR-017）。
+         * 就绪检查（PG 与已配置依赖）
+         * @description 检查 PostgreSQL、数据库迁移结构及已配置的 Redis/独立沙箱 worker；不可用时返回 503，不自动迁移或回退执行模式（ADR-017、ADR-021）。
          */
         get: operations["readyz"];
         put?: never;

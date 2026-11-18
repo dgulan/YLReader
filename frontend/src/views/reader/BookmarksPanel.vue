@@ -20,7 +20,7 @@ defineExpose({ open })
 </script>
 <template>
   <dialog ref="dialog" class="bookmarks-dialog" aria-labelledby="bookmarks-title" @cancel="busy && $event.preventDefault()">
-    <header><h2 id="bookmarks-title">阅读书签</h2><button :disabled="busy" @click="dialog?.close()">关闭</button></header>
+    <header><h2 id="bookmarks-title">阅读书签</h2><button autofocus :disabled="busy" @click="dialog?.close()">关闭</button></header>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="message" role="status">{{ message }}</p><p v-if="busy" role="status">正在处理书签…</p>
     <form v-if="position" @submit.prevent="save"><p>当前位置：第 {{ position.chapter_index + 1 }} 章 · 字符 {{ position.char_offset ?? 0 }}</p><blockquote>{{ position.excerpt }}</blockquote><label for="bookmark-note">书签备注（可选）</label><textarea id="bookmark-note" v-model="note" maxlength="4096" rows="2" :disabled="busy" /><button type="submit" :disabled="busy">保存当前位置书签</button></form>
     <div class="list-heading"><h3>已保存书签（{{ items.length }}）</h3><button :disabled="busy" @click="selected = ''; load()">刷新书签</button></div>

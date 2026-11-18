@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import 'element-plus/dist/index.css'
 import { computed, h, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { ElButton, ElInput, ElAlert, ElForm, ElFormItem, ElSwitch, ElSelect, ElOption, ElMessageBox, ElTableV2, ElAutoResizer } from 'element-plus'
 import { api } from '@/api/reader'
 import { ApiError, errorText, type Model } from '@/api/client'
@@ -9,11 +10,21 @@ const route = useRoute(), router = useRouter(), source = ref<Model<'Source'>>()
 const name = ref(''), group = ref(''), enabled = ref(true), rules = ref('{}'), header = ref('{}'), error = ref(''), notice = ref(''), busy = ref(false), stale = ref(false)
 const ruleType = ref<Model<'DebugRequest'>['rule_type']>('content'), rule = ref(''), input = ref(''), url = ref(''), debug = ref<Model<'DebugResult'>>(), debugError = ref(''), debugging = ref(false)
 const sourceId = computed(() => String(route.params.sourceId)), readonly = computed(() => source.value?.book_source_type === 3)
+const draftSignature = () => JSON.stringify([name.value, group.value, enabled.value, rules.value, header.value])
+const savedDraft = ref('')
+let deleted = false
+async function confirmLeave() {
+  if (deleted || !source.value || readonly.value || draftSignature() === savedDraft.value) return true
+  if (busy.value) return false
+  try { await ElMessageBox.confirm('书源修改尚未保存，离开会丢弃草稿。', '未保存的书源', { confirmButtonText: '丢弃草稿并离开', cancelButtonText: '继续编辑' }); return true } catch { return false }
+}
+onBeforeRouteLeave(confirmLeave)
+onBeforeRouteUpdate(confirmLeave)
 const columns = [{ key: 'index', dataKey: 'index', title: '步骤', width: 70 }, { key: 'mode', dataKey: 'mode', title: '模式', width: 85 }, { key: 'expr', dataKey: 'expr', title: '表达式', width: 260 }, { key: 'output_preview', dataKey: 'output_preview', title: '输出预览', width: 300 }, { key: 'error_code', dataKey: 'error_code', title: '错误', width: 180 }]
-async function load() { busy.value = true; try { const s = await api.source(sourceId.value); source.value = s; name.value = s.book_source_name; group.value = s.book_source_group; enabled.value = s.enabled; rules.value = JSON.stringify(s.rules, null, 2); header.value = JSON.stringify(s.header ?? {}, null, 2); stale.value = false; error.value = '' } catch (e) { error.value = errorText(e) } finally { busy.value = false } }
+async function load() { busy.value = true; try { const s = await api.source(sourceId.value); source.value = s; name.value = s.book_source_name; group.value = s.book_source_group; enabled.value = s.enabled; rules.value = JSON.stringify(s.rules, null, 2); header.value = JSON.stringify(s.header ?? {}, null, 2); savedDraft.value = draftSignature(); stale.value = false; error.value = '' } catch (e) { error.value = errorText(e) } finally { busy.value = false } }
 async function reload() { try { await ElMessageBox.confirm('重新加载会丢弃当前未保存的修改。', '重新加载书源', { confirmButtonText: '丢弃草稿并重新加载', cancelButtonText: '保留草稿' }); await load() } catch { /* Canceled. */ } }
-async function save() { if (!source.value || readonly.value) return; busy.value = true; error.value = ''; notice.value = ''; try { const patch = sourcePatch(source.value.version, name.value, group.value, enabled.value, rules.value, header.value); source.value = await api.updateSource(sourceId.value, patch); notice.value = '书源已保存'; stale.value = false } catch (e) { stale.value = e instanceof ApiError && e.status === 409; error.value = stale.value ? '书源已被其他操作修改，草稿已保留；请重新加载后合并修改' : errorText(e) } finally { busy.value = false } }
-async function remove() { if (!source.value || readonly.value) return; try { await ElMessageBox.confirm(`删除《${source.value.book_source_name}》后，关联的在线书可能需要重新选源。`, '删除书源', { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }) } catch { return }; busy.value = true; try { await api.deleteSource(sourceId.value); await router.push('/admin') } catch (e) { error.value = errorText(e) } finally { busy.value = false } }
+async function save() { if (!source.value || readonly.value) return; busy.value = true; error.value = ''; notice.value = ''; try { const patch = sourcePatch(source.value.version, name.value, group.value, enabled.value, rules.value, header.value); source.value = await api.updateSource(sourceId.value, patch); savedDraft.value = draftSignature(); notice.value = '书源已保存'; stale.value = false } catch (e) { stale.value = e instanceof ApiError && e.status === 409; error.value = stale.value ? '书源已被其他操作修改，草稿已保留；请重新加载后合并修改' : errorText(e) } finally { busy.value = false } }
+async function remove() { if (!source.value || readonly.value) return; try { await ElMessageBox.confirm(`删除《${source.value.book_source_name}》后，关联的在线书可能需要重新选源。`, '删除书源', { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }) } catch { return }; busy.value = true; try { await api.deleteSource(sourceId.value); deleted = true; await router.push('/admin') } catch (e) { error.value = errorText(e) } finally { busy.value = false } }
 async function runDebug() { if (!rule.value.trim()) { debugError.value = '请输入规则'; return }; if (!input.value.trim() && !url.value.trim()) { debugError.value = '请提供输入样本或请求 URL'; return }; debugging.value = true; debugError.value = ''; debug.value = undefined; try { debug.value = await api.debugSource(sourceId.value, { rule_type: ruleType.value, rule: rule.value, ...(url.value.trim() ? { url: url.value.trim() } : {}), variables: input.value ? { html: input.value } : {}, max_preview_bytes: 4096 }) } catch (e) { debugError.value = errorText(e) } finally { debugging.value = false } }
 watch(sourceId, () => { debug.value = undefined; void load() }, { immediate: true })
 </script>

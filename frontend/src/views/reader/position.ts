@@ -1,6 +1,20 @@
 // Server offsets count Unicode code points, not UTF-16 code units.
-export const codePointLength = (text: string) => Array.from(text).length
-export function utf16Offset(text: string, charOffset: number) { return Array.from(text).slice(0, Math.max(0, charOffset)).join('').length }
+export function codePointLength(text: string) {
+  let length = text.length
+  for (let i = 0; i < text.length; i++) {
+    const high = text.charCodeAt(i)
+    if (high >= 0xd800 && high <= 0xdbff) {
+      const low = text.charCodeAt(i + 1)
+      if (low >= 0xdc00 && low <= 0xdfff) { length--; i++ }
+    }
+  }
+  return length
+}
+export function utf16Offset(text: string, charOffset: number) {
+  let points = Math.max(0, Math.trunc(charOffset)) || 0, offset = 0
+  for (const point of text) { if (points-- <= 0) break; offset += point.length }
+  return offset
+}
 const cachedOffsets = new WeakMap<Text, { text: string; offsets: number[] }>()
 export function visibleOffset(node: Text, viewport: HTMLElement) {
   const text = node.data, top = viewport.getBoundingClientRect().top + 24

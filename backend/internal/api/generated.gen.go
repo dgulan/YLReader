@@ -2112,7 +2112,7 @@ type ServerInterface interface {
 	// 任务状态
 	// (GET /jobs/{jobId})
 	GetJob(w http.ResponseWriter, r *http.Request, jobId openapi_types.UUID)
-	// 就绪检查（PG 与已配置的 Redis）
+	// 就绪检查（PG 与已配置依赖）
 	// (GET /readyz)
 	Readyz(w http.ResponseWriter, r *http.Request)
 	// 替换规则列表
@@ -2328,7 +2328,7 @@ func (_ Unimplemented) GetJob(w http.ResponseWriter, r *http.Request, jobId open
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// 就绪检查（PG 与已配置的 Redis）
+// 就绪检查（PG 与已配置依赖）
 // (GET /readyz)
 func (_ Unimplemented) Readyz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNotImplemented)

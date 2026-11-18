@@ -10,22 +10,22 @@ export function bookPatch(draft: BookDraft, version: number): Model<'BookUpdate'
   return { version, name: draft.name.trim(), author: draft.author.trim(), status: draft.status, intro: draft.intro }
 }
 export function useBookEditor(bookId: Ref<string>) {
-  const owner = getSession()!.user.id, book = ref<Model<'Book'>>(), draft = reactive(empty()), busy = ref(false), error = ref(''), notice = ref(''), deleted = ref(false)
+  const owner = getSession()?.user.id ?? '', book = ref<Model<'Book'>>(), draft = reactive(empty()), busy = ref(false), error = ref(''), notice = ref(''), deleted = ref(false)
   const baseline = ref(JSON.stringify(draft)), dirty = computed(() => JSON.stringify(draft) !== baseline.value)
   let generation = 0
-  const valid = (token: number) => token === generation && getSession()?.user.id === owner
+  const valid = (token: number) => Boolean(owner) && token === generation && getSession()?.user.id === owner
   function reset() { generation++; book.value = undefined; Object.assign(draft, empty()); baseline.value = JSON.stringify(draft); busy.value = false; error.value = ''; notice.value = ''; deleted.value = false }
   watch(bookId, reset, { flush: 'sync' }); onScopeDispose(reset)
   function apply(value: Model<'Book'>) { book.value = value; Object.assign(draft, { name: value.name, author: value.author || '', status: value.status, intro: value.intro || '' }); baseline.value = JSON.stringify(draft) }
   async function load() {
-    if (busy.value) return
+    if (!valid(generation) || busy.value) return
     const token = generation; busy.value = true; error.value = ''; notice.value = ''
     try { const value = await api.book(bookId.value); if (valid(token)) apply(value) }
     catch (e) { if (valid(token)) error.value = errorText(e) }
     finally { if (valid(token)) busy.value = false }
   }
   async function save() {
-    if (busy.value || !book.value || deleted.value) return false
+    if (!valid(generation) || busy.value || !book.value || deleted.value) return false
     const token = generation, id = bookId.value; error.value = ''; notice.value = ''
     try {
       const patch = bookPatch(draft, book.value.version); busy.value = true
@@ -39,7 +39,7 @@ export function useBookEditor(bookId: Ref<string>) {
     finally { if (valid(token)) busy.value = false }
   }
   async function remove() {
-    if (busy.value || !book.value || deleted.value) return false
+    if (!valid(generation) || busy.value || !book.value || deleted.value) return false
     const token = generation, id = bookId.value; busy.value = true; error.value = ''; notice.value = ''
     try {
       try { await api.deleteBook(id) } catch (e) { if (!(e instanceof ApiError && e.status === 404)) throw e }

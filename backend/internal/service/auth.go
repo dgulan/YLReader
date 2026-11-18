@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -20,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/argon2"
+	"yreader/backend/internal/repository"
 )
 
 // Auth 相关哨兵错误。HTTP 层统一映射为 401 unauthorized。
@@ -98,6 +98,9 @@ func HashPassword(password string) (string, error) {
 
 // VerifyPassword 校验明文密码与 PHC 字符串是否匹配（恒定时间比较）。
 func VerifyPassword(encoded, password string) (bool, error) {
+	if len(encoded) > 512 {
+		return false, errors.New("auth: password hash too long")
+	}
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
 		return false, errors.New("auth: invalid password hash format")
@@ -108,6 +111,9 @@ func VerifyPassword(encoded, password string) (bool, error) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism); err != nil {
 		return false, fmt.Errorf("auth: parse password hash params: %w", err)
 	}
+	if parts[2] != "v=19" || parts[3] != fmt.Sprintf("m=%d,t=%d,p=%d", memory, iterations, parallelism) || parallelism < 1 || parallelism > 4 || iterations < 1 || iterations > 6 || memory < 8*uint32(parallelism) || memory > 128*1024 {
+		return false, errors.New("auth: unsupported password hash parameters")
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return false, fmt.Errorf("auth: decode salt: %w", err)
@@ -116,28 +122,17 @@ func VerifyPassword(encoded, password string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("auth: decode key: %w", err)
 	}
+	if len(salt) < 8 || len(salt) > 64 || len(want) < 16 || len(want) > 64 {
+		return false, errors.New("auth: invalid password hash dimensions")
+	}
 	got := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
-var (
-	dummyHashOnce sync.Once
-	dummyHash     string
-)
-
-// getDummyHash 返回一个稳定的假哈希，用于「用户不存在」时执行恒定时间对比，
-// 抹平响应时间差（防用户枚举）。
-func getDummyHash() string {
-	dummyHashOnce.Do(func() {
-		hash, err := HashPassword("dummy-password-never-matches")
-		if err == nil {
-			dummyHash = hash
-		} else {
-			dummyHash = "$argon2id$v=19$m=65536,t=3,p=2$AAAA$AAAA"
-		}
-	})
-	return dummyHash
-}
+// Public dummy PHC: no account or secret is associated with these bytes.
+// Every absent-user login still performs one full default-cost verification;
+// avoid a second Argon2 calculation and entropy-dependent fallback on first use.
+const dummyHash = "$argon2id$v=19$m=65536,t=3,p=2$AAECAwQFBgcICQoLDA0ODw$AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
 
 // Login 校验用户名密码并签发 token 对；任何失败统一 ErrInvalidCredentials。
 func (a *AuthService) Login(ctx context.Context, username, password string) (*TokenPair, error) {
@@ -158,12 +153,14 @@ func (a *AuthService) Login(ctx context.Context, username, password string) (*To
 	if verr != nil || !ok || u.IsDisabled {
 		return nil, ErrInvalidCredentials
 	}
-	_, _ = a.pool.Exec(ctx, `UPDATE users SET last_login_at = now() WHERE id = $1`, u.ID)
+	if _, err := a.pool.Exec(ctx, `UPDATE users SET last_login_at = now() WHERE id = $1`, u.ID); err != nil {
+		return nil, err
+	}
 	return a.issueTokens(ctx, u)
 }
 
 func dummyVerify(password string) {
-	_, _ = VerifyPassword(getDummyHash(), password)
+	_, _ = VerifyPassword(dummyHash, password)
 }
 
 // Refresh 校验 refresh token 并轮换；命中已吊销 token 视为复用攻击，
@@ -174,11 +171,34 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (*TokenP
 		return nil, ErrUnauthorized
 	}
 	hash := hashToken(refreshToken)
+	tx, err := a.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
+	// Serialize the whole rotation/replay decision and replacement insert per user.
+	var owner uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT user_id FROM auth_sessions WHERE refresh_token_hash=$1`, hash).Scan(&owner); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUnauthorized
+		}
+		return nil, err
+	}
+	if err = tx.QueryRow(ctx, `SELECT id FROM users WHERE id=$1 FOR UPDATE`, owner).Scan(&owner); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUnauthorized
+		}
+		return nil, err
+	}
 
 	var id, userID uuid.UUID
 	var expiresAt time.Time
 	var revokedAt *time.Time
-	err := a.pool.QueryRow(ctx, `SELECT id, user_id, expires_at, revoked_at
+	err = tx.QueryRow(ctx, `SELECT id, user_id, expires_at, revoked_at
 		FROM auth_sessions WHERE refresh_token_hash = $1`, hash).
 		Scan(&id, &userID, &expiresAt, &revokedAt)
 	if err != nil {
@@ -189,8 +209,12 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (*TokenP
 	}
 	if revokedAt != nil {
 		// 已吊销 token 被再次使用：吊销该用户全部活跃 session。
-		_, _ = a.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now()
-			WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+		if _, err = tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now() WHERE user_id=$1 AND revoked_at IS NULL`, userID); err != nil {
+			return nil, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return nil, err
+		}
 		return nil, ErrUnauthorized
 	}
 	if time.Now().After(expiresAt) {
@@ -198,22 +222,35 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (*TokenP
 	}
 
 	// 轮换：先吊销旧 session，再签发新 token 对。
-	tag, err := a.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now()
+	tag, err := tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now()
 		WHERE id = $1 AND revoked_at IS NULL`, id)
 	if err != nil {
 		return nil, err
 	}
 	if tag.RowsAffected() == 0 {
+		if _, err = tx.Exec(ctx, `UPDATE auth_sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, userID); err != nil {
+			return nil, err
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return nil, err
+		}
 		return nil, ErrUnauthorized
 	}
-	u, err := a.loadByID(ctx, userID)
+	u, err := loadAuthUser(ctx, tx, userID)
 	if err != nil {
 		return nil, err
 	}
 	if u.IsDisabled {
 		return nil, ErrUnauthorized
 	}
-	return a.issueTokens(ctx, u)
+	pair, err := a.issueTokensOn(ctx, tx, u)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return pair, nil
 }
 
 // Logout 吊销当前 refresh token（幂等）。
@@ -285,8 +322,11 @@ func (a *AuthService) loadByUsername(ctx context.Context, username string) (*Use
 }
 
 func (a *AuthService) loadByID(ctx context.Context, id uuid.UUID) (*User, error) {
+	return loadAuthUser(ctx, a.pool, id)
+}
+func loadAuthUser(ctx context.Context, db repository.Querier, id uuid.UUID) (*User, error) {
 	var u User
-	err := a.pool.QueryRow(ctx, `SELECT id, username, password_hash, role, display_name,
+	err := db.QueryRow(ctx, `SELECT id, username, password_hash, role, display_name,
 			token_version, is_disabled, created_at, last_login_at
 		FROM users WHERE id = $1`, id).Scan(
 		&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.DisplayName,
@@ -301,6 +341,9 @@ func (a *AuthService) loadByID(ctx context.Context, id uuid.UUID) (*User, error)
 }
 
 func (a *AuthService) issueTokens(ctx context.Context, u *User) (*TokenPair, error) {
+	return a.issueTokensOn(ctx, a.pool, u)
+}
+func (a *AuthService) issueTokensOn(ctx context.Context, db repository.Querier, u *User) (*TokenPair, error) {
 	access, err := a.issueAccess(u.ID, u.TokenVersion)
 	if err != nil {
 		return nil, err
@@ -309,7 +352,7 @@ func (a *AuthService) issueTokens(ctx context.Context, u *User) (*TokenPair, err
 	if err != nil {
 		return nil, err
 	}
-	if _, err := a.pool.Exec(ctx, `INSERT INTO auth_sessions (user_id, refresh_token_hash, expires_at)
+	if _, err := db.Exec(ctx, `INSERT INTO auth_sessions (user_id, refresh_token_hash, expires_at)
 		VALUES ($1, $2, $3)`, u.ID, hash, time.Now().Add(a.refreshTTL)); err != nil {
 		return nil, err
 	}

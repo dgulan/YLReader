@@ -1,0 +1,206 @@
+//go:build integration && linux
+
+package backup
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"yreader/backend/internal/api"
+	headercrypto "yreader/backend/internal/pkg/crypto"
+	"yreader/backend/internal/service"
+)
+
+func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObjects, p Plan, owner, raw, mode string, ring *headercrypto.Keyring, source *pgx.Conn, f *httpFixtureCredentials) {
+	t.Helper()
+	ctx := context.Background()
+	clock := func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }
+	draft, _, release, inputs := fixtureBehaviorDraft(t, g, stage, p, owner, raw, ring, source, f.secret, fixtureSecret(t))
+	defer release()
+	s, e := stableHandoverSnapshot(ctx, g.locations.files[3], p.OperationID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	a := behaviorConsent{Format: "ylreader-behavior-consent", Version: 1, Scope: "isolated-account-verification-only", ID: uuid.NewString(), OperationID: p.OperationID, OwnerID: owner, PlanDigest: p.Digest, TargetID: p.TargetID, Generation: s.op.Generation, OperationSHA: s.tokens[0], AttemptSHA: s.tokens[1], PublicationSHA: s.tokens[2], RuntimeSHA: draft.TargetIdentity.Runtime, Issued: clock(), Expires: clock().Add(time.Minute)}
+	data := map[string][]byte{}
+	users := []uuid.UUID{}
+	for i, name := range f.names {
+		key := fmt.Sprintf("account-%d.json", i)
+		id := f.old[i].User.ID
+		users = append(users, id)
+		a.Accounts = append(a.Accounts, behaviorConsentAccount{id.String(), key})
+		data[key], _ = json.Marshal(map[string]string{"user_id": id.String(), "username": name, "password": f.password, "old_access_token": f.old[i].AccessToken, "old_refresh_token": f.old[i].RefreshToken})
+	}
+	data["consent.json"], _ = json.Marshal(a)
+	prepared, e := prepareBehaviorInput(ctx, &diagnosticReader{data: data}, g.locations.files[3], "consent.json", p, a.RuntimeSHA, clock)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer prepared.Close()
+	pool := newIsolatedTargetPool(t, ctx, raw)
+	defer pool.Close()
+	handler := api.NewServer(api.Deps{Auth: service.NewAuthService(pool, inputs.TargetJWT, time.Minute, time.Hour), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
+	var loginRequests, logoutRequests, oldAccessRequests, trapRequests, unsafe atomic.Int32
+	trap := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { trapRequests.Add(1); w.WriteHeader(500) }))
+	defer trap.Close()
+	t.Setenv("HTTP_PROXY", trap.URL)
+	t.Setenv("HTTPS_PROXY", trap.URL)
+	t.Setenv("NO_PROXY", "")
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cookie") != "" || r.Header.Get("Idempotency-Key") != "" {
+			unsafe.Add(1)
+		}
+		if r.URL.Path == "/api/v1/auth/login" {
+			loginRequests.Add(1)
+			if r.Header.Get("Authorization") != "" {
+				unsafe.Add(1)
+			}
+			if mode == "redirect" {
+				http.Redirect(w, r, trap.URL, http.StatusTemporaryRedirect)
+				return
+			}
+			if mode == "lost" {
+				record := httptest.NewRecorder()
+				handler.ServeHTTP(record, r)
+				if record.Code != 200 {
+					unsafe.Add(1)
+				}
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					unsafe.Add(1)
+					return
+				}
+				conn.Close()
+				return
+			}
+		} else if r.URL.Path == "/api/v1/auth/logout" {
+			logoutRequests.Add(1)
+		} else if r.URL.Path == "/api/v1/auth/me" && mode == "good" {
+			oldAccessRequests.Add(1)
+			if r.Method != http.MethodGet || r.ContentLength != 0 {
+				unsafe.Add(1)
+			}
+		} else {
+			unsafe.Add(1)
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	server.Config.ErrorLog = log.New(io.Discard, "", 0)
+	server.StartTLS()
+	defer server.Close()
+	certificate := append([]byte(nil), server.Certificate().Raw...)
+	if mode == "wrong_pin" {
+		certificate[len(certificate)-1] ^= 1
+	}
+	transport, e := newBehaviorHTTPTransport(behaviorHTTPConfig{Endpoint: server.URL, Certificate: certificate, Binding: behaviorTransportBinding{p.TargetID, draft.TargetIdentity.Database, a.RuntimeSHA}, DatabaseURL: raw, Source: inputs.SourceDatabase, Target: inputs.TargetDatabase, JWT: inputs.TargetJWT, Users: users, Clock: clock})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer transport.Close()
+	var result behaviorDispatchObservation
+	t.Run("https_dispatch", func(t *testing.T) {
+		if mode == "good" {
+			for i, credential := range prepared.accounts {
+				if transport.rejectOldAccess(ctx, users[i], f.old[i].User.TokenVersion+1, credential.OldAccess, inputs.SourceJWT) != nil {
+					t.Fatal("valid source access token rejection unconfirmed")
+				}
+			}
+		}
+		result, e = g.dispatchBehaviorOnce(ctx, prepared, inputs, transport, clock)
+		wantHTTPStage := "login_transport"
+		if mode == "good" {
+			wantHTTPStage = "completed"
+		}
+		if result.Stage != wantHTTPStage {
+			t.Fatalf("HTTPS dispatch stage %s, expected %s", result.Stage, wantHTTPStage)
+		}
+		if mode == "good" {
+			if e != nil || !result.ResponsesObserved || len(result.Sessions) != 2 {
+				t.Fatal("HTTPS dispatch failed", e)
+			}
+		} else if e != errBehaviorDispatch || result.ResponsesObserved {
+			t.Fatal("unsafe HTTPS response accepted")
+		}
+	})
+	t.Run("https_no_replay", func(t *testing.T) {
+		before := loginRequests.Load()
+		if _, e := g.dispatchBehaviorOnce(ctx, prepared, inputs, transport, clock); e != errBehaviorDispatch {
+			t.Fatal("guard replay allowed")
+		}
+		credential := prepared.accounts[0]
+		credential.OldAccess, credential.OldRefresh = "", ""
+		if _, e := transport.Login(ctx, credential); e != errBehaviorHTTP || loginRequests.Load() != before {
+			t.Fatal("adapter replayed POST")
+		}
+	})
+	newSessions, active, wantLogin, wantLogout := 0, 0, 0, 0
+	if mode == "good" {
+		newSessions, wantLogin, wantLogout = 2, 2, 2
+	}
+	if mode == "lost" {
+		newSessions, active, wantLogin = 1, 1, 1
+	}
+	if mode == "redirect" {
+		wantLogin = 1
+	}
+	t.Run("https_session_bounds", func(t *testing.T) {
+		var count, actualActive, foreign int
+		if pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE revoked_at IS NULL),count(*) FILTER(WHERE user_id<>$1 AND user_id<>$2) FROM public.auth_sessions`, users[0], users[1]).Scan(&count, &actualActive, &foreign) != nil || count != 2+newSessions || actualActive != active || foreign != 0 {
+			t.Fatal("unexpected HTTPS session delta")
+		}
+		for _, s := range result.Sessions {
+			var revoked bool
+			if pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM public.auth_sessions WHERE id=$1 AND user_id=$2`, s.SessionID, s.UserID).Scan(&revoked) != nil || !revoked {
+				t.Fatal("known HTTPS session not revoked")
+			}
+		}
+	})
+	t.Run("https_network_safety", func(t *testing.T) {
+		wantOld := int32(0)
+		if mode == "good" {
+			wantOld = 2
+		}
+		if oldAccessRequests.Load() != wantOld {
+			t.Fatal("unexpected old access request count")
+		}
+		if int(loginRequests.Load()) != wantLogin || int(logoutRequests.Load()) != wantLogout || trapRequests.Load() != 0 || unsafe.Load() != 0 {
+			t.Fatal("redirect/proxy/retry or credential boundary violated")
+		}
+		d := DiagnoseBehaviorIntent(ctx, g.locations.files[3], p.OperationID, clock())
+		if d.Status != "outcome_unknown" || d.Dispatch || d.Retry {
+			t.Fatal("HTTP records granted retry")
+		}
+	})
+	if os.Getenv("BACKUP_BEHAVIOR_REVIEW") == "1" {
+		if mode == "good" {
+			server.Close()
+			pool.Close()
+			transport.Close()
+		}
+		assertBoundBehaviorReview(t, g, inputs, clock, mode)
+	}
+	// The dispatcher never searches for unknown sessions. Only this explicit
+	// fixture operator cleans the intentionally lost response after assertions.
+	if mode == "lost" {
+		var id uuid.UUID
+		if pool.QueryRow(ctx, `SELECT id FROM public.auth_sessions WHERE user_id=$1 AND revoked_at IS NULL`, users[0]).Scan(&id) != nil {
+			t.Fatal("lost fixture session")
+		}
+		if _, e := pool.Exec(ctx, `UPDATE public.auth_sessions SET revoked_at=now() WHERE id=$1`, id); e != nil {
+			t.Fatal(e)
+		}
+	}
+	t.Logf(`BEHAVIOR_HTTP_EVIDENCE {"scope":"isolated-https-dispatch","mode":%q,"login_requests":%d,"logout_requests":%d,"new_sessions":%d,"active_after_dispatch":%d,"old_access_requests":%d,"redirect_or_proxy_requests":0,"deployment_authorized":false}`, mode, wantLogin, wantLogout, newSessions, active, oldAccessRequests.Load())
+}

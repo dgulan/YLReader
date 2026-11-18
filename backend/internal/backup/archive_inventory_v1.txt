@@ -1,0 +1,136 @@
+COMMENT - EXTENSION pg_trgm
+COMMENT - EXTENSION pgcrypto
+COMMENT public COLUMN book_sources.concurrent_rate
+COMMENT public COLUMN book_sources.header
+COMMENT public COLUMN book_sources.rules
+COMMENT public COLUMN chapters.normalized_title
+COMMENT public COLUMN users.token_version
+COMMENT public TABLE chapter_source_overrides
+CONSTRAINT public app_settings app_settings_pkey
+CONSTRAINT public auth_sessions auth_sessions_pkey
+CONSTRAINT public auth_sessions auth_sessions_refresh_token_hash_key
+CONSTRAINT public book_source_mappings book_source_mappings_pkey
+CONSTRAINT public book_source_mappings uq_mappings_book_source_url
+CONSTRAINT public book_sources book_sources_pkey
+CONSTRAINT public book_sources uq_book_sources_user_url
+CONSTRAINT public bookmarks bookmarks_pkey
+CONSTRAINT public bookmarks uq_bookmarks_user_book_chapter_offset
+CONSTRAINT public books books_pkey
+CONSTRAINT public books uq_books_user_name_author
+CONSTRAINT public chapter_source_overrides chapter_source_overrides_pkey
+CONSTRAINT public chapter_source_overrides uq_chapter_overrides_book_index
+CONSTRAINT public chapters chapters_pkey
+CONSTRAINT public chapters uq_chapters_book_source_url
+CONSTRAINT public jobs jobs_pkey
+CONSTRAINT public reading_progress reading_progress_pkey
+CONSTRAINT public reading_progress uq_progress_user_book
+CONSTRAINT public replace_rules replace_rules_pkey
+CONSTRAINT public schema_migrations schema_migrations_pkey
+CONSTRAINT public source_failures source_failures_pkey
+CONSTRAINT public users users_pkey
+EXTENSION - pg_trgm
+EXTENSION - pgcrypto
+FK CONSTRAINT public app_settings app_settings_user_id_fkey
+FK CONSTRAINT public auth_sessions auth_sessions_user_id_fkey
+FK CONSTRAINT public book_source_mappings book_source_mappings_book_id_fkey
+FK CONSTRAINT public book_source_mappings book_source_mappings_source_id_fkey
+FK CONSTRAINT public book_sources book_sources_user_id_fkey
+FK CONSTRAINT public bookmarks bookmarks_book_id_fkey
+FK CONSTRAINT public bookmarks bookmarks_user_id_fkey
+FK CONSTRAINT public books books_active_source_id_fkey
+FK CONSTRAINT public books books_user_id_fkey
+FK CONSTRAINT public chapter_source_overrides chapter_source_overrides_book_id_fkey
+FK CONSTRAINT public chapter_source_overrides chapter_source_overrides_source_id_fkey
+FK CONSTRAINT public chapter_source_overrides chapter_source_overrides_user_id_fkey
+FK CONSTRAINT public chapters chapters_book_id_fkey
+FK CONSTRAINT public chapters chapters_source_id_fkey
+FK CONSTRAINT public jobs jobs_user_id_fkey
+FK CONSTRAINT public reading_progress reading_progress_book_id_fkey
+FK CONSTRAINT public reading_progress reading_progress_user_id_fkey
+FK CONSTRAINT public replace_rules replace_rules_user_id_fkey
+FK CONSTRAINT public source_failures source_failures_source_id_fkey
+FK CONSTRAINT public source_failures source_failures_user_id_fkey
+FUNCTION public books_fill_normalized_keys()
+FUNCTION public bump_row_version()
+FUNCTION public chapter_title_key_fallback(text)
+FUNCTION public normalize_book_key(text)
+FUNCTION public relocate_exact(uuid, uuid, text, integer, integer)
+FUNCTION public relocate_fuzzy(uuid, uuid, text, integer, integer, real)
+FUNCTION public set_updated_at()
+FUNCTION public touch_progress_updated_at()
+INDEX public ix_auth_sessions_user_active
+INDEX public ix_book_sources_group
+INDEX public ix_book_sources_name_trgm
+INDEX public ix_book_sources_rules_gin
+INDEX public ix_book_sources_user_enabled_weight
+INDEX public ix_bookmarks_book_chapter
+INDEX public ix_books_user_last_read
+INDEX public ix_books_user_name_trgm
+INDEX public ix_chapter_overrides_source
+INDEX public ix_chapter_overrides_user_book
+INDEX public ix_chapters_book_source_sort
+INDEX public ix_chapters_book_source_title
+INDEX public ix_chapters_title_trgm
+INDEX public ix_jobs_run_queue
+INDEX public ix_jobs_user_status
+INDEX public ix_jobs_worker_status
+INDEX public ix_mappings_book_status
+INDEX public ix_mappings_source
+INDEX public ix_progress_user_updated
+INDEX public ix_replace_rules_user_order
+INDEX public ix_source_failures_active
+INDEX public uq_books_user_file_hash
+INDEX public uq_chapters_book_source_index
+INDEX public uq_mappings_one_active
+INDEX public ux_users_username_lower
+SEQUENCE SET public chapters_id_seq
+SEQUENCE SET public source_failures_id_seq
+SEQUENCE public chapters_id_seq
+SEQUENCE public source_failures_id_seq
+TABLE DATA public app_settings
+TABLE DATA public auth_sessions
+TABLE DATA public book_source_mappings
+TABLE DATA public book_sources
+TABLE DATA public bookmarks
+TABLE DATA public books
+TABLE DATA public chapter_source_overrides
+TABLE DATA public chapters
+TABLE DATA public jobs
+TABLE DATA public reading_progress
+TABLE DATA public replace_rules
+TABLE DATA public schema_migrations
+TABLE DATA public source_failures
+TABLE DATA public users
+TABLE public app_settings
+TABLE public auth_sessions
+TABLE public book_source_mappings
+TABLE public book_sources
+TABLE public bookmarks
+TABLE public books
+TABLE public chapter_source_overrides
+TABLE public chapters
+TABLE public jobs
+TABLE public reading_progress
+TABLE public replace_rules
+TABLE public schema_migrations
+TABLE public source_failures
+TABLE public users
+TRIGGER public book_source_mappings trg_mappings_updated
+TRIGGER public book_sources trg_sources_updated
+TRIGGER public book_sources trg_sources_version
+TRIGGER public books trg_books_fill_keys
+TRIGGER public books trg_books_updated
+TRIGGER public books trg_books_version
+TRIGGER public chapter_source_overrides trg_chapter_overrides_updated
+TRIGGER public chapters trg_chapters_updated
+TRIGGER public reading_progress trg_progress_touch_updated_at
+TRIGGER public replace_rules trg_replace_updated
+TRIGGER public users trg_users_updated
+TYPE public book_status
+TYPE public book_type
+TYPE public failure_kind
+TYPE public job_status
+TYPE public job_type
+TYPE public mapping_status
+TYPE public user_role
+VIEW public v_bookshelf

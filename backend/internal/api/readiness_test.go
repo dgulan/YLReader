@@ -24,6 +24,8 @@ func TestReadinessDependencyStates(t *testing.T) {
 		{"PG absent", Deps{}, 503, map[string]string{"postgres": "fail"}},
 		{"PG failed", Deps{DBPing: fail}, 503, map[string]string{"postgres": "fail"}},
 		{"schema missing", Deps{DBPing: ok, SchemaPing: fail}, 503, map[string]string{"postgres": "ok", "schema": "fail"}},
+		{"worker configured", Deps{DBPing: ok, SandboxPing: ok}, 200, map[string]string{"postgres": "ok", "sandbox": "ok"}},
+		{"worker unavailable", Deps{DBPing: ok, SandboxPing: fail}, 503, map[string]string{"postgres": "ok", "sandbox": "fail"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRecorder()

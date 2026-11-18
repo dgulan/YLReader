@@ -3,6 +3,7 @@
 package fetcher
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/simplifiedchinese"
+	"golang.org/x/text/transform"
 
 	"golang.org/x/net/html/charset"
 )
@@ -54,6 +59,9 @@ var blockedCIDRs = mustPrefixes(
 
 // Config 定义抓取客户端参数。零值字段取默认值。
 type Config struct {
+	// DomainLimiter is shared across all outbound attempts, including redirects.
+	// Production always supplies one; nil is allowed for isolated engine tests.
+	DomainLimiter         *DomainLimiter
 	ConnectTimeout        time.Duration
 	TLSHandshakeTimeout   time.Duration
 	ResponseHeaderTimeout time.Duration
@@ -98,6 +106,9 @@ func New(cfg Config) *Fetcher {
 			Proxy: nil,
 		},
 		CheckRedirect: f.checkRedirect,
+	}
+	if cfg.DomainLimiter != nil {
+		f.client.Transport = &limitedTransport{base: f.client.Transport, limiter: cfg.DomainLimiter}
 	}
 	return f
 }
@@ -164,9 +175,13 @@ func (f *Fetcher) Fetch(ctx context.Context, method, rawURL string, header http.
 	if err := validateTarget(u); err != nil {
 		return nil, err
 	}
+	prototype, err := http.NewRequestWithContext(ctx, method, rawURL, body)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid request", ErrUnsafeURL)
+	}
 
 	attempts := f.cfg.Retries + 1
-	if !isIdempotent(method) {
+	if !isIdempotent(method) || (body != nil && prototype.GetBody == nil) {
 		attempts = 1
 	}
 
@@ -177,7 +192,15 @@ func (f *Fetcher) Fetch(ctx context.Context, method, rawURL string, header http.
 				return nil, err
 			}
 		}
-		resp, err := f.do(ctx, method, rawURL, header, body)
+		attemptBody := body
+		if attempt > 0 && prototype.GetBody != nil {
+			replayed, err := prototype.GetBody()
+			if err != nil {
+				return nil, fmt.Errorf("%w: request body unavailable", ErrUpstreamError)
+			}
+			attemptBody = replayed
+		}
+		resp, err := f.do(ctx, method, rawURL, header, attemptBody)
 		if err != nil {
 			lastErr = err
 			if !isRetryableErr(err) {
@@ -186,12 +209,27 @@ func (f *Fetcher) Fetch(ctx context.Context, method, rawURL string, header http.
 			continue
 		}
 		if resp.StatusCode < 500 {
-			return f.decode(resp, rawURL)
+			if challengeHeader(resp.Header) {
+				resp.Body.Close()
+				return nil, ErrChallengeRequired
+			}
+			decoded, err := f.decode(resp, rawURL)
+			if err == nil && challengeResponse(decoded.StatusCode, decoded.Header, decoded.Body) {
+				return nil, ErrChallengeRequired
+			}
+			return decoded, err
 		}
 		// 5xx：幂等请求重试。
-		lastErr = fmt.Errorf("fetcher: upstream status %d", resp.StatusCode)
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		lastErr = &HTTPStatusError{StatusCode: resp.StatusCode}
+		if challengeHeader(resp.Header) {
+			resp.Body.Close()
+			return nil, ErrChallengeRequired
+		}
+		prefix, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
+		if challengeResponse(resp.StatusCode, resp.Header, prefix) {
+			return nil, ErrChallengeRequired
+		}
 	}
 	// 两个重试耗尽出口（5xx 与网络/TLS）统一包装 ErrUpstreamError，
 	// 供上层 errors.Is 精确映射为 502 source_request_failed。
@@ -232,10 +270,19 @@ func validateTarget(u *url.URL) error {
 func (f *Fetcher) decode(resp *http.Response, rawURL string) (*Response, error) {
 	defer resp.Body.Close()
 	ct := resp.Header.Get("Content-Type")
-	r, err := charset.NewReader(resp.Body, ct)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, f.cfg.MaxBodyBytes+1))
 	if err != nil {
-		r = resp.Body
+		return nil, fmt.Errorf("%w: %w", ErrUpstreamError, err)
 	}
+	if int64(len(raw)) > f.cfg.MaxBodyBytes {
+		return nil, ErrBodyTooLarge
+	}
+	encoding, name, certain := charset.DetermineEncoding(raw, ct)
+	peek := raw[:min(len(raw), 1024)]
+	if !certain && name == "windows-1252" && !utf8.Valid(raw) && !bytes.Contains(bytes.ToLower(peek), []byte("charset")) {
+		encoding = simplifiedchinese.GB18030
+	}
+	r := transform.NewReader(bytes.NewReader(raw), encoding.NewDecoder())
 	data, err := io.ReadAll(io.LimitReader(r, f.cfg.MaxBodyBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamError, err)
@@ -350,7 +397,8 @@ func isIdempotent(method string) bool {
 }
 
 func isRetryableErr(err error) bool {
-	if errors.Is(err, ErrSSRFBlocked) ||
+	if errors.Is(err, ErrRateLimit) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, ErrSSRFBlocked) ||
 		errors.Is(err, ErrUnsafeURL) ||
 		errors.Is(err, ErrRedirectTooMany) ||
 		errors.Is(err, ErrBodyTooLarge) {

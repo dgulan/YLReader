@@ -40,6 +40,7 @@ type Deps struct {
 	DBPing        func(context.Context) error
 	RedisPing     func(context.Context) error
 	SchemaPing    func(context.Context) error
+	SandboxPing   func(context.Context) error
 	Log           *slog.Logger
 }
 
@@ -65,10 +66,11 @@ type Server struct {
 	Jobs          *service.JobService
 	Storage       storage.Provider
 
-	dbPing     func(context.Context) error
-	redisPing  func(context.Context) error
-	schemaPing func(context.Context) error
-	log        *slog.Logger
+	dbPing      func(context.Context) error
+	redisPing   func(context.Context) error
+	schemaPing  func(context.Context) error
+	sandboxPing func(context.Context) error
+	log         *slog.Logger
 }
 
 // NewServer 构造 API Server。
@@ -101,6 +103,7 @@ func NewServer(d Deps) *Server {
 		dbPing:        d.DBPing,
 		redisPing:     d.RedisPing,
 		schemaPing:    d.SchemaPing,
+		sandboxPing:   d.SandboxPing,
 		log:           log,
 	}
 }
@@ -108,6 +111,7 @@ func NewServer(d Deps) *Server {
 // Handler 组装中间件与路由：根路径探针 + /api/v1 OpenAPI 路由。
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
+	r.Use(securityHeaders)
 	r.Use(RequestID)
 	r.Use(Recover(s.log))
 	r.Use(Logging(s.log))
@@ -174,6 +178,13 @@ func (s *Server) Readyz(w http.ResponseWriter, r *http.Request) {
 		checks["schema"] = "ok"
 		if s.schemaPing(ctx) != nil {
 			checks["schema"] = "fail"
+			status = http.StatusServiceUnavailable
+		}
+	}
+	if s.sandboxPing != nil {
+		checks["sandbox"] = "ok"
+		if s.sandboxPing(ctx) != nil {
+			checks["sandbox"] = "fail"
 			status = http.StatusServiceUnavailable
 		}
 	}

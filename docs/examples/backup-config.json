@@ -1,0 +1,47 @@
+{
+  "config_format": "ylreader-backup-localfs-experiment",
+  "config_version": 1,
+  "source": {
+    "instance_id": "10000000-0000-4000-8000-000000000001",
+    "database_dsn_file": "D:/isolated-backup-example/source.dsn",
+    "storage": {
+      "provider": "localfs",
+      "root": "D:/isolated-backup-example",
+      "namespace": "source"
+    }
+  },
+  "target": {
+    "instance_id": "20000000-0000-4000-8000-000000000001",
+    "database_dsn_file": "D:/isolated-backup-example/target.dsn",
+    "storage": {
+      "provider": "localfs",
+      "root": "D:/isolated-backup-example",
+      "namespace": "target"
+    }
+  },
+  "backup": {
+    "provider": "localfs",
+    "root": "D:/isolated-backup-example",
+    "namespace": "backups"
+  },
+  "control": {
+    "provider": "localfs",
+    "root": "D:/isolated-backup-example",
+    "namespace": "control"
+  },
+  "temporary": {
+    "root": "D:/isolated-backup-example/tmp"
+  },
+  "encryption": {
+    "recipient_file": "D:/isolated-backup-example/recipient.txt",
+    "identity_file": "D:/isolated-backup-example/identity.txt"
+  },
+  "quiescence_file": "D:/isolated-backup-example/quiescence.json",
+  "limits": {
+    "max_ciphertext_bytes": 107374182400,
+    "max_plaintext_bytes": 214748364800,
+    "max_manifest_bytes": 268435456,
+    "max_objects": 1000000,
+    "max_object_bytes": 10737418240
+  }
+}

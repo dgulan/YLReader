@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises'
 const username = process.env.E2E_USERNAME, password = process.env.E2E_PASSWORD
 test.skip(!username || !password, 'Isolated backend credentials required')
 function sql(statement: string) {
-  if (process.env.E2E_DB_CONTAINER) execFileSync('docker', ['exec', '-i', process.env.E2E_DB_CONTAINER, 'psql', '-U', 'yreader', '-d', 'yreader', '-v', 'ON_ERROR_STOP=1'], { input: statement })
+  if (process.env.E2E_DB_CONTAINER) execFileSync('docker', ['exec', '-i', process.env.E2E_DB_CONTAINER, 'psql', '-U', process.env.E2E_DB_USER ?? 'yreader', '-d', process.env.E2E_DB_NAME ?? 'yreader', '-v', 'ON_ERROR_STOP=1'], { input: statement })
   else if (process.env.E2E_DATABASE_URL) execFileSync(process.env.E2E_PSQL ?? 'psql', ['-d', process.env.E2E_DATABASE_URL, '-v', 'ON_ERROR_STOP=1'], { input: statement })
   else throw new Error('Cache task tests require an isolated E2E_DB_CONTAINER or E2E_DATABASE_URL')
 }

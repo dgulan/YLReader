@@ -36,16 +36,24 @@ func newProgramCache(maxEntries int, maxBytes int64) *programCache {
 // get 返回缓存命中的程序；未命中则编译并插入，随后按上限淘汰最久未使用项。
 func (c *programCache) get(key string, compile func() (*goja.Program, error)) (*goja.Program, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if e, ok := c.m[key]; ok {
 		c.ll.MoveToFront(e)
-		return e.Value.(*programEntry).program, nil
+		program := e.Value.(*programEntry).program
+		c.mu.Unlock()
+		return program, nil
 	}
+	c.mu.Unlock()
 
 	program, err := compile()
 	if err != nil {
 		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.m[key]; ok {
+		c.ll.MoveToFront(e)
+		return e.Value.(*programEntry).program, nil
 	}
 
 	size := int64(len(key))

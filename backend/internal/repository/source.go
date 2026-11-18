@@ -47,6 +47,9 @@ func scanSource(row pgx.Row) (*BookSource, error) {
 // {"__enc":"v1:<kid>:<b64>"}；未配置或为空则原样（defaultJSON 兜底 '{}'）。
 // 注意：不修改 s.Header —— API 响应必须回明文，客户端永远不该看到信封。
 func sealSourceHeaderValue(s *BookSource) (json.RawMessage, error) {
+	if !sourceHeaderObject(defaultJSON(s.Header)) {
+		return nil, fmt.Errorf("%w: header must be a JSON object", ErrInvalidArgument)
+	}
 	ring := crypto.DefaultKeyring()
 	if ring == nil || len(s.Header) == 0 {
 		return defaultJSON(s.Header), nil
@@ -63,6 +66,11 @@ func sealSourceHeaderValue(s *BookSource) (json.RawMessage, error) {
 		return nil, err
 	}
 	return json.RawMessage(wrapped), nil
+}
+
+func sourceHeaderObject(raw []byte) bool {
+	var fields map[string]json.RawMessage
+	return json.Unmarshal(raw, &fields) == nil && fields != nil
 }
 
 // openSourceHeader 把信封还原为明文；未加密的历史行原样返回（迁移前兼容），

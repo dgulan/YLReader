@@ -1,0 +1,4 @@
+/* Native modal behavior stays in the browser; contain scroll on both surfaces. */
+.reader dialog:modal { overscroll-behavior: contain; }
+.reader dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
+.reader dialog { max-height: calc(100dvh - 32px); overflow: auto; }

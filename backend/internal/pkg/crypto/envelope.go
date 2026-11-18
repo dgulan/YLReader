@@ -109,6 +109,15 @@ func LoadKeyringFromEnv() (*Keyring, error) {
 // CurrentKID 返回新写入使用的 kid。
 func (k *Keyring) CurrentKID() string { return k.current }
 
+// HasKID reports coverage without exposing key bytes or changing the keyring.
+func (k *Keyring) HasKID(kid string) bool {
+	if k == nil {
+		return false
+	}
+	_, ok := k.keys[kid]
+	return ok
+}
+
 // Seal 加密明文并返回信封字符串。
 func (k *Keyring) Seal(plain []byte, aad string) (string, error) {
 	gcm, err := k.aead(k.current)

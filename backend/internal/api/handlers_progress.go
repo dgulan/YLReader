@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,7 +27,7 @@ func (s *Server) GetProgress(w http.ResponseWriter, r *http.Request, bookId Book
 func (s *Server) UpdateProgress(w http.ResponseWriter, r *http.Request, bookId BookId, params UpdateProgressParams) {
 	uid := userIDFrom(r.Context())
 	var req ProgressUpdate
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSON(w, r, &req, "chapter_index"); err != nil || req.ChapterIndex < 0 || req.ChapterIndex > math.MaxInt32 || (req.CharOffset != nil && (*req.CharOffset < 0 || *req.CharOffset > math.MaxInt32)) || (req.ChapterRatio != nil && (*req.ChapterRatio < 0 || *req.ChapterRatio > 1)) {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
@@ -80,10 +81,21 @@ func (s *Server) UpdateProgress(w http.ResponseWriter, r *http.Request, bookId B
 	writeJSON(w, http.StatusOK, toAPIProgress(updated))
 }
 
-// parseIfMatch 解析 `If-Match: "3"`（允许裸数字）。
+// parseIfMatch follows the frozen quoted positive decimal version syntax.
 func parseIfMatch(raw string) (int64, error) {
-	raw = strings.Trim(strings.TrimSpace(raw), `"`)
-	return strconv.ParseInt(raw, 10, 64)
+	if len(raw) < 3 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return 0, repository.ErrInvalidArgument
+	}
+	for _, c := range raw[1 : len(raw)-1] {
+		if c < '0' || c > '9' {
+			return 0, repository.ErrInvalidArgument
+		}
+	}
+	value, err := strconv.ParseInt(raw[1:len(raw)-1], 10, 64)
+	if err != nil || value < 1 {
+		return 0, repository.ErrInvalidArgument
+	}
+	return value, nil
 }
 
 func intOrZero(v *int) int {

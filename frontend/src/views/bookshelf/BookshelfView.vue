@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import 'element-plus/dist/index.css'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElButton, ElInput, ElAlert, ElEmpty, ElPagination, ElTabs, ElTabPane, ElSkeleton } from 'element-plus'
 import { api } from '@/api/reader'
@@ -7,7 +8,22 @@ import { errorText, type Model } from '@/api/client'
 const router = useRouter(), books = ref<Model<'BookPage'>>(), search = ref<Model<'SearchResponse'>>()
 const page = ref(1), query = ref(''), keyword = ref(''), tab = ref('shelf'), busy = ref(false), searching = ref(false), importing = ref(false), adding = ref(''), error = ref(''), notice = ref('')
 let loadSerial = 0
-async function load() { const serial = ++loadSerial; busy.value = true; error.value = ''; try { const result = await api.books(page.value, query.value); if (serial === loadSerial) books.value = result } catch (e) { if (serial === loadSerial) error.value = errorText(e) } finally { if (serial === loadSerial) busy.value = false } }
+let loadController: AbortController | undefined
+let disposed = false, pageHidden = false
+function cancelLoad() { ++loadSerial; loadController?.abort(); loadController = undefined; busy.value = false; window.removeEventListener('beforeunload', cancelLoad) }
+async function load() {
+  if (disposed || pageHidden) return
+  cancelLoad()
+  const serial = ++loadSerial, controller = new AbortController()
+  loadController = controller; busy.value = true; error.value = ''
+  // Only pending GETs need this early teardown hook; never prompt or block leaving.
+  window.addEventListener('beforeunload', cancelLoad)
+  try { const result = await api.books(page.value, query.value, controller.signal); if (serial === loadSerial && !controller.signal.aborted) books.value = result }
+  catch (e) { if (serial === loadSerial && !controller.signal.aborted) error.value = errorText(e) }
+  finally { if (serial === loadSerial) { busy.value = false; loadController = undefined; window.removeEventListener('beforeunload', cancelLoad) } }
+}
+function hidePage() { pageHidden = true; cancelLoad() }
+function showPage(event: PageTransitionEvent) { pageHidden = false; if (event.persisted) void load() }
 async function importLocal(event: Event) {
   const input = event.target as HTMLInputElement, file = input.files?.[0]; input.value = ''; if (!file) return
   if (file.size > 100 * 1024 * 1024) { error.value = '文件不能超过 100 MiB'; return }
@@ -17,7 +33,8 @@ async function importLocal(event: Event) {
 async function findBooks() { if (!keyword.value.trim()) return; searching.value = true; error.value = ''; search.value = undefined; try { search.value = await api.search(keyword.value.trim()) } catch (e) { error.value = errorText(e) } finally { searching.value = false } }
 async function add(book: Model<'SearchBook'>) { adding.value = book.book_url; error.value = ''; try { const added = await api.addBook(book); notice.value = `《${added.name}》已加入书架`; await load() } catch (e) { error.value = errorText(e) } finally { adding.value = '' } }
 function read(book: Model<'Book'>) { void router.push(`/reader/${book.id}`) }
-onMounted(load)
+onMounted(() => { window.addEventListener('pagehide', hidePage); window.addEventListener('pageshow', showPage); void load() })
+onBeforeUnmount(() => { disposed = true; cancelLoad(); window.removeEventListener('pagehide', hidePage); window.removeEventListener('pageshow', showPage) })
 </script>
 <template>
   <main class="library page-width"><div class="page-heading"><div><span class="eyebrow">每一页，都值得停留</span><h1>我的书房<span class="heading-dot">.</span></h1><p class="muted">把想读的故事放在这里，随时继续。</p></div><label class="file-button" :class="{ disabled: importing }">{{ importing ? '正在导入…' : '＋ 导入本地书' }}<input aria-label="导入本地书" type="file" accept=".txt,.epub" :disabled="importing" @change="importLocal"></label></div>

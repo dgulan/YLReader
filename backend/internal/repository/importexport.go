@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"net/netip"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"yreader/backend/internal/engine/fetcher"
 )
 
 // ImportExportRepository 负责 Legado 3.0 书源的导入与导出。
@@ -105,18 +110,40 @@ func parseSource(raw json.RawMessage, userID uuid.UUID) (*BookSource, error) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, fmt.Errorf("invalid JSON object: %w", err)
 	}
-	url := rawString(obj["bookSourceUrl"])
-	if url == nil || *url == "" {
+	sourceURL := rawString(obj["bookSourceUrl"])
+	if sourceURL == nil || *sourceURL == "" {
 		return nil, fmt.Errorf("%w: missing bookSourceUrl", ErrInvalidArgument)
 	}
 	// 存储契约（schema ck_book_sources_url_scheme）要求 http(s) URL；
 	// 非 URL 的 Legado 自定义 bookSourceUrl 直接判为单条非法。
-	if !strings.HasPrefix(*url, "http://") && !strings.HasPrefix(*url, "https://") {
-		return nil, fmt.Errorf("%w: bookSourceUrl %q is not http(s)", ErrInvalidArgument, *url)
+	if !strings.HasPrefix(*sourceURL, "http://") && !strings.HasPrefix(*sourceURL, "https://") {
+		return nil, fmt.Errorf("%w: bookSourceUrl %q is not http(s)", ErrInvalidArgument, *sourceURL)
+	}
+	// Legacy identifiers can contain spaces; keep them, but preflight parseable
+	// HTTP URLs without DNS or weakening the runtime fetcher's checks.
+	u, parseErr := url.Parse(*sourceURL)
+	if parseErr != nil && !strings.ContainsAny(*sourceURL, " \t\r\n") {
+		return nil, ErrInvalidArgument
+	}
+	if parseErr == nil && u.Host != "" {
+		if u.User != nil {
+			return nil, ErrInvalidArgument
+		}
+		if port := u.Port(); port != "" {
+			n, e := strconv.Atoi(port)
+			if e != nil || n < 1 || n > 65535 {
+				return nil, ErrInvalidArgument
+			}
+		} else if strings.HasSuffix(u.Host, ":") {
+			return nil, ErrInvalidArgument
+		}
+		if ip, e := netip.ParseAddr(u.Hostname()); e == nil && fetcher.IsBlockedIP(ip) {
+			return nil, fetcher.ErrSSRFBlocked
+		}
 	}
 	name := rawString(obj["bookSourceName"])
 	if name == nil || *name == "" {
-		name = url
+		name = sourceURL
 	}
 
 	// 存储契约收敛：真实 Legado 样本存在超出 schema CHECK 的值
@@ -133,7 +160,7 @@ func parseSource(raw json.RawMessage, userID uuid.UUID) (*BookSource, error) {
 
 	return &BookSource{
 		UserID:          userID,
-		BookSourceURL:   *url,
+		BookSourceURL:   *sourceURL,
 		BookSourceName:  *name,
 		BookSourceGroup: stringOr(obj["bookSourceGroup"], "默认"),
 		BookSourceType:  bsType,
@@ -300,21 +327,24 @@ func rawInt32(raw json.RawMessage, def int32) int32 {
 		return n
 	}
 	var f float64
-	if json.Unmarshal(raw, &f) == nil {
+	if json.Unmarshal(raw, &f) == nil && !math.IsNaN(f) && !math.IsInf(f, 0) && f >= math.MinInt32 && f <= math.MaxInt32 {
 		return int32(f)
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil && s != "" {
-		var parsed int32
-		if _, err := fmt.Sscanf(s, "%d", &parsed); err == nil {
-			return parsed
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(s), 10, 32); err == nil {
+			return int32(parsed)
 		}
 	}
 	return def
 }
 
 func rawInt16(raw json.RawMessage, def int16) int16 {
-	return int16(rawInt32(raw, int32(def)))
+	n := rawInt32(raw, int32(def))
+	if n < math.MinInt16 || n > math.MaxInt16 {
+		return def
+	}
+	return int16(n)
 }
 
 // extractHeader 把 Legado 的 header（通常是「字符串里套 JSON」）解析为对象；
@@ -326,12 +356,12 @@ func extractHeader(obj map[string]json.RawMessage) json.RawMessage {
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		if json.Valid([]byte(s)) {
+		if sourceHeaderObject([]byte(s)) {
 			return json.RawMessage(s)
 		}
 		return json.RawMessage(`{}`)
 	}
-	if json.Valid(raw) {
+	if sourceHeaderObject(raw) {
 		return raw
 	}
 	return json.RawMessage(`{}`)

@@ -80,6 +80,12 @@ func (s *OverrideService) Set(ctx context.Context, userID, bookID uuid.UUID, cha
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := repository.NewChapterRepository().LockTOCSource(ctx, tx, userID, src.ID, src.Version); err != nil {
+		return nil, nil, err
+	}
+	if err := s.books.Lock(ctx, tx, userID, bookID); err != nil {
+		return nil, nil, err
+	}
 	ov := &repository.ChapterSourceOverride{
 		UserID:       userID,
 		BookID:       bookID,

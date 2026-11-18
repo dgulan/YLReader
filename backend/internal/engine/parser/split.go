@@ -130,14 +130,15 @@ func splitBy(rule, op string, startIdx int) []string {
 // @js:... 直到下一个 @js: 或末尾）的 mode 为 ModeJS，其余为 ModeDefault
 // （后续由 detectMode 再识别具体模式）。
 func splitSourceRule(rule string) []sourceRule {
+	lower := asciiLower(rule)
 	var out []sourceRule
 	i, n := 0, len(rule)
 	for i < n {
 		jsIdx, jsKind := -1, 0 // 0=<js>...</js>，1=@js:...
-		if idx := strings.Index(rule[i:], "<js>"); idx >= 0 {
+		if idx := strings.Index(lower[i:], "<js>"); idx >= 0 {
 			jsIdx = i + idx
 		}
-		if idx := strings.Index(rule[i:], "@js:"); idx >= 0 {
+		if idx := strings.Index(lower[i:], "@js:"); idx >= 0 {
 			if jsIdx < 0 || i+idx < jsIdx {
 				jsIdx = i + idx
 				jsKind = 1
@@ -154,7 +155,7 @@ func splitSourceRule(rule string) []sourceRule {
 		}
 		if jsKind == 0 {
 			// <js>...</js>
-			end := strings.Index(rule[jsIdx+4:], "</js>")
+			end := strings.Index(lower[jsIdx+4:], "</js>")
 			if end < 0 {
 				out = append(out, sourceRule{raw: trimSpace(rule[jsIdx+4:]), mode: ModeJS})
 				break
@@ -164,7 +165,7 @@ func splitSourceRule(rule string) []sourceRule {
 			i = end + len("</js>")
 		} else {
 			// @js:... 直到下一个 @js: 或末尾
-			next := strings.Index(rule[jsIdx+4:], "@js:")
+			next := strings.Index(lower[jsIdx+4:], "@js:")
 			if next < 0 {
 				out = append(out, sourceRule{raw: trimSpace(rule[jsIdx+4:]), mode: ModeJS})
 				break
@@ -174,6 +175,16 @@ func splitSourceRule(rule string) []sourceRule {
 		}
 	}
 	return out
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 func trimSpace(s string) string {

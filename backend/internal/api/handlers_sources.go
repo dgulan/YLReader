@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -118,7 +120,7 @@ func (s *Server) GetSource(w http.ResponseWriter, r *http.Request, sourceId Sour
 func (s *Server) UpdateSource(w http.ResponseWriter, r *http.Request, sourceId SourceId) {
 	uid := userIDFrom(r.Context())
 	var req SourceUpdate
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSON(w, r, &req, "version"); err != nil || req.Version < 1 {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
@@ -164,7 +166,12 @@ func (s *Server) ImportSources(w http.ResponseWriter, r *http.Request, _ ImportS
 	// 导入体允许大 JSON：单独放宽到 32 MiB。
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
 	var req ImportRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(r.Body, &req); err != nil {
+		var limit *http.MaxBytesError
+		if errors.As(err, &limit) {
+			writeErrorCode(w, r, http.StatusRequestEntityTooLarge, "payload_too_large")
+			return
+		}
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
@@ -225,9 +232,12 @@ func (s *Server) ExportSources(w http.ResponseWriter, r *http.Request, params Ex
 	} else if raw := r.URL.Query().Get("ids"); raw != "" {
 		// 兜底：部分客户端不按 style=form,explode=false 序列化。
 		for _, part := range strings.Split(raw, ",") {
-			if id, err := uuid.Parse(strings.TrimSpace(part)); err == nil {
-				ids = append(ids, id)
+			id, err := uuid.Parse(strings.TrimSpace(part))
+			if err != nil {
+				writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+				return
 			}
+			ids = append(ids, id)
 		}
 	}
 	out, err := s.Sources.Export(r.Context(), uid, ids)
@@ -245,11 +255,19 @@ func (s *Server) ExportSources(w http.ResponseWriter, r *http.Request, params Ex
 func validateSourceURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.User != nil || u.Hostname() == "" {
 		return fmt.Errorf("%w: invalid book_source_url", repository.ErrInvalidArgument)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("%w: book_source_url must be http(s)", repository.ErrInvalidArgument)
+	}
+	if port := u.Port(); port != "" {
+		n, e := strconv.Atoi(port)
+		if e != nil || n < 1 || n > 65535 {
+			return repository.ErrInvalidArgument
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return repository.ErrInvalidArgument
 	}
 	// 入参层仅对 IP 字面量做 SSRF 预检；域名留给 fetcher.DialContext 抓取期兜底。
 	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && fetcher.IsBlockedIP(ip) {

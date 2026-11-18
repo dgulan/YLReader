@@ -25,9 +25,9 @@
 
 | 文件 | SHA-256 |
 |---|---|
-| docs/architecture.md | b58c64696ef5310863244b64fd0c6a62b876d7098b1f07c1b2451853ccccaaa9 |
+| docs/architecture.md | 037448ac1c9b82e7cf333e942783d725b2b38f63ca116ba91f5b583c9adf52a8 |
 | docs/schema.sql | fa26a8e596a4f2c89bd2ef9713ff1028aeb42925377c25ae26f957a165ba07b0 |
-| docs/openapi.yaml | 98d9425aa38e5b239b48e19dd81572c469380e96b2b4fd45ed1377982b9caddc |
+| docs/openapi.yaml | a904704a38f3787cc1156965e041e8ea7a11aedf0db46cde2fe75468c720daf8 |
 | docs/research/1432433gg_reader-next.md | f47d1e87516b6980d86ed7a4b84f3db526770f422c4786b7aa1df5a2c65cb678 |
 | docs/research/changshengyu_openreader.md | 909606b90fe636aeac64ac0cd2e745d960915bba534a5bcae0c2e248778bcde8 |
 | docs/research/changshengyu_reader-dev.md | eaf8a857590c548a3a835c45309f5615f0c6d711afc8bb1649ef8caa8256d9fa |
@@ -53,3 +53,19 @@
 ## 项目更名补记（2026-11-13）
 
 按用户指定，将项目展示名、文档和路径改为YLReader（D:\YLReader），远端为https://github.com/dgulan/YLReader。仅展示名称和文档注释变化，更新本记录摘要；API操作、DDL、数据库版本不变。已发布001_baseline.sql字节与校验和保持不可变，其历史产品标签保留；基线对照测试只归一化这一处标签注释。Go模块、IndexedDB、环境变量、数据库/存储标识保留兼容名；Compose显式name: yreader，避免目录改名误建空卷。
+
+## ADR-019 修订 3（2026-11-13）
+
+新增 LocalFS 隔离备份恢复设计 v1，独立冻结记录为 backup-contract-freeze-v1.md。architecture 登记设计修订并更新上表摘要；OpenAPI、schema.sql、研究、数据库版本 1 及已发布迁移字节不变。新增命令仍待业务实现，不是生产恢复、试用数据安全或部署批准。独立协议文件的 6 份摘要及原型证据见新冻结记录。
+
+## 2026-11-14：沙箱执行约束修订（ADR-020）
+
+独立资源契约先于本轮代码编写；architecture §3.3 取消 Runtime 池化并登记最终转换监视、有界准入和 JSON 数据预算，修正单实例内存条目的未实测推断。上表 architecture 摘要同步；OpenAPI 43 操作、SQL DDL、数据库版本、研究摘要及备份独立冻结文件不变。sandboxprobe 是无网络隔离实验入口，不是正式生产 worker 或部署批准。验证见 sandbox-resource-verification-2026-11-14.md。
+
+## 2026-11-14：独立沙箱 worker 内部协议（ADR-021）
+
+sandbox-worker-design 在实现前冻结。新增受限独立 worker、有界 IPC、父进程 HTTP 代理、异常终止/恢复与显式配置，默认不切换模式；readyz 的已有可扩展检查表纳入可选 worker，只修改 OpenAPI 说明，43 操作及结构/错误码不变。上表 architecture 和 openapi 说明摘要同步，研究、DDL、数据库版本和备份冻结文件均不改。不代表部署/发布批准，验证见 sandbox-worker-verification-2026-11-14.md。
+
+## 2026-11-15：补登记阶段2父进程在途预算
+
+对照2026-11-14 22:41源码快照，architecture仅新增§3.3.2父进程在途编码预算行，并将预算饱和加入既有ErrSandboxTimeout映射。默认64MiB、两倍输入成本、250ms准入来自本轮前已完成的阶段2设计/实现；补齐此前遗漏的摘要登记。其余9份主冻结文档及6份备份协议字节不变，公开API/DDL、数据库版本及迁移基线不变。摘要一致性校验不等于提交后的人工冻结评审或发布批准。

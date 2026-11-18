@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/google/uuid"
 )
 
 // installBridge 注册白名单桥接对象（java / source / book）与只读全局，
@@ -20,6 +21,7 @@ import (
 // 白名单之外（file.* / process / exec / require / Packages / 反射）一律不注入。
 func installBridge(rt *goja.Runtime, ec *execCtx) {
 	java := rt.NewObject()
+	java.Set("randomUUID", func() string { return uuid.NewString() })
 	java.Set("ajax", func(call goja.FunctionCall) goja.Value {
 		url := call.Argument(0).String()
 		return ec.doHTTP(rt, http.MethodGet, url, nil)
@@ -184,6 +186,11 @@ func pkcs7Unpad(b []byte) ([]byte, error) {
 	n := int(b[len(b)-1])
 	if n == 0 || n > len(b) || n > aes.BlockSize {
 		return nil, errors.New("bad padding")
+	}
+	for _, value := range b[len(b)-n:] {
+		if int(value) != n {
+			return nil, errors.New("bad padding")
+		}
 	}
 	return b[:len(b)-n], nil
 }

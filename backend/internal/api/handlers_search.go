@@ -42,7 +42,7 @@ func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params Sear
 		resp.Failures = append(resp.Failures, SearchFailure{
 			SourceId: f.SourceID,
 			Code:     code,
-			Message:  messageForCode(code),
+			Message:  sourceFailureMessage(f.Err, code),
 		})
 	}
 

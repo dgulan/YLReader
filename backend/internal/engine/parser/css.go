@@ -63,7 +63,7 @@ func cssSegment(root *goquery.Selection, seg string) []string {
 var (
 	trailingDotIndex     = regexp.MustCompile(`\.(-?\d+)$`)
 	trailingBracketIndex = regexp.MustCompile(`\[(-?\d+)\]$`)
-	exclusionSuffix      = regexp.MustCompile(`!\d+$`)
+	exclusionSuffix      = regexp.MustCompile(`!(-?\d+)$`)
 	starSuffix           = regexp.MustCompile(`\[\*\]`)
 )
 
@@ -75,21 +75,42 @@ func selectElements(root *goquery.Selection, selector string) *goquery.Selection
 		return root
 	}
 	base := selector
-	// Legado 排除语法 `!N`：M1c 仅剥离（不参与筛选），保证列表切分可用。
-	base = exclusionSuffix.ReplaceAllString(strings.TrimSpace(base), "")
+	var excluded *int
+	stripExclusion := func() bool {
+		if m := exclusionSuffix.FindStringSubmatch(base); m != nil {
+			n, err := strconv.Atoi(m[1])
+			if err != nil {
+				return false
+			}
+			excluded = &n
+			base = base[:len(base)-len(m[0])]
+		}
+		return true
+	}
+	// Preserve the existing .M!N form and also accept !N.M / !N[M].
+	if !stripExclusion() {
+		return root.Slice(0, 0)
+	}
 	// `[*]` 在部分书源中表示「全部元素」，等价于无索引。
 	base = starSuffix.ReplaceAllString(base, "")
 	var index *int
 	if m := trailingDotIndex.FindStringSubmatch(base); m != nil {
-		if n, err := strconv.Atoi(m[1]); err == nil {
-			index = &n
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			return root.Slice(0, 0)
 		}
+		index = &n
 		base = base[:len(base)-len(m[0])]
 	} else if m := trailingBracketIndex.FindStringSubmatch(base); m != nil {
-		if n, err := strconv.Atoi(m[1]); err == nil {
-			index = &n
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			return root.Slice(0, 0)
 		}
+		index = &n
 		base = base[:len(base)-len(m[0])]
+	}
+	if excluded == nil && !stripExclusion() {
+		return root.Slice(0, 0)
 	}
 
 	base = strings.TrimSpace(base)
@@ -98,6 +119,13 @@ func selectElements(root *goquery.Selection, selector string) *goquery.Selection
 		sel = root.Children()
 	} else {
 		sel = findBySelector(root, base)
+	}
+	if excluded != nil {
+		n := *excluded
+		if n < 0 {
+			n += len(sel.Nodes)
+		}
+		sel = sel.FilterFunction(func(i int, _ *goquery.Selection) bool { return i != n })
 	}
 	if index == nil {
 		return sel

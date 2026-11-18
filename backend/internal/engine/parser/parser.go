@@ -125,11 +125,11 @@ func (e *Engine) evalList(ctx context.Context, rule, source string, rec *traceRe
 	for i := range rules {
 		sr := &rules[i]
 		for k, v := range sr.put {
-			val, err := e.Eval(ctx, v, source)
+			values, err := e.evalList(ctx, v, source, rec)
 			if err != nil {
 				return nil, err
 			}
-			e.SetVariable(k, val)
+			e.SetVariable(k, html.UnescapeString(strings.Join(values, "\n")))
 		}
 		made, err := e.makeUp(ctx, sr.rule, result)
 		if err != nil {

@@ -3,8 +3,65 @@ import { getSession, setSession, request, ApiError, errorText, type Model } from
 const session = (token = 'old'): Model<'TokensResponse'> => ({ access_token: token, refresh_token: `${token}-refresh`, token_type: 'Bearer', expires_in: 900, user: { id: 'user-a', username: 'reader', role: 'user', token_version: 1, created_at: '2026-11-12T00:00:00Z' } })
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
 beforeEach(() => setSession(null))
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
 describe('authenticated requests', () => {
+	 it.each(['/auth/logout?all=1', '/auth/refresh?retry=0#note', ' /auth/login?mode=test '])('does not refresh or replay an auth pathname with query: %s', async path => {
+	   setSession(session())
+	   const fetcher = vi.fn(async (_url: string) => response({}, 401)); vi.stubGlobal('fetch', fetcher)
+	   await expect(request(path, { method: 'POST' })).rejects.toMatchObject({ status: 401 })
+	   expect(fetcher).toHaveBeenCalledTimes(1)
+	   expect(fetcher.mock.calls[0]?.[0]).toBe(`/api/v1${path.trim()}`)
+	   if (path.trim().startsWith('/auth/login')) expect(getSession()).not.toBeNull()
+	 })
+  it('bounds refresh, ignores a late acknowledgement and never replays its unknown token', async () => {
+    vi.useFakeTimers(); setSession(session())
+    let finish!: (r: Response) => void
+    let refreshes = 0
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/auth/refresh')) { refreshes++; return new Promise<Response>(resolve => { finish = resolve }) }
+      return response({}, 401)
+    }))
+    const pending = request('/books')
+    const failure = expect(pending).rejects.toMatchObject({ code: 'session_refresh_uncertain' })
+    await vi.advanceTimersByTimeAsync(15_001); await failure
+    finish(response(session('late'))); await Promise.resolve(); await Promise.resolve()
+    expect(getSession()?.access_token).toBe('old')
+    await expect(request('/books')).rejects.toMatchObject({ code: 'session_refresh_uncertain' })
+    expect(refreshes).toBe(1)
+    expect(sessionStorage.getItem('yreader-refresh-uncertain-owner')).toBe('user-a')
+    vi.resetModules()
+    const reloaded = await import('./client')
+    await expect(reloaded.request('/books')).rejects.toMatchObject({ code: 'session_refresh_uncertain' })
+    expect(refreshes).toBe(1)
+  })
+  it('refreshes auth/me but never retries logout with a rotated refresh token', async () => {
+    setSession(session()); let refreshes = 0
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/auth/refresh')) { refreshes++; return response(session('new')) }
+      if (url.endsWith('/auth/logout')) return response({}, 401)
+      return new Headers(init?.headers).get('Authorization') === 'Bearer old' ? response({}, 401) : response({ ok: true })
+    }))
+    await expect(request('/auth/me')).resolves.toEqual({ ok: true })
+    await expect(request('/auth/logout', { method: 'POST' })).rejects.toMatchObject({ status: 401 })
+    expect(refreshes).toBe(1)
+  })
+  it('does not refresh or clear a session for a canceled late 401', async () => {
+    setSession(session())
+    const controller = new AbortController()
+    let finish!: (value: Response) => void
+    const fetcher = vi.fn(() => new Promise<Response>(resolve => { finish = resolve }))
+    vi.stubGlobal('fetch', fetcher)
+    const pending = request('/books', { signal: controller.signal })
+    controller.abort(); finish(response({}, 401))
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(getSession()?.access_token).toBe('old')
+  })
+  it('does not start a request whose signal is already canceled', async () => {
+    const controller = new AbortController(), fetcher = vi.fn()
+    controller.abort(); vi.stubGlobal('fetch', fetcher)
+    await expect(request('/books', { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetcher).not.toHaveBeenCalled()
+  })
   it('keeps import timeouts distinct and advises checking the shelf before a manual retry', () => {
     const message = errorText(new ApiError(504, 'import_timeout', null))
     expect(message).toContain('结果尚未确认'); expect(message).toContain('刷新书架')

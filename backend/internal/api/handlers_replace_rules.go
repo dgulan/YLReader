@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -42,6 +43,10 @@ func (s *Server) CreateReplaceRule(w http.ResponseWriter, r *http.Request) {
 		in.IsEnabled = *req.IsEnabled
 	}
 	if req.OrderIndex != nil {
+		if *req.OrderIndex < math.MinInt32 || *req.OrderIndex > math.MaxInt32 {
+			writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+			return
+		}
 		in.OrderIndex = int32(*req.OrderIndex)
 	}
 	if req.Scope != nil {
@@ -80,6 +85,10 @@ func (s *Server) UpdateReplaceRule(w http.ResponseWriter, r *http.Request, ruleI
 		in.IsEnabled = *req.IsEnabled
 	}
 	if req.OrderIndex != nil {
+		if *req.OrderIndex < math.MinInt32 || *req.OrderIndex > math.MaxInt32 {
+			writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+			return
+		}
 		in.OrderIndex = int32(*req.OrderIndex)
 	}
 	if req.Scope != nil {

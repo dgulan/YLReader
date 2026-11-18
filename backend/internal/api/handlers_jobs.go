@@ -16,7 +16,7 @@ import (
 func (s *Server) CacheBook(w http.ResponseWriter, r *http.Request, bookId BookId, params CacheBookParams) {
 	var req CacheBookRequest
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeErrorCode(w, r, http.StatusUnprocessableEntity, "validation_error")
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
 

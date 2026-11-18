@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,7 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/semaphore"
-	"golang.org/x/time/rate"
 
 	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/engine/parser"
@@ -119,15 +119,6 @@ func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword st
 			}
 			defer sem.Release(1)
 
-			limiter := newSourceLimiter(derefString(src.ConcurrentRate))
-			if err := limiter.acquire(ctx); err != nil {
-				mu.Lock()
-				out.Failures = append(out.Failures, SearchFailure{SourceID: src.ID, Err: err})
-				mu.Unlock()
-				return
-			}
-			defer limiter.release()
-
 			start := time.Now()
 			items, err := s.searchOne(ctx, src, keyword, page, pageSize)
 			if err != nil {
@@ -201,13 +192,27 @@ func (s *SearchService) pickSources(ctx context.Context, userID uuid.UUID, sourc
 
 // searchOne 抓取并解析单个书源的搜索结果。
 func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSource, keyword string, page, pageSize int) ([]BookItem, error) {
+	ctx = sourceFetchContext(ctx, src)
 	rules := parseSearchRules(src.Rules)
 	if rules.SearchURL == "" || rules.BookList == "" {
 		return nil, fmt.Errorf("%w: source has no search rule", sandbox.ErrUnsupportedRule)
 	}
 
-	target := expandSearchURL(rules.SearchURL, keyword, page)
-	resp, err := s.ft.Get(ctx, target, nil)
+	request, err := parseSearchRequest(rules.SearchURL, keyword, page)
+	if err != nil {
+		return nil, err
+	}
+	target := resolveURL(src.BookSourceURL, request.url)
+	var resp *fetcher.Response
+	if request.method == http.MethodGet {
+		resp, err = s.ft.Get(ctx, target, request.header)
+	} else if full, ok := s.ft.(interface {
+		Fetch(context.Context, string, string, http.Header, io.Reader) (*fetcher.Response, error)
+	}); ok {
+		resp, err = full.Fetch(ctx, request.method, target, request.header, strings.NewReader(request.body))
+	} else {
+		return nil, requestOptionError()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -318,10 +323,17 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 	for _, node := range nodes {
 		// 每个 item 开始时重置一次变量池：item 内字段共享，跨 item 隔离。
 		engine.ResetVars()
+		name := strings.TrimSpace(evalBookField(ctx, engine, node, rules.Name))
+		author := evalBookField(ctx, engine, node, rules.Author)
+		bookURL := resolveURL(baseURL, evalBookField(ctx, engine, node, rules.BookURL))
+		// 与加书契约一致：错误对象、空字段和非 HTTP(S) 地址不是书籍。
+		if name == "" || validateHTTPURL(bookURL) != nil {
+			continue
+		}
 		items = append(items, BookItem{
-			Name:          evalBookField(ctx, engine, node, rules.Name),
-			Author:        evalBookField(ctx, engine, node, rules.Author),
-			BookURL:       resolveURL(baseURL, evalBookField(ctx, engine, node, rules.BookURL)),
+			Name:          name,
+			Author:        author,
+			BookURL:       bookURL,
 			CoverURL:      resolveURL(baseURL, evalBookField(ctx, engine, node, rules.CoverURL)),
 			Intro:         evalBookField(ctx, engine, node, rules.Intro),
 			Kind:          evalBookField(ctx, engine, node, rules.Kind),
@@ -364,50 +376,8 @@ func resolveURL(base, ref string) string {
 	return baseURL.ResolveReference(parsed).String()
 }
 
-// sourceLimiter 实现源级 concurrent_rate：纯整数→并发信号量；"n/ms"→频率窗口。
-type sourceLimiter struct {
-	sem *semaphore.Weighted
-	lim *rate.Limiter
-}
-
-func newSourceLimiter(spec string) *sourceLimiter {
-	spec = strings.TrimSpace(spec)
-	if spec == "" {
-		return &sourceLimiter{}
-	}
-	if strings.Contains(spec, "/") {
-		parts := strings.SplitN(spec, "/", 2)
-		n, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
-		ms, err2 := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		if err1 == nil && err2 == nil && n > 0 && ms > 0 {
-			return &sourceLimiter{lim: rate.NewLimiter(rate.Every(time.Duration(ms)*time.Millisecond/time.Duration(n)), n)}
-		}
-		return &sourceLimiter{}
-	}
-	n, err := strconv.Atoi(spec)
-	if err == nil && n > 0 {
-		return &sourceLimiter{sem: semaphore.NewWeighted(int64(n))}
-	}
-	return &sourceLimiter{}
-}
-
-func (l *sourceLimiter) acquire(ctx context.Context) error {
-	if l == nil {
-		return nil
-	}
-	if l.sem != nil {
-		return l.sem.Acquire(ctx, 1)
-	}
-	if l.lim != nil {
-		return l.lim.Wait(ctx)
-	}
-	return nil
-}
-
-func (l *sourceLimiter) release() {
-	if l != nil && l.sem != nil {
-		l.sem.Release(1)
-	}
+func sourceFetchContext(ctx context.Context, src *repository.BookSource) context.Context {
+	return fetcher.WithSource(ctx, src.ID.String(), derefString(src.ConcurrentRate))
 }
 
 func rawText(obj map[string]json.RawMessage, key string) string {

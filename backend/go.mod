@@ -3,6 +3,7 @@ module yreader/backend
 go 1.26.11
 
 require (
+	filippo.io/age v1.3.2
 	github.com/PuerkitoBio/goquery v1.9.2
 	github.com/antchfx/htmlquery v1.3.2
 	github.com/dop251/goja v0.0.0-20241024094426-79f3a7efcdbd
@@ -20,6 +21,8 @@ require (
 	golang.org/x/text v0.44.0
 	golang.org/x/time v0.5.0
 )
+
+require filippo.io/hpke v0.4.0 // indirect
 
 require (
 	github.com/andybalholm/cascadia v1.3.2 // indirect
@@ -41,6 +44,6 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/sys v0.50.0
 	google.golang.org/protobuf v1.34.2 // indirect
 )

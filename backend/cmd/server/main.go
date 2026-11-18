@@ -41,6 +41,14 @@ func run() error {
 		log.Error("invalid import timeout", "error", err)
 		return err
 	}
+	secret := os.Getenv("JWT_SECRET")
+	if err := validateJWTSecret(secret, os.Getenv("ENVIRONMENT")); err != nil {
+		log.Error("invalid JWT_SECRET", "error", err)
+		return err
+	}
+	if secret == "" {
+		log.Warn("JWT_SECRET not set; using insecure development fallback")
+	}
 
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
@@ -65,15 +73,6 @@ func run() error {
 	if err != nil {
 		log.Error("database schema is not ready; migration required", "error", err)
 		return err
-	}
-
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		if os.Getenv("ENVIRONMENT") == "production" {
-			log.Error("JWT_SECRET is required in production")
-			os.Exit(1)
-		}
-		log.Warn("JWT_SECRET not set; using insecure development fallback")
 	}
 
 	// v1.4（ADR-010）：书源 header 信封加密。配置了密钥就必须可解（否则 fail-fast），
@@ -109,9 +108,6 @@ func run() error {
 		log.Warn("SEED_USERNAME/SEED_PASSWORD not set; no seed user will be created")
 	}
 
-	ft := fetcher.New(fetcher.Config{})
-	sb := sandbox.New(sandbox.Config{}, sandboxFetcher{ft: ft})
-
 	// 缓存与就绪探针共享一个 Redis 客户端，避免双配置探测错位。
 	var contentCache cache.Cache
 	redisCache, err := cache.ConfiguredRedis(os.Getenv("REDIS_URL"), os.Getenv("REDIS_ADDR"), time.Second)
@@ -126,6 +122,33 @@ func run() error {
 	} else {
 		log.Warn("Redis not configured; content cache falls back to in-memory and readiness omits Redis")
 		contentCache = cache.NewMemory()
+	}
+	var admission fetcher.AdmissionStore = fetcher.NewMemoryAdmission()
+	if redisCache != nil {
+		admission = redisCache
+	}
+	ft := fetcher.New(fetcher.Config{DomainLimiter: fetcher.NewDomainLimiter(admission)})
+	sb := sandbox.New(sandbox.Config{}, sandboxFetcher{ft: ft})
+	var sandboxPing func(context.Context) error
+	if sockets := strings.TrimSpace(os.Getenv("YREADER_SANDBOX_SOCKETS")); sockets != "" {
+		paths := strings.Split(sockets, ",")
+		for i := range paths {
+			paths[i] = strings.TrimSpace(paths[i])
+		}
+		sb, err = sandbox.NewRemote(sandbox.Config{}, sandboxFetcher{ft: ft}, paths)
+		if err != nil {
+			log.Error("isolated sandbox configuration unavailable")
+			return err
+		}
+		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+		err = sb.Probe(probeCtx)
+		probeCancel()
+		if err != nil {
+			log.Error("isolated sandbox workers unavailable")
+			return err
+		}
+		sandboxPing = sb.Probe
+		log.Info("isolated sandbox workers enabled", "workers", len(paths))
 	}
 
 	// 本地书库文件存储：STORAGE_DIR 必填（Docker 里挂卷），否则本地书正文无处落盘。
@@ -176,6 +199,7 @@ func run() error {
 		Storage:       storageProvider,
 		DBPing:        func(c context.Context) error { return pool.Ping(c) },
 		RedisPing:     redisPing,
+		SandboxPing:   sandboxPing,
 		SchemaPing:    func(c context.Context) error { return repository.CheckSchema(c, pool) },
 		Log:           log,
 	})

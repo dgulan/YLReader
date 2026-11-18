@@ -101,7 +101,7 @@ func (s *Server) GetBook(w http.ResponseWriter, r *http.Request, bookId BookId) 
 func (s *Server) UpdateBook(w http.ResponseWriter, r *http.Request, bookId BookId) {
 	uid := userIDFrom(r.Context())
 	var req BookUpdate
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSON(w, r, &req, "version"); err != nil {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}

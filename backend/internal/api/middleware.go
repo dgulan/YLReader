@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"github.com/go-chi/chi/v5"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -40,7 +41,17 @@ const (
 	ctxRequestID ctxKey = iota
 	ctxUserID
 	ctxTokenVersion
+	ctxAuditUser
 )
+
+type auditUser struct{ id uuid.UUID }
+
+func logRoute(r *http.Request) string {
+	if route := chi.RouteContext(r.Context()); route != nil && route.RoutePattern() != "" {
+		return route.RoutePattern()
+	}
+	return "unmatched"
+}
 
 // requestIDFrom 从 context 取请求 ID（不存在返回空串）。
 func requestIDFrom(ctx context.Context) string {
@@ -76,7 +87,7 @@ func Recover(log *slog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if rec := recover(); rec != nil {
-					log.Error("panic recovered", "panic", rec, "path", r.URL.Path)
+					log.Error("panic recovered", "path", logRoute(r))
 					writeErrorCode(w, r, http.StatusInternalServerError, "internal_error")
 				}
 			}()
@@ -108,6 +119,8 @@ func Logging(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			user := &auditUser{}
+			r = r.WithContext(context.WithValue(r.Context(), ctxAuditUser, user))
 			sw := &statusWriter{ResponseWriter: w}
 			next.ServeHTTP(sw, r)
 			status := sw.status
@@ -116,7 +129,8 @@ func Logging(log *slog.Logger) func(http.Handler) http.Handler {
 			}
 			log.Info("http request",
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", logRoute(r),
+				"user_id", user.id.String(),
 				"status", status,
 				"duration_ms", time.Since(start).Milliseconds(),
 				"request_id", requestIDFrom(r.Context()),

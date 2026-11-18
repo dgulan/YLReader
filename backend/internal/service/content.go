@@ -50,6 +50,7 @@ type ChapterContentView struct {
 
 // cachedPayload 是写入 Redis 的正文缓存结构。
 type cachedPayload struct {
+	TargetURL             string      `json:"target_url"`
 	RulesFingerprint      string      `json:"rules_fingerprint"`
 	Content               string      `json:"content"`
 	WordCount             int         `json:"word_count"`
@@ -143,7 +144,7 @@ func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chap
 		return nil, err
 	}
 	fingerprint := contentRulesFingerprint(src.Rules, userRules)
-	if payload, ok := s.loadCache(ctx, key, targetSourceID); ok && payload.RulesFingerprint == fingerprint {
+	if payload, ok := s.loadCache(ctx, key, targetSourceID); ok && payload.RulesFingerprint == fingerprint && payload.TargetURL == targetURL {
 		return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, payload.Content, payload.WordCount,
 			payload.AppliedReplaceRuleIDs, payload.TraceID, isOverridden, true)
 	}
@@ -154,6 +155,7 @@ func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chap
 	}
 	wordCount := utf8.RuneCountInString(content)
 	s.storeCache(ctx, key, cachedPayload{
+		TargetURL:        targetURL,
 		RulesFingerprint: fingerprint,
 		Content:          content, WordCount: wordCount, AppliedReplaceRuleIDs: appliedIDs,
 		SourceID: targetSourceID, TraceID: traceID,
@@ -177,7 +179,7 @@ func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookI
 		return err
 	}
 	fingerprint := contentRulesFingerprint(src.Rules, userRules)
-	if payload, ok := s.loadCache(ctx, key, src.ID); ok && payload.RulesFingerprint == fingerprint {
+	if payload, ok := s.loadCache(ctx, key, src.ID); ok && payload.RulesFingerprint == fingerprint && payload.TargetURL == ch.URL {
 		return nil
 	}
 	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, ch.URL, userRules)
@@ -185,6 +187,7 @@ func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookI
 		return err
 	}
 	s.storeCache(ctx, key, cachedPayload{
+		TargetURL:             ch.URL,
 		RulesFingerprint:      fingerprint,
 		Content:               content,
 		WordCount:             utf8.RuneCountInString(content),
@@ -305,6 +308,7 @@ func (s *ContentService) storeCache(ctx context.Context, key string, p cachedPay
 
 // fetchAndClean 完成抓取、多页拼接、书源正则与用户替换规则净化、段落标准化。
 func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, src *repository.BookSource, startURL string, userRules []*repository.ReplaceRule) (string, string, []uuid.UUID, error) {
+	ctx = sourceFetchContext(ctx, src)
 	rules := parseContentRules(src.Rules)
 	traceID := "tr_" + uuid.NewString()
 
@@ -341,38 +345,32 @@ func (s *ContentService) fetchContent(ctx context.Context, rules contentRules, s
 
 	for pages := 0; pageURL != "" && pages < maxContentPages; pages++ {
 		if visited[pageURL] {
-			break
+			return "", fmt.Errorf("%w: content pagination cycle", sandbox.ErrRuleExecution)
 		}
 		visited[pageURL] = true
 
 		resp, err := s.ft.Get(ctx, pageURL, nil)
 		if err != nil {
-			if pages == 0 {
-				return "", err
-			}
-			break
+			return "", err
 		}
 		if resp.StatusCode >= 400 {
 			upstreamErr := fmt.Errorf("%w: upstream status %d", fetcher.ErrUpstreamError, resp.StatusCode)
-			if pages == 0 {
-				return "", upstreamErr
-			}
-			break
+			return "", upstreamErr
 		}
 		body := string(resp.Body)
 		node, err := parser.NewHTMLDocumentNode(body)
 		if err != nil {
-			if pages == 0 {
-				return "", fmt.Errorf("%w: parse content page: %v", sandbox.ErrRuleExecution, err)
-			}
-			break
+			return "", fmt.Errorf("%w: parse content page: %v", sandbox.ErrRuleExecution, err)
 		}
 		text, err := engine.EvalField(ctx, node, rules.Content)
 		if err != nil {
-			if pages == 0 {
-				return "", err
-			}
-			break
+			return "", err
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if pages > 0 && strings.TrimSpace(text) == "" {
+			return "", fmt.Errorf("%w: empty continuation page", sandbox.ErrRuleExecution)
 		}
 		if strings.TrimSpace(text) != "" {
 			parts = append(parts, text)
@@ -386,11 +384,14 @@ func (s *ContentService) fetchContent(ctx context.Context, rules contentRules, s
 		}
 		next, err := engine.EvalNextURL(ctx, rules.NextContentURL, body)
 		if err != nil {
-			break
+			return "", err
 		}
 		next = strings.TrimSpace(resolveURL(base, next))
-		if next == "" || next == pageURL || visited[next] {
+		if next == "" {
 			break
+		}
+		if next == pageURL || visited[next] || pages+1 == maxContentPages {
+			return "", fmt.Errorf("%w: incomplete content pagination", sandbox.ErrRuleExecution)
 		}
 		pageURL = next
 	}
@@ -409,9 +410,10 @@ func (s *ContentService) applyUserRules(ctx context.Context, userID uuid.UUID, c
 
 func contentRulesFingerprint(source json.RawMessage, rules []*repository.ReplaceRule) string {
 	encoded, _ := json.Marshal(struct {
-		Source json.RawMessage
-		Rules  []*repository.ReplaceRule
-	}{source, rules})
+		Pagination string
+		Source     json.RawMessage
+		Rules      []*repository.ReplaceRule
+	}{"complete-pages-v1", source, rules})
 	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
@@ -488,7 +490,7 @@ func parseContentRules(raw json.RawMessage) contentRules {
 		}
 	}
 	if out.Content == "" {
-		out.Content = rawText(obj, "ruleContent")
+		out.Content = firstNonEmpty(rawText(obj, "ruleContent"), nestedText(obj, "ruleContent", "content"))
 	}
 	if out.NextContentURL == "" {
 		out.NextContentURL = firstNonEmpty(rawText(obj, "ruleContentNextContentUrl"), nestedText(obj, "ruleContent", "nextContentUrl"))

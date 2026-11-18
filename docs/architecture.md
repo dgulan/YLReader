@@ -161,116 +161,37 @@ type RuleStep struct {
 
 **MUST**：单条规则的求值必须携带 `StepTrace`（模式、输入摘要、是否命中、耗时、错误码），供调试台与 §8 观测使用；摘要不得包含正文全文（只保留前 256 字节 + sha256 前 8 位）。
 
-### 3.3 JS 沙箱（goja）：双层超时、Sentinel、池化
+### 3.3 JS 沙箱（goja）：执行隔离与资源约束
 
-#### 3.3.1 时间与资源边界
+2026-11-14 设计修订（ADR-020）：本节以 [sandbox-resource-design-2026-11-14.md](sandbox-resource-design-2026-11-14.md) 为执行契约，替代原 Runtime 池化方案。每次求值新建独立 Runtime，避免全局变量、词法声明、原型与桥接修改跨调用残留；只有不可变 Program 可缓存共享。
 
-| 边界 | 值 | 强制方式 |
-|---|---|---|
-| 单次书源操作总墙钟 | **10s** | handler 入口 `context.WithTimeout(r.Context(), 10*time.Second)`，贯穿 HTTP 抓取、解析、JS、DB 写入前 |
-| 单次 JS 执行 | **3s** | `sandboxCtx, cancel := context.WithTimeout(reqCtx, 3*time.Second)` |
-| 单次 JS 输出 | **1 MB = 1,048,576 字节**（UTF-8） | 序列化后 `len(out) > 1<<20` → `ErrSandboxOutputLimit` |
-| JS 栈深 | 1024（goja 默认上限内） | `vm.SetMaxCallStackSize(1024)`，越界视为 `ErrRuleExecution` |
-| 单次 HTTP 响应体 | 16 MiB | fetcher 限读 |
-| 重定向 | ≤ 5 跳 | §3.5.4 |
+#### 3.3.1 超时与准入
 
-**关键约束**：`vm.Interrupt()` 只能中断**字节码循环**，无法打断正在阻塞的 Go 原生桥接函数。因此双保险是强制的：
+默认每个共享 Sandbox 最多 4 个并发执行，排队最多 250ms，外层 context 和默认 3 秒脚本预算共同约束。编译、运行、result 兜底 getter、字符串转换与结构化导出属于同一次准入；JS 执行与转换均受同一个 Interrupt 监视周期保护。监视 goroutine 完全退出、原生调用实际结束后才释放名额，不将遗留工作伪装成已取消。
 
-```go
-func (s *Sandbox) Run(reqCtx context.Context, prog *goja.Program, b Bindings) (result any, err error) {
-    ctx, cancel := context.WithTimeout(reqCtx, 3*time.Second)
-    defer cancel()
+goja.Compile 与原生 Go/内建函数不是可硬中断的 JS 指令；编译同步且长度受限，取消在返回后检查，不启动遗留编译 goroutine。HTTP 桥接继续透传原始调用 context 和可信书源身份，由父服务的 Fetcher 执行 SSRF、域名与源组合准入。
 
-    vm := s.pool.Get().(*goja.Runtime)
-    discard := false
-    defer func() {
-        if r := recover(); r != nil {
-            discard = true
-            err = fmt.Errorf("%w: %v", ErrSandboxPanic, r)
-            return
-        }
-        if discard {
-            s.pool.Discard(vm) // 超时/panic/输出超限：状态不可信，不归还
-        } else {
-            s.reset(vm) // 清理注入的全局键与变量
-            s.pool.Put(vm)
-        }
-    }()
+#### 3.3.2 数据预算与错误分类
 
-    installBridge(vm, ctx, b) // 每个桥接函数都持有 ctx
-
-    done := make(chan struct{})
-    go func() {
-        select {
-        case <-ctx.Done():
-            vm.Interrupt(ErrSandboxTimeout) // 只中断字节码循环
-        case <-done:
-        }
-    }()
-    defer close(done)
-
-    v, runErr := vm.RunProgram(prog)
-    if runErr != nil {
-        if errors.Is(runErr, ErrSandboxTimeout) || ctx.Err() != nil {
-            discard = true
-            return nil, ErrSandboxTimeout
-        }
-        return nil, fmt.Errorf("%w: %v", ErrRuleExecution, runErr)
-    }
-    if outputLen(v) > 1<<20 {
-        discard = true
-        return nil, ErrSandboxOutputLimit
-    }
-    return v, nil
-}
-```
-
-**MUST**：
-
-1. 外层 10s 是**总预算**，不是「每步 10s」；子步骤必须递减（`reqCtx` 已带 deadline，沙箱不得自行放宽）。
-2. JS 内 `java.ajax` / `source.*` / `book.*` 的网络调用**必须接收并透传 `ctx`**，否则 3s 到点时阻塞 I/O 无法被取消。
-3. 发生 `ErrSandboxTimeout`、`ErrSandboxPanic`、或运行期异常导致状态可疑时，**必须丢弃 Runtime**，不得放回池。
-4. 正常结束时归还前必须：`vm.ClearInterrupt()`、删除注入的全局键、清空 `source/book/result` 绑定；禁止把上一本书的变量带进下一次执行。
-
-#### 3.3.2 错误归因（Sentinel）
-
-```go
-var (
-    ErrSandboxTimeout     = errors.New("sandbox: execution timeout")     // 504 sandbox_timeout
-    ErrSandboxOutputLimit = errors.New("sandbox: output limit exceeded") // 422 sandbox_output_limit
-    ErrSandboxPanic       = errors.New("sandbox: runtime panic")         // 500 sandbox_panic
-    ErrRuleExecution      = errors.New("engine: rule execution failed")  // 422 rule_execution_failed
-    ErrUnsupportedRule    = errors.New("engine: unsupported rule")       // 422 unsupported_rule
-)
-```
-
-**MUST**：`vm.Interrupt(ErrSandboxTimeout)` 传入的就是该 sentinel 本身；沙箱返回层用 `errors.Is` 区分「超时」与「脚本语法/运行期异常」。上层策略不同：
-
-| 归因 | 业务动作 |
+| 资源 | 缺省约束 |
 |---|---|
-| `ErrSandboxTimeout` | 记录超时、`source_failures.kind='timeout'`、按 §6 降权/熔断 |
-| `ErrRuleExecution` | 记录「书源规则逻辑错误」，**不熔断**，返回可读的规则错误 |
-| `ErrUnsupportedRule` | 返回 422 并附 `feature`，提示该源需要 Stage 5 扩展 |
-| `ErrSandboxOutputLimit` | 视为规则缺陷，记录并截断，不熔断 |
+| JS 源码 | 256 KiB |
+| 输入变量 | 32 MiB JSON 近似预算；根键最多 1024 |
+| 父进程在途编码预算 | 2×输入上限（默认 64 MiB）；每次求值按 2×输入成本准入，250ms 窗口内无法准入即拒绝 |
+| JSON 数据树 | 深度 32、节点 65536；拒绝循环和 Go callable |
+| 返回字符串/结构化 JSON | 1 MiB；数组先检查 length 再分配 |
+| 调用栈 | goja SetMaxCallStackSize(1024) |
+| Program 缓存 | 2048 条、32 MiB 源码权重；并非 AST 堆配额 |
+
+沿用既有 sentinel：取消/超时/队列到期/在途预算饱和为 ErrSandboxTimeout；输出预算超限为 ErrSandboxOutputLimit；脚本、输入不支持或非 JSON 导出为 ErrRuleExecution；未知 Go panic 为 ErrSandboxPanic。禁止用 Go panic 值拼接对外错误。上层继续按既有 OpenAPI 错误映射处理，不把超限输出截断成成功结果。
 
 #### 3.3.3 并发与生命周期
 
-```text
-sync.Pool[*goja.Runtime]
-      │ borrow（独占，禁止跨 goroutine 共享）
-      ▼
-  per-execution Sandbox ──► installBridge(ctx) ──► RunProgram(prog)
-      │                                                   │
-      │  成功：reset + Put                                │  超时/panic：discard（GC）
-      └───────────────────────────────────────────────────┘
-```
+每次创建 Runtime → 安装 java/source/book 白名单 → 注入 JSON 变量 → 执行及有界转换 → 等待监视结束 → 丢弃 Runtime → 释放准入名额。输入变量不能覆盖三个桥接全局，book 字段通过 bookName/bookAuthor/bookUrl 注入。每个 Runtime 由单 goroutine 独占；同一书源操作的多个 JS 步骤不共享隐式全局。
 
-**MUST**：
+编译缓存使用短锁查找/发布，锁外编译；并发重复编译由执行准入限制，不能让一个编译任务长期持缓存锁阻塞已有命中。
 
-- `goja.Runtime` **不是 goroutine 安全的**；一个 Runtime 在任一时刻只能被一个 goroutine 使用。池只保证「借用期间独占」，不提供并发复用。
-- 预编译 AST 缓存：`map[sha256(script)]*goja.Program` + LRU（默认 2048 条 / 32 MiB），命中率低时按 LRU 淘汰；编译失败不缓存。
-- 池容量默认 `GOMAXPROCS*4`，空闲 10 分钟回收；池空时新建，不排队等待（避免书源抓取互相阻塞）。
-- 同一次「书源操作」内多个 `@js:` 步骤**可以**各自借还，但不得并行使用同一 Runtime。
+这些约束不能给单个 JS 堆提供硬内存上限。独立 sandboxprobe 保留无网络实验用途；后续 ADR-021 提供显式启用的独立 worker 接入。正式采用仍需资源预算和部署门禁，不能用主服务 GOMEMLIMIT 或容器总限额替代独立故障域。
 
 #### 3.3.4 桥接白名单
 
@@ -881,7 +802,7 @@ RETURNING *;
 | 书架列表（500 本） | ≤ 300ms | 走 `v_bookshelf`，单查询 |
 | 换源重定位 | ≤ 200ms | Level 2 依赖 trigram 索引 |
 | JS 单次 | ≤ 3s（硬上限） | 超时即 504 |
-| 单实例内存 | ≤ 512MiB 基线 | goja 池 ≤ `GOMAXPROCS*4` 个 Runtime |
+| 单实例内存 | ≤ 512MiB 基线 | 默认最多 4 个并行执行；512MiB 仍须实测，不由 Runtime 数量推导 |
 
 **容量假设**：单用户 ≤ 5000 书源、≤ 5000 本书、单书 ≤ 10000 章；Stage 5 需按此压测。
 
@@ -941,7 +862,7 @@ RETURNING *;
 ### 11.1 契约测试清单（MUST）
 
 1. **规则语义**：40 条黄金规则（CSS/XPath/JSONPath/正则/`||`/`&&`/`%%`/`##`/`@put`/`@get`/索引语法）与 Legado 行为逐字对齐。
-2. **沙箱超时**：`@js:while(true){}` → 3s ± 300ms 返回 `sandbox_timeout`；Runtime 被丢弃（池计数不增加）。
+2. **沙箱超时**：`@js:while(true){}` → 3s ± 300ms 返回 `sandbox_timeout`；Runtime 每次新建并丢弃，执行名额回收。
 3. **阻塞 I/O 取消**：`java.ajax` 指向 10s 才响应的测试服务器 → 3s 时返回，且服务端连接被关闭。
 4. **输出上限**：构造 1.1 MB 字符串 → `sandbox_output_limit`。
 5. **Fast-Path 等价**：`{{a+b*c}}` 等 12 条表达式，Fast-Path 与 goja 输出一致。
@@ -1037,3 +958,19 @@ Frozen v1.5 修订 1：新增迁移账本、内嵌基线及只读版本校验，
 ### ADR-018：同步导入预算与超时（2026-11-13）
 
 Frozen v1.5 修订 2：默认 90s 保持不变，提供 LOCAL_IMPORT_TIMEOUT（1s–10m），超时返回 504/import_timeout 和 Retry-After: 10，结果可能未确认，不自动重试。详见 [import-budget-design.md](import-budget-design.md)。DDL 和迁移基线不变，异步及续传另行设计。
+
+## ADR-019：LocalFS 隔离备份恢复设计（Frozen v1.5 修订 3）
+
+2026-11-13：冻结 LocalFS 隔离实验 CLI 设计 v1，见 [backup-restore-design.md](backup-restore-design.md) 和 [backup-contract-freeze-v1.md](backup-contract-freeze-v1.md)。采用 age v1/X25519 的完整认证封装、可信基线建库与依赖有序数据加载；新空目标、受限角色、私有暂存和严格物理路径隔离。恢复计划及操作状态由独立 JSON Schema 定义，generation/CAS、取消检查点和崩溃终结规则先于业务实现。
+
+本修订仅冻结设计，不代表恢复工具已实现或通过完整数据演练。API 1.0.0 的 43 个操作不变；数据库版本 1、权威 DDL 和已发布迁移校验和不变，因此不新增迁移。实例/操作元数据由独立配置和 StorageProvider 控制区承载，不写入业务表。现有在线 API 与 Worker 行为不变；S3、生产写目标、旧版导入 CLI 及最终发布继续作为独立门禁。
+
+### ADR-020：沙箱执行资源边界（2026-11-14）
+
+不再复用可变 Runtime，以避免跨调用状态残留；超时监视延伸到 result getter 和最终转换，加入输入/导出预算及有界准入。完整契约见 sandbox-resource-design-2026-11-14.md。内存硬隔离先由无网络独立实验工具验证，尚未切换生产 worker；代价是 Runtime 重建成本和饱和时拒绝，须记录微基准与兼容性回归。公开 API、数据库版本/DDL、研究及备份冻结格式不变。
+
+### ADR-021：独立沙箱 worker 与父进程出网代理（2026-11-14）
+
+内部协议先行，详见 sandbox-worker-design-2026-11-14.md。预配置 Linux/cgroup v2 无网络 worker，经0700私有目录中的0600 Unix socket接入；API 不持 Docker socket，worker 启动验证 OS 隔离约束。启用 YREADER_SANDBOX_SOCKETS 时使用有界双向帧和原始父 context 代理 HTTP，崩溃/取消不自动重放执行；不配置则维持现有模式，配置后不可用绝不回退。独立 worker watchdog 和部署系统重启共同回收失控进程。
+
+新增可选接入和独立命令，不等于本轮部署。readyz 在该依赖被配置时增加既有 checks map 的 sandbox 项（兼容现有 additionalProperties），只更新接口说明，不改变操作数、响应结构、错误枚举、DDL 或数据库版本。完整资源峰值、长正文、时区、p95/吞吐、最终多架构镜像和编排发布门禁仍单独验收，见 sandbox-worker-operations-2026-11-14.md 和 sandbox-worker-verification-2026-11-14.md。

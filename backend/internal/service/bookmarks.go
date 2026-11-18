@@ -75,11 +75,25 @@ func (s *BookmarkService) Create(ctx context.Context, userID, bookID uuid.UUID, 
 		Excerpt:      in.Excerpt,
 		Note:         in.Note,
 	}
-	if err := s.bookmarks.Create(ctx, s.pool, b); err != nil {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.books.Lock(ctx, tx, userID, bookID); err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: book not found", repository.ErrInvalidArgument)
+	}
+	if err := s.bookmarks.Create(ctx, tx, b); err != nil {
 		if errors.Is(err, repository.ErrDuplicate) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("create bookmark: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	return b, nil
 }

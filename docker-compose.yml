@@ -7,10 +7,11 @@ services:
   app:
     build: ./backend
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       PORT: "8080"
       LOCAL_IMPORT_TIMEOUT: ${LOCAL_IMPORT_TIMEOUT:-90s}
+      YREADER_SANDBOX_SOCKETS: ${YREADER_SANDBOX_SOCKETS:-}
       DATABASE_URL: postgres://yreader:yreader@postgres:5432/yreader?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       STORAGE_DIR: /var/lib/yreader/storage
@@ -38,7 +39,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
       - app
     restart: unless-stopped
@@ -61,8 +62,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6380:6379"
     volumes:
       - redisdata:/data
     healthcheck:

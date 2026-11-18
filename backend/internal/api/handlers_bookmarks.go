@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"math"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -25,7 +26,7 @@ func (s *Server) ListBookmarks(w http.ResponseWriter, r *http.Request, bookId Bo
 func (s *Server) CreateBookmark(w http.ResponseWriter, r *http.Request, bookId BookId) {
 	uid := userIDFrom(r.Context())
 	var req BookmarkCreate
-	if err := decodeJSON(w, r, &req); err != nil {
+	if err := decodeJSON(w, r, &req, "chapter_index"); err != nil || req.ChapterIndex < 0 || req.ChapterIndex > math.MaxInt32 || (req.CharOffset != nil && (*req.CharOffset < 0 || *req.CharOffset > math.MaxInt32)) {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}

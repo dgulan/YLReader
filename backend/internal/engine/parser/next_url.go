@@ -85,7 +85,9 @@ func evalNextURLCSS(rule, content string) (string, error) {
 	selector, getter := splitGetter(body)
 	sel := doc.Selection
 	if selector != "" {
-		sel = selectElements(sel, selector)
+		for _, part := range splitSelectorChain(selector) {
+			sel = selectElements(sel, part)
+		}
 	}
 	if sel.Length() == 0 {
 		return "", nil

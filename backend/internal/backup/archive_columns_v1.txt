@@ -1,0 +1,14 @@
+COPY public.app_settings (user_id, key, value, updated_at) FROM stdin;
+COPY public.auth_sessions (id, user_id, refresh_token_hash, user_agent, ip, expires_at, revoked_at, created_at) FROM stdin;
+COPY public.book_source_mappings (id, book_id, source_id, book_url, toc_url, name, author, cover_url, latest_chapter_title, total_chapters, sync_status, failure_count, last_synced_at, created_at, updated_at) FROM stdin;
+COPY public.book_sources (id, user_id, book_source_url, book_source_name, book_source_group, book_source_type, enabled, enabled_explore, weight, respond_time, charset, concurrent_rate, header, login_url, login_check_js, rules, failure_count, last_checked_at, last_success_at, version, created_at, updated_at) FROM stdin;
+COPY public.bookmarks (id, user_id, book_id, chapter_index, char_offset, chapter_title, excerpt, note, created_at) FROM stdin;
+COPY public.books (id, user_id, book_type, normalized_name, normalized_author, name, author, cover_url, custom_cover_url, intro, kind, word_count, status, active_source_id, active_book_url, total_chapters, latest_chapter_title, latest_chapter_at, last_read_at, file_hash, version, created_at, updated_at) FROM stdin;
+COPY public.chapter_source_overrides (id, user_id, book_id, chapter_index, source_id, chapter_url, chapter_title, normalized_title, status, created_at, updated_at) FROM stdin;
+COPY public.chapters (id, book_id, source_id, chapter_index, sort_order, title, normalized_title, url, url_hash, is_volume, is_vip, word_count, published_at, created_at, updated_at) FROM stdin;
+COPY public.jobs (id, user_id, type, status, payload, result, progress, error_code, error_message, attempts, created_at, started_at, finished_at, expires_at, worker_id) FROM stdin;
+COPY public.reading_progress (id, user_id, book_id, chapter_index, char_offset, chapter_title, normalized_title, chapter_ratio, progress_percent, client_updated_at, server_updated_at, version, device_id) FROM stdin;
+COPY public.replace_rules (id, user_id, name, group_name, pattern, replacement, scope, is_enabled, order_index, created_at, updated_at) FROM stdin;
+COPY public.schema_migrations (version, name, checksum, applied_at) FROM stdin;
+COPY public.source_failures (id, user_id, source_id, kind, error_code, message, occurred_at, expires_at, resolved_at) FROM stdin;
+COPY public.users (id, username, password_hash, role, display_name, token_version, is_disabled, created_at, updated_at, last_login_at) FROM stdin;

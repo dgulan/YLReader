@@ -162,6 +162,7 @@ func (s *TOCService) resolveSource(ctx context.Context, userID uuid.UUID, book *
 
 // refresh 抓取目标源目录并在单事务内落库。
 func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *repository.Book, src *repository.BookSource) error {
+	ctx = sourceFetchContext(ctx, src)
 	bookURL, tocURL := bookURLForSource(book, src.ID, func() (*repository.BookSourceMapping, error) {
 		return s.mappings.GetBySourceID(ctx, s.pool, userID, book.ID, src.ID)
 	})
@@ -170,6 +171,10 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 	}
 	if bookURL == "" {
 		return fmt.Errorf("%w: book has no url for source", repository.ErrInvalidArgument)
+	}
+	oldSnapshot, err := s.chapters.GetTOC(ctx, s.pool, userID, book.ID, src.ID)
+	if err != nil {
+		return err
 	}
 
 	chapters, err := s.fetchTOC(ctx, parseTOCRules(src.Rules), bookURL)
@@ -183,21 +188,92 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if err := s.chapters.LockTOCSource(ctx, tx, userID, src.ID, src.Version); err != nil {
+		if !errors.Is(err, repository.ErrNotFound) && !errors.Is(err, repository.ErrVersionConflict) {
+			return err
+		}
+		return fmt.Errorf("%w: source changed while fetching", ErrRelocationFailed)
+	}
+	if err := s.books.Lock(ctx, tx, userID, book.ID); err != nil {
+		return err
+	}
+	current, err := s.books.Get(ctx, tx, userID, book.ID)
+	if err != nil {
+		return err
+	}
+	if current.BookType != book.BookType || !sameSource(current.ActiveSourceID, book.ActiveSourceID) || !sameOptionalString(current.ActiveBookURL, book.ActiveBookURL) {
+		return fmt.Errorf("%w: book changed while fetching", ErrRelocationFailed)
+	}
+	if err := s.mappings.LockForTOC(ctx, tx, userID, book.ID, src.ID); err != nil {
+		return err
+	}
+	currentURL, currentTOC := bookURLForSource(current, src.ID, func() (*repository.BookSourceMapping, error) {
+		return s.mappings.GetBySourceID(ctx, tx, userID, book.ID, src.ID)
+	})
+	if currentTOC != "" {
+		currentURL = currentTOC
+	}
+	if currentURL != bookURL {
+		return fmt.Errorf("%w: mapping changed while fetching", ErrRelocationFailed)
+	}
+	active := current.ActiveSourceID != nil && *current.ActiveSourceID == src.ID
+	old, err := s.chapters.GetTOC(ctx, tx, userID, book.ID, src.ID)
+	if err != nil {
+		return err
+	}
+	if !sameTOCSnapshot(oldSnapshot, old) {
+		return fmt.Errorf("%w: directory changed while fetching", ErrRelocationFailed)
+	}
+	var progress *repository.ReadingProgress
+	var refs repository.TOCReferences
+	var moves []repository.BookmarkTOCMove
+	if active {
+		positions, err := planTOCPositions(old, chapters)
+		if err != nil {
+			return err
+		}
+		if positions.changed {
+			refs, err = s.chapters.LockTOCReferences(ctx, tx, userID, book.ID)
+			if err != nil {
+				return err
+			}
+			progress, moves, err = positions.relocate(refs)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	newTotal, err := s.chapters.ReplaceTOC(ctx, tx, userID, book.ID, src.ID, chapters)
 	if err != nil {
 		return err
+	}
+	if progress != nil {
+		progress.UserID, progress.BookID = userID, book.ID
+		progressRepo := repository.NewProgressRepository()
+		if refs.Progress == nil {
+			progress.ClientUpdatedAt = s.now()
+			err = progressRepo.InsertInitial(ctx, tx, progress)
+		} else {
+			err = progressRepo.Update(ctx, tx, progress, refs.Progress.Version)
+		}
+		if err != nil {
+			return err
+		}
+		if err := s.chapters.MoveTOCBookmarks(ctx, tx, userID, book.ID, moves); err != nil {
+			return err
+		}
 	}
 	if err := s.mappings.UpdateLastSyncedAt(ctx, tx, userID, book.ID, src.ID, s.now()); err != nil {
 		return err
 	}
 
 	// 活跃源刷新：更新 books 统计与最新章节，并在目录缩水时标记越界覆盖。
-	if book.ActiveSourceID != nil && *book.ActiveSourceID == src.ID {
+	if active {
 		latestTitle, latestAt := lastReadable(chapters)
 		if err := s.books.UpdateTOCMeta(ctx, tx, userID, book.ID, newTotal, latestTitle, latestAt); err != nil {
 			return err
 		}
-		if newTotal < int(book.TotalChapters) {
+		if newTotal < int(current.TotalChapters) {
 			if err := s.overrides.MarkStaleFrom(ctx, tx, userID, book.ID, int32(newTotal)); err != nil {
 				return err
 			}
@@ -206,6 +282,26 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 	// 预览模式（target != active）：只落 chapters，不动 books 元数据、不标 stale。
 
 	return tx.Commit(ctx)
+}
+
+func sameSource(a, b *uuid.UUID) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+func sameOptionalString(a, b *string) bool {
+	return (a == nil && b == nil) || (a != nil && b != nil && *a == *b)
+}
+
+func sameTOCSnapshot(a, b []*repository.Chapter) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].URL != b[i].URL {
+			return false
+		}
+	}
+	return true
 }
 
 // bookURLForSource 取书籍在目标源下的 book_url / toc_url。
@@ -241,51 +337,60 @@ func (s *TOCService) fetchTOC(ctx context.Context, rules tocRules, startURL stri
 	pages := 0
 
 	for pageURL != "" && pages < maxTOCPages {
-		if visited[pageURL] {
-			break
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		visited[pageURL] = true
+		if visited[tocPageKey(pageURL)] {
+			return nil, fmt.Errorf("%w: toc pagination cycle", sandbox.ErrRuleExecution)
+		}
+		visited[tocPageKey(pageURL)] = true
 		pages++
 
 		resp, err := s.ft.Get(ctx, pageURL, nil)
 		if err != nil {
-			if pages == 1 {
-				return nil, err
-			}
-			break // 容错降级：保留已抓取的前序章节
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if resp.StatusCode >= 400 {
-			upstreamErr := fmt.Errorf("%w: upstream status %d", fetcher.ErrUpstreamError, resp.StatusCode)
-			if pages == 1 {
-				return nil, upstreamErr
-			}
-			break
+			return nil, fmt.Errorf("%w: upstream status %d", fetcher.ErrUpstreamError, resp.StatusCode)
 		}
 
 		base := strings.TrimSpace(resp.FinalURL)
 		if base == "" {
 			base = pageURL
 		}
+		if tocPageKey(base) != tocPageKey(pageURL) && visited[tocPageKey(base)] {
+			return nil, fmt.Errorf("%w: toc redirect cycle", sandbox.ErrRuleExecution)
+		}
+		visited[tocPageKey(base)] = true
 		engine.SetVariable("baseUrl", base)
 		body := string(resp.Body)
 
 		nodes, err := engine.EvalListNodes(ctx, rules.ChapterList, body)
 		if err != nil {
-			if pages == 1 {
-				return nil, err
-			}
-			break
+			return nil, err
 		}
-		if pages == 1 && emptyTOCHead(ctx, engine, nodes, rules) {
+		if len(nodes) == 0 {
 			return nil, fmt.Errorf("%w: no chapters extracted (rule mismatch or empty toc)", sandbox.ErrRuleExecution)
 		}
 
 		for _, node := range nodes {
 			engine.ResetVars()
-			title, _ := engine.EvalField(ctx, node, rules.ChapterName)
-			rawURL, _ := engine.EvalField(ctx, node, rules.ChapterUrl)
+			title, err := engine.EvalField(ctx, node, rules.ChapterName)
+			if err != nil {
+				return nil, err
+			}
+			rawURL, err := engine.EvalField(ctx, node, rules.ChapterUrl)
+			if err != nil {
+				return nil, err
+			}
 
 			isVolume := evalFlag(ctx, engine, node, rules.IsVolume)
+			if strings.TrimSpace(title) == "" || (!isVolume && (strings.TrimSpace(rawURL) == "" || validateHTTPURL(resolveURL(base, rawURL)) != nil)) {
+				return nil, fmt.Errorf("%w: invalid toc chapter", sandbox.ErrRuleExecution)
+			}
 			chapter := repository.Chapter{
 				SortOrder:       sortOrder,
 				Title:           strings.TrimSpace(title),
@@ -317,39 +422,38 @@ func (s *TOCService) fetchTOC(ctx context.Context, rules tocRules, startURL stri
 		}
 		next, nextErr := engine.EvalNextURL(ctx, rules.NextTocURL, body)
 		if nextErr != nil {
+			return nil, nextErr
+		}
+		if strings.TrimSpace(next) == "" {
 			break
 		}
 		next = resolveURL(base, next)
-		if next == "" || next == pageURL || visited[next] {
-			break
+		if validateHTTPURL(next) != nil {
+			return nil, fmt.Errorf("%w: invalid toc next page", sandbox.ErrRuleExecution)
+		}
+		if visited[tocPageKey(next)] {
+			return nil, fmt.Errorf("%w: toc pagination cycle", sandbox.ErrRuleExecution)
+		}
+		if pages == maxTOCPages {
+			return nil, fmt.Errorf("%w: toc pagination limit reached", sandbox.ErrRuleExecution)
 		}
 		if err := s.sleep(ctx, tocPageDelay); err != nil {
-			break
+			return nil, err
 		}
 		pageURL = next
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
-// emptyTOCHead 判断前 10 个节点的章节名与地址是否全空（规则不匹配）。
-func emptyTOCHead(ctx context.Context, engine *parser.Engine, nodes []parser.RuleNode, rules tocRules) bool {
-	if len(nodes) == 0 {
-		return true
+func tocPageKey(raw string) string {
+	if i := strings.IndexByte(raw, '#'); i >= 0 {
+		return raw[:i]
 	}
-	limit := len(nodes)
-	if limit > 10 {
-		limit = 10
-	}
-	for i := 0; i < limit; i++ {
-		engine.ResetVars()
-		name, _ := engine.EvalField(ctx, nodes[i], rules.ChapterName)
-		link, _ := engine.EvalField(ctx, nodes[i], rules.ChapterUrl)
-		if strings.TrimSpace(name) != "" || strings.TrimSpace(link) != "" {
-			return false
-		}
-	}
-	return true
+	return raw
 }
 
 // evalText 求值可选规则；规则为空或求值失败返回空串。

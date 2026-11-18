@@ -1,12 +1,10 @@
 // Package sandbox 提供 goja JS 规则沙箱：双层超时、输出上限、白名单桥接、
-// Runtime 池化与 Program 编译缓存。超时/panic/超限会丢弃 Runtime 不回池。
+// 每次独立 Runtime 与有界 Program 编译缓存。
 package sandbox
 
 import (
 	"context"
 	"errors"
-	"fmt"
-	"sync"
 	"time"
 
 	"github.com/dop251/goja"
@@ -32,6 +30,12 @@ const (
 	DefaultOutputLimit         = 1 << 20 // 1,048,576 字节
 	DefaultProgramCacheEntries = 2048
 	DefaultProgramCacheBytes   = 32 << 20 // 32 MiB
+	DefaultScriptLimit         = 256 << 10
+	DefaultInputLimit          = 32 << 20
+	DefaultMaxConcurrent       = 4
+	DefaultQueueTimeout        = 250 * time.Millisecond
+	DefaultValueDepth          = 32
+	DefaultValueNodes          = 65536
 )
 
 // HTTPClient 是沙箱桥接函数（java.ajax/get/post）使用的出网通道。实现方必须
@@ -46,6 +50,11 @@ type Config struct {
 	OutputLimit         int
 	ProgramCacheEntries int
 	ProgramCacheBytes   int64
+	ScriptLimit         int
+	InputLimit          int
+	InflightBytes       int64
+	MaxConcurrent       int
+	QueueTimeout        time.Duration
 }
 
 // execCtx 是单个执行周期的可变上下文，桥接函数通过它访问当前 ctx 与 HTTP 客户端。
@@ -68,8 +77,9 @@ type runtimeState struct {
 type Sandbox struct {
 	cfg      Config
 	client   HTTPClient
-	pool     sync.Pool
+	slots    chan struct{}
 	programs *programCache
+	remote   *remoteExecutor
 }
 
 // New 构建沙箱。client 为 nil 时 java.* 网络桥接会抛出规则错误。
@@ -80,7 +90,7 @@ func New(cfg Config, client HTTPClient) *Sandbox {
 		client:   client,
 		programs: newProgramCache(cfg.ProgramCacheEntries, cfg.ProgramCacheBytes),
 	}
-	s.pool = sync.Pool{New: func() any { return s.newRuntime() }}
+	s.slots = make(chan struct{}, cfg.MaxConcurrent)
 	return s
 }
 
@@ -97,108 +107,89 @@ func normalizeConfig(c Config) Config {
 	if c.ProgramCacheBytes <= 0 {
 		c.ProgramCacheBytes = DefaultProgramCacheBytes
 	}
+	if c.ScriptLimit <= 0 {
+		c.ScriptLimit = DefaultScriptLimit
+	}
+	if c.InputLimit <= 0 {
+		c.InputLimit = DefaultInputLimit
+	}
+	// One maximum-size request must always fit; a smaller explicit budget
+	// would otherwise reject every large input at admission time.
+	if minimum := int64(c.InputLimit) * inflightCostFactor; c.InflightBytes < minimum {
+		c.InflightBytes = minimum
+	}
+	if c.MaxConcurrent <= 0 {
+		c.MaxConcurrent = DefaultMaxConcurrent
+	}
+	if c.MaxConcurrent > 64 {
+		c.MaxConcurrent = 64
+	}
+	if c.QueueTimeout <= 0 {
+		c.QueueTimeout = DefaultQueueTimeout
+	}
 	return c
 }
 
-// Eval 执行一段 JS，返回表达式的完成值（与 Legado evalJS 一致）；若完成值为
-// undefined/null（例如脚本仅含 var 声明），回退到 result 全局变量。
-// 外层 ctx 为调用方注入的总超时；内层 ScriptTimeout 叠加在 ctx 之上。
+// Eval executes and converts the result under one deadline and one admission slot.
 func (s *Sandbox) Eval(ctx context.Context, script string, vars map[string]any) (string, error) {
-	value, state, tempKeys, err := s.evalRaw(ctx, script, vars)
+	value, err := s.evaluate(ctx, script, vars, false)
 	if err != nil {
 		return "", err
 	}
-	out := value.String()
-	if len(out) > s.cfg.OutputLimit {
-		// 丢弃 Runtime（不回池），避免超大输出污染后续调用。
-		return "", ErrSandboxOutputLimit
-	}
-	s.cleanup(state, tempKeys)
-	s.pool.Put(state)
-	return out, nil
+	return value.(string), nil
 }
 
-// EvalValue 执行一段 JS 并返回导出后的 Go 值（数组→[]any，对象→map[string]any，
-// 标量→对应 Go 类型）；undefined/null 返回 nil。用于列表切分等需要结构化结果的场景。
 func (s *Sandbox) EvalValue(ctx context.Context, script string, vars map[string]any) (any, error) {
-	value, state, tempKeys, err := s.evalRaw(ctx, script, vars)
-	if err != nil {
+	return s.evaluate(ctx, script, vars, true)
+}
+
+func (s *Sandbox) evaluate(parent context.Context, script string, vars map[string]any, structured bool) (result any, err error) {
+	if s.remote != nil {
+		return s.remote.evaluate(parent, script, vars, structured)
+	}
+	ctx, cancel := context.WithTimeout(parent, s.cfg.ScriptTimeout)
+	defer cancel()
+	queue, stopQueue := context.WithTimeout(ctx, s.cfg.QueueTimeout)
+	defer stopQueue()
+	if queue.Err() != nil {
+		return nil, ErrSandboxTimeout
+	}
+	select {
+	case s.slots <- struct{}{}:
+		defer func() { <-s.slots }()
+	case <-queue.Done():
+		return nil, ErrSandboxTimeout
+	}
+	if queue.Err() != nil {
+		return nil, ErrSandboxTimeout
+	}
+	stopQueue()
+	if ctx.Err() != nil {
+		return nil, ErrSandboxTimeout
+	}
+	if len(script) > s.cfg.ScriptLimit {
+		return nil, ErrRuleExecution
+	}
+	if _, err := validateInput(ctx, vars, s.cfg.InputLimit); err != nil {
 		return nil, err
 	}
-	var out any
-	if !goja.IsUndefined(value) && !goja.IsNull(value) {
-		out = value.Export()
-	}
-	s.cleanup(state, tempKeys)
-	s.pool.Put(state)
-	return out, nil
-}
-
-// evalRaw 执行脚本并返回完成值（含 result 全局兜底）。成功时调用方负责
-// cleanup 与回池；失败时 Runtime 已按原逻辑处理。
-func (s *Sandbox) evalRaw(ctx context.Context, script string, vars map[string]any) (goja.Value, *runtimeState, []string, error) {
-	innerCtx, cancel := context.WithTimeout(ctx, s.cfg.ScriptTimeout)
-	defer cancel()
-
-	program, err := s.programs.get(script, func() (*goja.Program, error) {
-		return goja.Compile("rule", script, false)
-	})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: %v", ErrRuleExecution, err)
-	}
-
-	state := s.acquire()
-	ec := state.ec
-	ec.ctx = innerCtx
-	ec.vars = vars
-	ec.lastErr = nil
-	ec.sourceVars = map[string]any{}
-
-	tempKeys := setVars(state.rt, vars)
-	if _, ok := vars["result"]; !ok {
-		state.rt.Set("result", goja.Undefined())
-		tempKeys = append(tempKeys, "result")
-	}
-
-	value, err := s.run(state, innerCtx, program)
-	if err != nil {
-		if isDiscardErr(err) {
-			return nil, nil, nil, err // 丢弃 Runtime
+	// Compilation remains synchronous: never abandon native work and release its slot.
+	defer func() {
+		if recover() != nil {
+			result = nil
+			err = ErrSandboxPanic
 		}
-		s.cleanup(state, tempKeys)
-		s.pool.Put(state)
-		return nil, nil, nil, err
+	}()
+	program, err := s.programs.get(script, func() (*goja.Program, error) { return goja.Compile("rule", script, false) })
+	if ctx.Err() != nil {
+		return nil, ErrSandboxTimeout
 	}
-
-	resultVal := value
-	if goja.IsUndefined(resultVal) || goja.IsNull(resultVal) {
-		resultVal = state.rt.Get("result")
+	if err != nil {
+		return nil, ErrRuleExecution
 	}
-	return resultVal, state, tempKeys, nil
-}
-
-func (s *Sandbox) acquire() *runtimeState {
-	if v := s.pool.Get(); v != nil {
-		return v.(*runtimeState)
-	}
-	return s.newRuntime()
-}
-
-func (s *Sandbox) newRuntime() *runtimeState {
-	ec := &execCtx{client: s.client}
-	rt := goja.New()
-	// 栈深限制（对齐 architecture.md §3.3.1）：越界抛 RangeError，归为 ErrRuleExecution，
-	// 不会被误判为超时 sentinel，也不会使进程崩溃。
-	rt.SetMaxCallStackSize(1024)
-	installBridge(rt, ec)
-	return &runtimeState{rt: rt, ec: ec}
-}
-
-// run 执行程序并监视超时。innerCtx 到期时调用 rt.Interrupt 中断 CPU 密集 JS；
-// 桥接函数的阻塞 I/O 则由 ctx 透传取消。
-func (s *Sandbox) run(state *runtimeState, ctx context.Context, program *goja.Program) (goja.Value, error) {
-	done := make(chan struct{})
-	stopped := make(chan struct{})
+	state := s.newRuntime()
+	state.ec.ctx, state.ec.vars, state.ec.sourceVars = ctx, vars, map[string]any{}
+	done, stopped := make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(stopped)
 		select {
@@ -207,72 +198,89 @@ func (s *Sandbox) run(state *runtimeState, ctx context.Context, program *goja.Pr
 		case <-done:
 		}
 	}()
-
-	var (
-		value goja.Value
-		err   error
-	)
+	// Keep the watcher through injection, result fallback, getters and conversion.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				err = fmt.Errorf("%w: %v", ErrSandboxPanic, r)
+				switch r.(type) {
+				case *goja.InterruptedError:
+					err = ErrSandboxTimeout
+				case *goja.Exception, *goja.StackOverflowError:
+					err = ErrRuleExecution
+				default:
+					err = ErrSandboxPanic
+				}
 			}
 		}()
-		value, err = state.rt.RunProgram(program)
+		exception := state.rt.Try(func() {
+			setVars(state.rt, vars)
+			var value goja.Value
+			value, err = state.rt.RunProgram(program)
+			if err != nil {
+				return
+			}
+			if goja.IsUndefined(value) || goja.IsNull(value) {
+				value = state.rt.Get("result")
+			}
+			if value == nil {
+				value = goja.Undefined()
+			}
+			if structured {
+				result, err = exportBounded(ctx, value, s.cfg.OutputLimit)
+			} else {
+				out := value.String()
+				if len(out) > s.cfg.OutputLimit {
+					err = ErrSandboxOutputLimit
+					return
+				}
+				result = out
+			}
+		})
+		if exception != nil {
+			err = ErrRuleExecution
+		}
 	}()
-
 	close(done)
-	<-stopped // 等待监视协程完全退出，避免残留 Interrupt 标志
-
+	<-stopped
+	if ctx.Err() != nil {
+		return nil, ErrSandboxTimeout
+	}
+	var interrupted *goja.InterruptedError
+	if errors.As(err, &interrupted) {
+		return nil, ErrSandboxTimeout
+	}
+	if state.ec.lastErr != nil {
+		return nil, state.ec.lastErr
+	}
 	if err != nil {
-		var ie *goja.InterruptedError
-		if errors.As(err, &ie) {
-			return nil, ErrSandboxTimeout
+		if errors.Is(err, ErrSandboxTimeout) || errors.Is(err, ErrSandboxPanic) || errors.Is(err, ErrSandboxOutputLimit) || errors.Is(err, ErrRuleExecution) {
+			return nil, err
 		}
-		if state.ec.lastErr != nil {
-			return nil, state.ec.lastErr
-		}
-		return nil, fmt.Errorf("%w: %v", ErrRuleExecution, err)
+		return nil, ErrRuleExecution
 	}
-	return value, nil
+	return result, nil
 }
 
-// cleanup 清理本周期注入的全局键并复位执行上下文，供回池复用。
-func (s *Sandbox) cleanup(state *runtimeState, tempKeys []string) {
-	state.rt.ClearInterrupt()
-	for _, k := range tempKeys {
-		state.rt.Set(k, goja.Undefined())
-	}
-	book := state.rt.Get("book").ToObject(state.rt)
-	if book != nil {
-		book.Set("name", goja.Undefined())
-		book.Set("author", goja.Undefined())
-		book.Set("bookUrl", goja.Undefined())
-	}
-	state.ec.ctx = nil
-	state.ec.vars = nil
-	state.ec.lastErr = nil
-	state.ec.sourceVars = map[string]any{}
+func (s *Sandbox) newRuntime() *runtimeState {
+	ec := &execCtx{client: s.client}
+	rt := goja.New()
+	rt.SetMaxCallStackSize(1024)
+	installBridge(rt, ec)
+	return &runtimeState{rt: rt, ec: ec}
 }
 
-func isDiscardErr(err error) bool {
-	return errors.Is(err, ErrSandboxTimeout) ||
-		errors.Is(err, ErrSandboxOutputLimit) ||
-		errors.Is(err, ErrSandboxPanic)
-}
-
-// setVars 注入用户变量与 book 只读字段，返回需清理的临时键。
-func setVars(rt *goja.Runtime, vars map[string]any) []string {
-	keys := make([]string, 0, len(vars)+1)
+func setVars(rt *goja.Runtime, vars map[string]any) {
 	for k, v := range vars {
+		if k == "java" || k == "source" || k == "book" {
+			continue
+		}
 		rt.Set(k, v)
-		keys = append(keys, k)
+	}
+	if _, ok := vars["result"]; !ok {
+		rt.Set("result", goja.Undefined())
 	}
 	book := rt.Get("book").ToObject(rt)
-	if book != nil {
-		book.Set("name", vars["bookName"])
-		book.Set("author", vars["bookAuthor"])
-		book.Set("bookUrl", vars["bookUrl"])
-	}
-	return keys
+	book.Set("name", vars["bookName"])
+	book.Set("author", vars["bookAuthor"])
+	book.Set("bookUrl", vars["bookUrl"])
 }

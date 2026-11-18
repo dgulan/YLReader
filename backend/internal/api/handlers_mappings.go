@@ -26,7 +26,7 @@ func (s *Server) ListMappings(w http.ResponseWriter, r *http.Request, bookId Boo
 func (s *Server) AddMapping(w http.ResponseWriter, r *http.Request, bookId BookId) {
 	var req MappingCreate
 	if err := decodeJSON(w, r, &req); err != nil {
-		writeErrorCode(w, r, http.StatusUnprocessableEntity, "validation_error")
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
 	m, err := s.Mapping.Add(r.Context(), userIDFrom(r.Context()), bookId,

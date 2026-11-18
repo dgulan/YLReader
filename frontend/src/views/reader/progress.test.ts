@@ -1,5 +1,5 @@
 import { it, expect } from 'vitest'
-import { reconcileProgress } from './progress'
+import { reconcileProgress, remoteProgressState } from './progress'
 import type { Model } from '@/api/client'
 import type { LocalPosition } from '@/db/chapters'
 const server: Model<'Progress'> = { book_id: 'b', chapter_index: 3, char_offset: 90, chapter_ratio: .5, version: 8 }
@@ -17,4 +17,13 @@ it('uses the remote position when no local changes are pending', () => {
 it('keeps pending offline progress eligible for sync only with the matching version', () => {
   const result = reconcileProgress(server, { ...local, base: server })
   expect(result.dirty).toBe(true); expect(result.conflict).toBeUndefined(); expect(result.index).toBe(4)
+})
+it('does not infer a successful commit from matching coordinates and an advanced version', () => {
+  expect(remoteProgressState(server, server)).toBe('unchanged')
+  expect(remoteProgressState(server, { ...server, version: 9 })).toBe('advanced')
+})
+it('rejects foreign, regressed or malformed progress as a conflict baseline', () => {
+  for (const patch of [{ book_id: 'other' }, { version: 7 }, { version: 8.5 }, { version: NaN }, { chapter_index: -1 }, { char_offset: -1 }]) {
+    expect(remoteProgressState(server, { ...server, ...patch })).toBe('invalid')
+  }
 })

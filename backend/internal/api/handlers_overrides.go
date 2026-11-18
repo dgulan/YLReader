@@ -1,6 +1,7 @@
 package api
 
 import (
+	"math"
 	"net/http"
 
 	"yreader/backend/internal/repository"
@@ -9,7 +10,7 @@ import (
 // SetChapterOverride 处理 POST /books/{bookId}/chapters/{chapterIndex}/override。
 func (s *Server) SetChapterOverride(w http.ResponseWriter, r *http.Request, bookId BookId, chapterIndex int) {
 	uid := userIDFrom(r.Context())
-	if chapterIndex < 0 {
+	if chapterIndex < 0 || chapterIndex > math.MaxInt32 {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
@@ -29,7 +30,7 @@ func (s *Server) SetChapterOverride(w http.ResponseWriter, r *http.Request, book
 // DeleteChapterOverride 处理 DELETE .../override（幂等：无论是否存在都返回 204）。
 func (s *Server) DeleteChapterOverride(w http.ResponseWriter, r *http.Request, bookId BookId, chapterIndex int) {
 	uid := userIDFrom(r.Context())
-	if chapterIndex < 0 {
+	if chapterIndex < 0 || chapterIndex > math.MaxInt32 {
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}

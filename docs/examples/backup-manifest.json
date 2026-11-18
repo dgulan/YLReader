@@ -1,0 +1,52 @@
+{
+  "format": "ylreader-instance-backup",
+  "format_version": 1,
+  "backup_id": "30000000-0000-4000-8000-000000000001",
+  "source_instance_id": "10000000-0000-4000-8000-000000000001",
+  "created_at": "2026-11-13T08:00:01Z",
+  "snapshot_at": "2026-11-13T08:00:00Z",
+  "app_revision": "fdee4bd1ffa6f73c6da885f2659d7510ae0c30c4",
+  "schema_version": 1,
+  "migrations": [
+    {
+      "version": 1,
+      "name": "baseline_v1_5",
+      "checksum": "7e275f0f5dc37fa7b0834bd3d80da7c192f7bc7b854041f2f1e99b0cae3c3e51"
+    }
+  ],
+  "postgres_major": 16,
+  "required_header_kids": [
+    "primary"
+  ],
+  "database": {
+    "archive_name": "database.dump",
+    "bytes": 100,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "objects": [
+    {
+      "opaque_id": "11111111111111111111111111111111",
+      "key": "local/book/0.txt",
+      "bytes": 4,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "counts": {
+    "schema_migrations": 1,
+    "users": 0,
+    "auth_sessions": 0,
+    "app_settings": 0,
+    "book_sources": 0,
+    "source_failures": 0,
+    "books": 0,
+    "book_source_mappings": 0,
+    "chapters": 0,
+    "reading_progress": 0,
+    "chapter_source_overrides": 0,
+    "bookmarks": 0,
+    "replace_rules": 0,
+    "jobs": 0
+  },
+  "object_count": 1,
+  "total_plaintext_bytes": 104
+}

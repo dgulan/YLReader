@@ -10,7 +10,7 @@ import { parsePreferences } from './readerPreferences'
 const session = (id: string): Model<'TokensResponse'> => ({ access_token: id, refresh_token: `${id}-refresh`, token_type: 'Bearer', expires_in: 900, user: { id, username: id, role: 'user', token_version: 1, created_at: '2026-11-12T00:00:00Z' } })
 let store: ReturnType<typeof useReaderConfig>
 beforeEach(async () => { await db.preferences.clear(); setActivePinia(createPinia()); setSession(session('a')); store = useReaderConfig() })
-afterEach(() => { store.$dispose(); setSession(null); vi.restoreAllMocks() })
+afterEach(() => { store.$dispose(); setSession(null); vi.useRealTimers(); vi.restoreAllMocks() })
 it('uses safe defaults for missing, malformed or out-of-range server values', () => {
   expect(parsePreferences({ 'reader.theme': '<script>', 'reader.font_size': 99 })).toEqual({ theme: 'paper', fontSize: 20 })
   expect(parsePreferences({ 'reader.theme': 'night', 'reader.font_size': 18 })).toEqual({ theme: 'night', fontSize: 18 })
@@ -31,7 +31,7 @@ it('loads account settings and patches only changed keys, preserving unrelated s
   vi.spyOn(api, 'settings').mockResolvedValue({ 'reader.theme': 'green', 'reader.font_size': 24, 'other.value': 7 })
   const patch = vi.spyOn(api, 'patchSettings').mockResolvedValue({ 'reader.theme': 'night', 'reader.font_size': 24, 'other.value': 7 })
   await store.initialize('a'); store.setTheme('night'); await store.sync()
-  expect(store.theme).toBe('night'); expect(store.fontSize).toBe(24); expect(patch).toHaveBeenCalledExactlyOnceWith({ 'reader.theme': 'night' }); expect(store.dirty).toBe(false)
+  expect(store.theme).toBe('night'); expect(store.fontSize).toBe(24); expect(patch).toHaveBeenCalledExactlyOnceWith({ 'reader.theme': 'night' }, expect.any(AbortSignal)); expect(store.dirty).toBe(false)
   expect((await db.preferences.get('a'))?.values).toEqual({ theme: 'night', fontSize: 24 })
 })
 it('serializes rapid edits without allowing an old response to replace newer choices', async () => {
@@ -40,14 +40,14 @@ it('serializes rapid edits without allowing an old response to replace newer cho
   const patch = vi.spyOn(api, 'patchSettings').mockImplementationOnce(() => new Promise(resolve => { finish = resolve })).mockResolvedValueOnce({ 'reader.theme': 'green', 'reader.font_size': 26 })
   await store.initialize('a'); store.setTheme('night'); await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
   store.setTheme('green'); store.setFont(26); finish({ 'reader.theme': 'night' }); await store.sync()
-  expect(patch).toHaveBeenNthCalledWith(2, { 'reader.theme': 'green', 'reader.font_size': 26 }); expect(store.theme).toBe('green'); expect(store.fontSize).toBe(26); expect(store.dirty).toBe(false)
+  expect(patch).toHaveBeenNthCalledWith(2, { 'reader.theme': 'green', 'reader.font_size': 26 }, expect.any(AbortSignal)); expect(store.theme).toBe('green'); expect(store.fontSize).toBe(26); expect(store.dirty).toBe(false)
 })
 it('keeps offline changes in IndexedDB and retries after a reload without losing other keys', async () => {
   vi.spyOn(api, 'settings').mockResolvedValue({ 'reader.theme': 'day', 'reader.font_size': 20 })
   const patch = vi.spyOn(api, 'patchSettings').mockRejectedValueOnce(new TypeError('offline')).mockResolvedValueOnce({ 'reader.theme': 'day', 'reader.font_size': 28, 'other.value': true })
   await store.initialize('a'); store.setFont(28); await store.sync(); expect(store.dirty).toBe(true); expect(store.error).toContain('尚未同步')
   store.$dispose(); setActivePinia(createPinia()); store = useReaderConfig(); await store.initialize('a')
-  expect(store.fontSize).toBe(28); expect(store.theme).toBe('day'); expect(store.dirty).toBe(false); expect(patch).toHaveBeenLastCalledWith({ 'reader.font_size': 28 })
+  expect(store.fontSize).toBe(28); expect(store.theme).toBe('day'); expect(store.dirty).toBe(false); expect(patch).toHaveBeenLastCalledWith({ 'reader.font_size': 28 }, expect.any(AbortSignal))
 })
 it('ignores late reads and writes after account changes and clears cached settings on logout', async () => {
   let read!: (v: Model<'Settings'>) => void
@@ -63,5 +63,40 @@ it('restores defaults by deleting only reader keys, and allows retry of a failed
   vi.spyOn(api, 'settings').mockRejectedValueOnce(new TypeError('offline')).mockResolvedValueOnce({ 'reader.theme': 'night', 'reader.font_size': 30 })
   await store.initialize('a'); expect(store.error).toContain('尚未同步'); await store.retry(); expect(store.theme).toBe('night')
   const patch = vi.spyOn(api, 'patchSettings').mockResolvedValue({ 'other.value': 7 })
-  store.restoreDefaults(); await store.sync(); expect(patch).toHaveBeenCalledExactlyOnceWith({ 'reader.theme': null, 'reader.font_size': null }); expect(store.fontSize).toBe(20); expect(store.theme).toBe('paper')
+  store.restoreDefaults(); await store.sync(); expect(patch).toHaveBeenCalledExactlyOnceWith({ 'reader.theme': null, 'reader.font_size': null }, expect.any(AbortSignal)); expect(store.fontSize).toBe(20); expect(store.theme).toBe('paper')
+})
+
+it('releases initialization on a stalled settings read and ignores its late result', async () => {
+  await db.preferences.put({ owner: 'a', values: { theme: 'green', fontSize: 24 }, pending: {} })
+  let finish!: (value: Model<'Settings'>) => void
+  const read = vi.spyOn(api, 'settings').mockImplementationOnce(() => new Promise(resolve => { finish = resolve })).mockResolvedValueOnce({ 'reader.theme': 'night' })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const loading = store.initialize('a')
+  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1))
+  await vi.advanceTimersByTimeAsync(15_000); await loading
+  expect(read.mock.calls[0]![0]!.aborted).toBe(true)
+  expect(store.loading).toBe(false); expect(store.error).toContain('超时'); expect(store.theme).toBe('green')
+  finish({ 'reader.theme': 'day' }); await Promise.resolve()
+  expect(store.theme).toBe('green')
+  vi.useRealTimers(); await store.retry(); expect(store.theme).toBe('night'); expect(store.error).toBe('')
+})
+
+it('retains a timed-out settings patch and retries the latest local choice explicitly', async () => {
+  vi.spyOn(api, 'settings').mockResolvedValue({})
+  await store.initialize('a')
+  let finish!: (value: Model<'Settings'>) => void
+  const patch = vi.spyOn(api, 'patchSettings').mockImplementationOnce(() => new Promise(resolve => { finish = resolve })).mockResolvedValueOnce({ 'reader.theme': 'green' })
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  store.setTheme('night')
+  await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
+  const saving = store.sync()
+  await vi.advanceTimersByTimeAsync(15_000); await saving
+  expect(patch.mock.calls[0]![1]!.aborted).toBe(true)
+  expect(store.saving).toBe(false); expect(store.dirty).toBe(true); expect(store.error).toContain('超时')
+  expect((await db.preferences.get('a'))?.pending).toEqual({ 'reader.theme': 'night' })
+  expect(patch).toHaveBeenCalledTimes(1)
+  finish({ 'reader.theme': 'day' }); await Promise.resolve(); expect(store.theme).toBe('night')
+  vi.useRealTimers(); store.setTheme('green'); await store.sync()
+  expect(store.theme).toBe('green'); expect(store.dirty).toBe(false); expect(store.error).toBe('')
+  expect(patch).toHaveBeenLastCalledWith({ 'reader.theme': 'green' }, expect.any(AbortSignal))
 })

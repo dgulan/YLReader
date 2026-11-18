@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -46,7 +47,10 @@ func (s *Server) RefreshToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Logout(w http.ResponseWriter, r *http.Request) {
 	var req RefreshRequest
 	// 允许空 body：无 refresh token 也返回 204。
-	_ = decodeJSON(w, r, &req)
+	if err := decodeJSON(w, r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+		return
+	}
 	if err := s.Auth.Logout(r.Context(), req.RefreshToken); err != nil {
 		writeError(w, r, err)
 		return
@@ -87,17 +91,17 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxUserID, uid)
+		if user, ok := r.Context().Value(ctxAuditUser).(*auditUser); ok {
+			user.id = uid
+		}
 		ctx = context.WithValue(ctx, ctxTokenVersion, tv)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func isPublicPath(path string) bool {
-	switch {
-	case strings.HasSuffix(path, "/auth/login"),
-		strings.HasSuffix(path, "/auth/refresh"),
-		strings.HasSuffix(path, "/healthz"),
-		strings.HasSuffix(path, "/readyz"):
+	switch path {
+	case "/api/v1/auth/login", "/api/v1/auth/refresh", "/healthz", "/readyz", "/api/v1/healthz", "/api/v1/readyz":
 		return true
 	}
 	return false
@@ -136,7 +140,32 @@ func toAPIUser(u *service.User) User {
 }
 
 // decodeJSON 解析请求体 JSON，限制大小。
-func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	body := http.MaxBytesReader(w, r.Body, maxJSONBody)
-	return json.NewDecoder(body).Decode(v)
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any, required ...string) error {
+	return decodeBody(http.MaxBytesReader(w, r.Body, maxJSONBody), v, required...)
+}
+
+func decodeBody(body io.Reader, v any, required ...string) error {
+	decoder := json.NewDecoder(body)
+	var raw json.RawMessage
+	if err := decoder.Decode(&raw); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return errors.New("invalid trailing JSON")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return errors.New("expected JSON object")
+	}
+	for _, key := range required {
+		value, ok := fields[key]
+		if !ok || string(value) == "null" {
+			return errors.New("missing required field")
+		}
+	}
+	return json.Unmarshal(raw, v)
 }

@@ -9,11 +9,11 @@ export function cacheRequest(first: number, last: number, total: number, source:
   return { source_id: source, from_chapter: first - 1, to_chapter: last - 1 }
 }
 export function useCacheTask(bookId: Ref<string>) {
-  const owner = getSession()!.user.id
+  const owner = getSession()?.user.id ?? ''
   const job = ref<Model<'Job'>>(), busy = ref(false), error = ref(''), notice = ref(''), missing = ref(false)
   const active = computed(() => !missing.value && isActiveJob(job.value))
   let generation = 0, timer: ReturnType<typeof setTimeout> | undefined
-  const valid = (token: number) => generation === token && getSession()?.user.id === owner
+  const valid = (token: number) => Boolean(owner) && generation === token && getSession()?.user.id === owner
   function stop() { clearTimeout(timer) }
   function reset() { stop(); generation++; job.value = undefined; busy.value = false; error.value = ''; notice.value = ''; missing.value = false }
   watch(bookId, reset, { flush: 'sync' }); onScopeDispose(reset)
@@ -24,7 +24,7 @@ export function useCacheTask(bookId: Ref<string>) {
   }
   function schedule() { stop(); if (active.value && !error.value) timer = setTimeout(() => { void refresh() }, 2000) }
   async function refresh() {
-    if (!job.value || busy.value) return
+    if (!valid(generation) || !job.value || busy.value) return
     const token = generation, id = job.value.id
     stop(); busy.value = true; error.value = ''
     try { const result = await api.job(id); if (!valid(token)) return; job.value = result; missing.value = false; await remember(token) }
@@ -32,6 +32,7 @@ export function useCacheTask(bookId: Ref<string>) {
     finally { if (valid(token)) { busy.value = false; schedule() } }
   }
   async function load() {
+    if (!valid(generation)) return
     reset(); const token = generation; busy.value = true
     try { const row = await db.jobs.get(bookKey(owner, bookId.value)); if (!valid(token)) return; job.value = row?.job }
     catch { if (valid(token)) notice.value = '无法读取本机任务记录，新任务仍可提交' }
@@ -39,7 +40,7 @@ export function useCacheTask(bookId: Ref<string>) {
     if (valid(token) && job.value) await refresh()
   }
   async function submit(data: Model<'CacheBookRequest'>) {
-    if (busy.value || active.value) return
+    if (!valid(generation) || busy.value || active.value) return
     const token = generation
     stop(); busy.value = true; error.value = ''; notice.value = ''
     try { const result = await api.cacheBook(bookId.value, data); if (!valid(token)) return; job.value = result; missing.value = false; await remember(token) }
@@ -47,7 +48,7 @@ export function useCacheTask(bookId: Ref<string>) {
     finally { if (valid(token)) { busy.value = false; schedule() } }
   }
   async function cancel() {
-    if (!job.value || !active.value || busy.value) return
+    if (!valid(generation) || !job.value || !active.value || busy.value) return
     const token = generation, id = job.value.id
     stop(); busy.value = true; error.value = ''; notice.value = ''
     try { await api.cancelJob(id); if (valid(token)) notice.value = '取消请求已发送，正在核对任务状态' }

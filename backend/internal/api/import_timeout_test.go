@@ -37,6 +37,7 @@ func TestImportBudgetExpiration(t *testing.T) {
 	}
 }
 func TestImportDefaultBudgetAndNonTimeoutError(t *testing.T) {
+	t.Setenv("TMP", t.TempDir())
 	s := NewServer(Deps{Import: importFunc(func(ctx context.Context) (*service.ImportBookResult, error) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Error("missing deadline")
@@ -53,6 +54,7 @@ func TestImportDefaultBudgetAndNonTimeoutError(t *testing.T) {
 	}
 }
 func TestClientCancellationIsNotImportBudgetExpiration(t *testing.T) {
+	t.Setenv("TMP", t.TempDir())
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	s := NewServer(Deps{Import: importFunc(func(ctx context.Context) (*service.ImportBookResult, error) { return nil, ctx.Err() })})

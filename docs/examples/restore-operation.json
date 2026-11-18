@@ -1,0 +1,16 @@
+{
+  "operation_format": "ylreader-restore-operation",
+  "operation_version": 1,
+  "operation_id": "40000000-0000-4000-8000-000000000001",
+  "backup_id": "30000000-0000-4000-8000-000000000001",
+  "plan_digest": "14264badef24a72073515503de99a6c1df94ff373497a1244ab2c5ae61f83fe8",
+  "generation": 1,
+  "phase": "planned",
+  "created_at": "2026-11-13T08:00:00Z",
+  "updated_at": "2026-11-13T08:00:00Z",
+  "heartbeat_at": "2026-11-13T08:00:00Z",
+  "finished_at": null,
+  "failure_code": null,
+  "cancel_requested": false,
+  "owner_id": "50000000-0000-4000-8000-000000000001"
+}

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import 'element-plus/dist/index.css'
 import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElForm, ElFormItem, ElInput, ElButton, ElAlert } from 'element-plus'

@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, onScopeDispose, ref } from 'vue'
 import { api } from '@/api/reader'
 import { errorText, getSession, sessionEvents } from '@/api/client'
+import { RequestDeadlineError, withDeadline } from '@/api/deadline'
 import { db } from '@/db/chapters'
 import { defaultPreferences, parsePreferences, type PreferencePatch, type ReaderTheme } from './readerPreferences'
 export const useReaderConfig = defineStore('readerConfig', () => {
@@ -15,7 +16,7 @@ export const useReaderConfig = defineStore('readerConfig', () => {
     try { await db.preferences.put({ owner, values: { ...values.value }, pending: { ...pending.value } }) }
     catch { if (same(token)) error.value = '本机设置缓存不可用，请保持联网并重试同步' }
   }
-  function report(e: unknown) { error.value = e instanceof TypeError ? '当前无法连接，阅读设置尚未同步' : errorText(e) }
+  function report(e: unknown) { error.value = e instanceof RequestDeadlineError ? '阅读设置同步等待超时，本机设置已保留，请重试同步' : e instanceof TypeError ? '当前无法连接，阅读设置尚未同步' : errorText(e) }
   async function sync() {
     if (task) return task
     if (!owner || loading.value || !same(generation)) return
@@ -26,7 +27,7 @@ export const useReaderConfig = defineStore('readerConfig', () => {
         await cache(token)
         while (same(token) && dirty.value) {
           const sent = { ...pending.value }
-          const result = await api.patchSettings(sent)
+          const result = await withDeadline(signal => api.patchSettings(sent, signal))
           if (!same(token)) return
           const next = { ...pending.value }
           for (const key of Object.keys(sent) as (keyof PreferencePatch)[]) if (next[key] === sent[key]) delete next[key]
@@ -54,7 +55,7 @@ export const useReaderConfig = defineStore('readerConfig', () => {
           if (local.pending?.['reader.font_size'] === null || local.pending?.['reader.font_size'] === cached.fontSize) patch['reader.font_size'] = local.pending['reader.font_size']
           pending.value = patch
         }
-        const remote = await api.settings()
+        const remote = await withDeadline(signal => api.settings(signal))
         if (!same(token)) return
         values.value = parsePreferences({ ...remote, ...pending.value })
         await cache(token)

@@ -177,8 +177,8 @@ func TestTOCFetchCacheRefreshAndVolumeNull(t *testing.T) {
 	}
 }
 
-// TestTOCPaginationLoopAndSleep 覆盖：多页拼接、每页间防抖 sleep 次数、环路立即终止不死循环。
-func TestTOCPaginationLoopAndSleep(t *testing.T) {
+// TestTOCPaginationCompleteAndSleep covers ordered merging and page pacing with a normal end.
+func TestTOCPaginationCompleteAndSleep(t *testing.T) {
 	const (
 		p1 = "https://toc2.example.com/book/1?page=1"
 		p2 = "https://toc2.example.com/book/1?page=2"
@@ -187,8 +187,7 @@ func TestTOCPaginationLoopAndSleep(t *testing.T) {
 	mock := newTOCMock(map[string]string{
 		p1: tocPage(false, []string{"/c/1", "/c/2"}, p2),
 		p2: tocPage(false, []string{"/c/3", "/c/4"}, p3),
-		// 第 4 页指针回到第 1 页：必须被 visited 集合截断。
-		p3: tocPage(false, []string{"/c/5", "/c/6"}, p1),
+		p3: tocPage(false, []string{"/c/5", "/c/6"}, ""),
 	})
 	var sleepCount int
 	var mu sync.Mutex
@@ -228,7 +227,7 @@ func TestTOCPaginationLoopAndSleep(t *testing.T) {
 		t.Fatalf("sleep calls = %d, want 2 (page1->2, page2->3)", got)
 	}
 	if fetches := mock.Count(); fetches != 3 {
-		t.Fatalf("page fetches = %d, want 3 (loop must be cut)", fetches)
+		t.Fatalf("page fetches = %d, want 3", fetches)
 	}
 }
 

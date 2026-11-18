@@ -3,3 +3,5 @@ docs/**/*.md text eol=lf
 docs/*.md text eol=lf
 docs/openapi.yaml text eol=lf
 backend/internal/migration/*.sql text eol=lf
+backend/internal/backup/archive_inventory_v1.txt text eol=lf
+backend/internal/backup/archive_columns_v1.txt text eol=lf

@@ -64,6 +64,13 @@ func mapErrorToCode(err error) (int, string) {
 
 // messageForCode 返回安全的简短文案，绝不暴露 err.Error()（防止泄漏目标站 URL
 // 或内部 IP 轨迹）。/search 的 failures 与顶层错误响应共用该映射。
+func sourceFailureMessage(err error, code string) string {
+	if code == "source_request_failed" && errors.Is(err, fetcher.ErrChallengeRequired) {
+		return "书源站点要求浏览器验证"
+	}
+	return messageForCode(code)
+}
+
 func messageForCode(code string) string {
 	switch code {
 	case "validation_error":

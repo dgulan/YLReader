@@ -86,7 +86,18 @@ func up(ctx context.Context, db Beginner, sql string) error {
 		return err
 	}
 	defer tx.Rollback(context.Background())
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(7931461250613)`); err != nil {
+	if err = upInTransaction(ctx, tx, sql); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// UpInTransaction installs only the embedded trusted baseline in a caller-owned
+// transaction. It neither commits nor rolls back that transaction.
+func UpInTransaction(ctx context.Context, tx pgx.Tx) error { return upInTransaction(ctx, tx, baseline) }
+
+func upInTransaction(ctx context.Context, tx pgx.Tx, sql string) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(7931461250613)`); err != nil {
 		return err
 	}
 	entries, err := Status(ctx, tx)
@@ -105,5 +116,5 @@ func up(ctx context.Context, db Beginner, sql string) error {
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }

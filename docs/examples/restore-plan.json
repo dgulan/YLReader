@@ -1,0 +1,39 @@
+{
+  "plan_format": "ylreader-restore-plan",
+  "plan_version": 1,
+  "operation_id": "40000000-0000-4000-8000-000000000001",
+  "backup_id": "30000000-0000-4000-8000-000000000001",
+  "package_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "schema_version": 1,
+  "migration_checksum": "7e275f0f5dc37fa7b0834bd3d80da7c192f7bc7b854041f2f1e99b0cae3c3e51",
+  "source_instance_id": "10000000-0000-4000-8000-000000000001",
+  "target_instance_id": "20000000-0000-4000-8000-000000000001",
+  "target_database": {
+    "host": "127.0.0.1",
+    "port": 55439,
+    "database": "yreader_a1_iso_prototype"
+  },
+  "target_storage_fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+  "control_fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+  "temporary_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+  "limits": {
+    "max_ciphertext_bytes": 107374182400,
+    "max_plaintext_bytes": 214748364800,
+    "max_manifest_bytes": 268435456,
+    "max_objects": 1000000,
+    "max_object_bytes": 10737418240
+  },
+  "created_at": "2026-11-13T08:00:00Z",
+  "expires_at": "2026-11-13T08:15:00Z",
+  "steps": [
+    "verify_package",
+    "verify_target",
+    "stage_objects",
+    "load_data",
+    "validate",
+    "revoke_sessions",
+    "write_report"
+  ],
+  "plan_digest": "14264badef24a72073515503de99a6c1df94ff373497a1244ab2c5ae61f83fe8"
+}

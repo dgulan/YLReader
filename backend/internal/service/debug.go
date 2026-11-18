@@ -49,6 +49,7 @@ func (s *DebugService) Debug(
 	if err != nil {
 		return "", nil, err
 	}
+	ctx = sourceFetchContext(ctx, src)
 
 	input, err := s.resolveInput(ctx, src, rawURL, variables)
 	if err != nil {

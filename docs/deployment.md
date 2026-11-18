@@ -8,7 +8,9 @@
 
 执行 `docker compose config --quiet`，然后 `docker compose up --build -d`。PostgreSQL **仅在空数据卷首次启动时**执行 `docs/schema.sql`；应用在数据库就绪且用户表为空时创建初始管理员。已有用户时不会新增种子用户或覆盖密码。
 
-访问 `http://localhost:5173`，前端通过 Nginx 将 `/api/` 代理到后端。前端路由刷新回退到 `index.html`。后端端口 8080 保留供开发调试；该编排为本地部署，公网部署需另配 TLS 与访问限制。
+访问 `http://localhost:5173`，前端通过 Nginx 将 `/api/` 代理到后端。前端路由刷新回退到 `index.html`。前端 5173 和开发调试用后端 8080 仅绑定宿主 IPv4 回环地址 `127.0.0.1`；Redis 与 PostgreSQL 不发布宿主端口，容器间仍按服务名连接。宿主 `localhost` 若优先解析到 IPv6，请显式访问 `127.0.0.1`。
+
+该编排默认只供本机使用。远程试用应通过受控的 TLS 反代或 SSH 隧道连接前端回环端口；不要直接将 Redis 或后端运维端口改为监听所有宿主接口。`/metrics` 只应开放给可信运维入口，pprof 保持默认关闭。此配置变更只有在后续明确部署后才会影响运行中的容器；仅执行 config 校验不会改变现有服务。
 
 正文缓存和健康检查共享 `REDIS_URL=redis://redis:6379/0` 配置与客户端，支持用户/密码、数据库编号和 `rediss://` TLS。旧 `REDIS_ADDR=host:port` 作为无认证连接兼容入口保留；同时提供时必须指向同一地址，否则启动失败。都不配置时使用内存缓存，`/readyz` 省略 Redis，不伪造 `ok`。配置后认证失败、非 PONG 响应和连接失败均使就绪返回 503。文件卷由镜像中的 UID 10001 写入。
 
