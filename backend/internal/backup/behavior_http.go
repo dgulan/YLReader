@@ -54,14 +54,34 @@ type behaviorHTTPKnown struct {
 	started         time.Time
 	attempted       bool
 }
+type oldTokenProbeWitness struct {
+	plan, consent string
+	records       [3]string
+	database      string
+	runtime       string
+	certificate   string
+	observedAt    time.Time
+	tokenExpires  time.Time
+	confirmed     bool
+}
+
+func (oldTokenProbeWitness) Format(s fmt.State, _ rune) {
+	io.WriteString(s, "[private old-token probe witness]")
+}
+func (oldTokenProbeWitness) MarshalJSON() ([]byte, error) { return nil, errBehaviorHTTP }
+
 type behaviorHTTPSecrets struct {
-	key             []byte
-	known           map[uuid.UUID]behaviorHTTPKnown
-	loginTried      map[uuid.UUID]bool
-	completed       map[uuid.UUID]behaviorSessionResponse
-	oldAccessTried  map[uuid.UUID]bool
-	oldRefreshTried map[uuid.UUID]bool
-	closed          bool
+	key               []byte
+	sourceKey         []byte
+	known             map[uuid.UUID]behaviorHTTPKnown
+	loginTried        map[uuid.UUID]bool
+	completed         map[uuid.UUID]behaviorSessionResponse
+	oldAccessTried    map[uuid.UUID]bool
+	oldRefreshTried   map[uuid.UUID]bool
+	oldAccessWitness  map[uuid.UUID]oldTokenProbeWitness
+	oldRefreshWitness map[uuid.UUID]oldTokenProbeWitness
+	oldTokenDrifted   bool
+	closed            bool
 }
 type behaviorHTTPTransport struct {
 	mu                 *sync.Mutex
@@ -141,7 +161,7 @@ func newBehaviorHTTPTransport(c behaviorHTTPConfig) (*behaviorHTTPTransport, err
 		return nil
 	}}
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &behaviorHTTPTransport{mu: &sync.Mutex{}, client: client, endpoint: strings.TrimSuffix(u.String(), "/"), binding: c.Binding, certificateSHA: hex.EncodeToString(expected[:]), databaseURL: c.DatabaseURL, source: c.Source, target: c.Target, users: users, clock: clock, secrets: &behaviorHTTPSecrets{key: append([]byte(nil), c.JWT...), known: map[uuid.UUID]behaviorHTTPKnown{}, loginTried: map[uuid.UUID]bool{}, completed: map[uuid.UUID]behaviorSessionResponse{}, oldAccessTried: map[uuid.UUID]bool{}, oldRefreshTried: map[uuid.UUID]bool{}}}, nil
+	return &behaviorHTTPTransport{mu: &sync.Mutex{}, client: client, endpoint: strings.TrimSuffix(u.String(), "/"), binding: c.Binding, certificateSHA: hex.EncodeToString(expected[:]), databaseURL: c.DatabaseURL, source: c.Source, target: c.Target, users: users, clock: clock, secrets: &behaviorHTTPSecrets{key: append([]byte(nil), c.JWT...), known: map[uuid.UUID]behaviorHTTPKnown{}, loginTried: map[uuid.UUID]bool{}, completed: map[uuid.UUID]behaviorSessionResponse{}, oldAccessTried: map[uuid.UUID]bool{}, oldRefreshTried: map[uuid.UUID]bool{}, oldAccessWitness: map[uuid.UUID]oldTokenProbeWitness{}, oldRefreshWitness: map[uuid.UUID]oldTokenProbeWitness{}}}, nil
 }
 func (t *behaviorHTTPTransport) Close() {
 	if t == nil {
@@ -151,11 +171,15 @@ func (t *behaviorHTTPTransport) Close() {
 	defer t.mu.Unlock()
 	t.secrets.closed = true
 	clear(t.secrets.key)
+	clear(t.secrets.sourceKey)
+	t.secrets.sourceKey = nil
 	clear(t.secrets.known)
 	clear(t.secrets.loginTried)
 	clear(t.secrets.completed)
 	clear(t.secrets.oldAccessTried)
 	clear(t.secrets.oldRefreshTried)
+	clear(t.secrets.oldAccessWitness)
+	clear(t.secrets.oldRefreshWitness)
 	t.client.CloseIdleConnections()
 }
 
@@ -602,11 +626,9 @@ func (t *behaviorHTTPTransport) observeOldRefreshSessions(ctx context.Context, u
 	return snap, nil
 }
 
-// Explicit internal observation only. Never probe while an active or
-// unconfirmed login session exists for any whitelisted user.
-func (t *behaviorHTTPTransport) rejectOldRefresh(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, refresh string) error {
-	if t == nil || ctx == nil || ctx.Err() != nil || proof == nil || proof.guard == nil || user == uuid.Nil || !validSHA(refresh) {
-		return errBehaviorHTTP
+func checkGuardProof(proof *verifiedBehaviorAccounts, targetID string) (storage.ConditionalFiles, Plan, error) {
+	if proof == nil || proof.guard == nil {
+		return nil, Plan{}, errBehaviorHTTP
 	}
 	proof.guard.mu.Lock()
 	guardOpen := proof.guard.locations != nil
@@ -616,32 +638,15 @@ func (t *behaviorHTTPTransport) rejectOldRefresh(ctx context.Context, proof *ver
 		controlFiles = proof.guard.locations.files[3]
 	}
 	proof.guard.mu.Unlock()
-	if !guardOpen || guardPlan.Digest != proof.plan || guardPlan.TargetID != t.binding.TargetID {
-		return errBehaviorHTTP
+	if !guardOpen || guardPlan.Digest != proof.plan || guardPlan.TargetID != targetID {
+		return nil, Plan{}, errBehaviorHTTP
 	}
-	if controlFiles != nil {
-		snap, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
-		if e != nil || snap.tokens != proof.records {
-			return errBehaviorHTTP
-		}
-	}
-	if e := t.rejectOldRefreshLocked(ctx, proof, user, refresh); e != nil {
-		return e
-	}
-	if controlFiles != nil {
-		after, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
-		if e != nil || after.tokens != proof.records {
-			return errBehaviorHTTP
-		}
-	}
-	return nil
+	return controlFiles, guardPlan, nil
 }
 
-func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, refresh string) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
+func (t *behaviorHTTPTransport) checkProofWhitelistLocked(proof *verifiedBehaviorAccounts, user uuid.UUID) error {
 	now := t.clock()
-	if t.secrets == nil || t.secrets.closed || t.secrets.oldRefreshTried[user] || !databasePinsSeparate(t.source, t.target) || proof.database != t.binding.Database || proof.runtime != t.binding.Runtime || !validStamp(now) || now.Before(proof.checked) || now.Sub(proof.checked) > 20*time.Second || !now.Before(proof.expires) || len(proof.users) == 0 || len(proof.users) != len(t.users) {
+	if t.secrets == nil || t.secrets.closed || !databasePinsSeparate(t.source, t.target) || proof.database != t.binding.Database || proof.runtime != t.binding.Runtime || !validStamp(now) || now.Before(proof.checked) || now.Sub(proof.checked) > 20*time.Second || !now.Before(proof.expires) || len(proof.users) == 0 || len(proof.users) != len(t.users) {
 		return errBehaviorHTTP
 	}
 	seenUsers := make(map[uuid.UUID]bool, len(proof.users))
@@ -651,8 +656,136 @@ func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proo
 		}
 		seenUsers[u] = true
 	}
-	if !seenUsers[user] || len(t.secrets.known) != 0 {
+	if !seenUsers[user] {
 		return errBehaviorHTTP
+	}
+	return nil
+}
+
+func parseOldAccessExpiry(raw string, sourceKey []byte, user uuid.UUID, currentVersion int, now time.Time) (time.Time, error) {
+	if checkOldBehaviorAccessAt(raw, sourceKey, user, currentVersion, now) != nil {
+		return time.Time{}, errBehaviorHTTP
+	}
+	var claims behaviorClaims
+	parsed, e := jwt.ParseWithClaims(raw, &claims, func(tok *jwt.Token) (any, error) {
+		if tok.Method != jwt.SigningMethodHS256 {
+			return nil, errBehaviorHTTP
+		}
+		return sourceKey, nil
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithTimeFunc(func() time.Time { return now }))
+	if e != nil || parsed == nil || !parsed.Valid || claims.ExpiresAt == nil {
+		return time.Time{}, errBehaviorHTTP
+	}
+	return claims.ExpiresAt.Time.UTC(), nil
+}
+
+// Explicit internal observation bound to a live verifiedBehaviorAccounts proof.
+// Records the access rejection witness only on confirmed 401 and stable control state.
+func (t *behaviorHTTPTransport) confirmOldAccess(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, currentVersion int, access string, sourceKey []byte) error {
+	if t == nil || ctx == nil || ctx.Err() != nil || user == uuid.Nil || len(sourceKey) < 32 || len(sourceKey) > 4096 {
+		return errBehaviorHTTP
+	}
+	controlFiles, guardPlan, e := checkGuardProof(proof, t.binding.TargetID)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	t.mu.Lock()
+	if e := t.checkProofWhitelistLocked(proof, user); e != nil || t.secrets.oldAccessTried[user] || bytes.Equal(sourceKey, t.secrets.key) || (len(t.secrets.sourceKey) > 0 && !bytes.Equal(t.secrets.sourceKey, sourceKey)) {
+		t.mu.Unlock()
+		return errBehaviorHTTP
+	}
+	tokenExp, e := parseOldAccessExpiry(access, sourceKey, user, currentVersion, t.clock())
+	t.mu.Unlock()
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	if controlFiles != nil {
+		snap, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
+		if e != nil || snap.tokens != proof.records {
+			return errBehaviorHTTP
+		}
+	}
+	if e := t.rejectOldAccess(ctx, user, currentVersion, access, sourceKey); e != nil {
+		return e
+	}
+	if controlFiles != nil {
+		after, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
+		if e != nil || after.tokens != proof.records {
+			return errBehaviorHTTP
+		}
+	}
+	t.mu.Lock()
+	if t.secrets == nil || t.secrets.closed {
+		t.mu.Unlock()
+		return errBehaviorHTTP
+	}
+	if len(t.secrets.sourceKey) > 0 && !bytes.Equal(t.secrets.sourceKey, sourceKey) {
+		t.secrets.oldTokenDrifted = true
+		t.mu.Unlock()
+		return errBehaviorHTTP
+	}
+	if len(t.secrets.sourceKey) == 0 {
+		t.secrets.sourceKey = append([]byte(nil), sourceKey...)
+	}
+	w := oldTokenProbeWitness{plan: proof.plan, consent: proof.consent, records: proof.records, database: proof.database, runtime: proof.runtime, certificate: t.certificateSHA, observedAt: t.clock(), tokenExpires: tokenExp, confirmed: true}
+	if t.secrets.oldAccessWitness == nil {
+		t.secrets.oldAccessWitness = map[uuid.UUID]oldTokenProbeWitness{}
+	}
+	t.secrets.oldAccessWitness[user] = w
+	targetKey := append([]byte(nil), t.secrets.key...)
+	t.mu.Unlock()
+	defer clear(targetKey)
+	proof.guard.attachOldTokenWitness(user, true, w, targetKey, sourceKey)
+	return nil
+}
+
+// Explicit internal observation only. Never probe while an active or
+// unconfirmed login session exists for any whitelisted user.
+func (t *behaviorHTTPTransport) rejectOldRefresh(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, refresh string) error {
+	if t == nil || ctx == nil || ctx.Err() != nil || user == uuid.Nil || !validSHA(refresh) {
+		return errBehaviorHTTP
+	}
+	controlFiles, guardPlan, e := checkGuardProof(proof, t.binding.TargetID)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	if controlFiles != nil {
+		snap, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
+		if e != nil || snap.tokens != proof.records {
+			return errBehaviorHTTP
+		}
+	}
+	w, e := t.rejectOldRefreshLocked(ctx, proof, user, refresh)
+	if e != nil {
+		return e
+	}
+	if controlFiles != nil {
+		after, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
+		if e != nil || after.tokens != proof.records {
+			return errBehaviorHTTP
+		}
+	}
+	t.mu.Lock()
+	if t.secrets == nil || t.secrets.closed {
+		t.mu.Unlock()
+		return errBehaviorHTTP
+	}
+	if t.secrets.oldRefreshWitness == nil {
+		t.secrets.oldRefreshWitness = map[uuid.UUID]oldTokenProbeWitness{}
+	}
+	t.secrets.oldRefreshWitness[user] = w
+	targetKey := append([]byte(nil), t.secrets.key...)
+	t.mu.Unlock()
+	defer clear(targetKey)
+	proof.guard.attachOldTokenWitness(user, false, w, targetKey, nil)
+	return nil
+}
+
+func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, refresh string) (oldTokenProbeWitness, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.checkProofWhitelistLocked(proof, user) != nil || t.secrets.oldRefreshTried[user] || len(t.secrets.known) != 0 {
+		return oldTokenProbeWitness{}, errBehaviorHTTP
 	}
 	if len(t.secrets.loginTried) != 0 {
 		completedUsers := make(map[uuid.UUID]bool, len(t.secrets.completed))
@@ -661,7 +794,7 @@ func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proo
 		}
 		for uid, tried := range t.secrets.loginTried {
 			if tried && !completedUsers[uid] {
-				return errBehaviorHTTP
+				return oldTokenProbeWitness{}, errBehaviorHTTP
 			}
 		}
 	}
@@ -671,7 +804,7 @@ func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proo
 	t.secrets.oldRefreshTried[user] = true
 	before, e := t.observeOldRefresh(ctx, user, refresh)
 	if e != nil || !before.targetFound || !before.targetRevoked || !before.targetExpires.After(t.clock()) || before.activeForUser != 0 || before.revoked != before.total || !validSHA(before.digest) {
-		return errBehaviorHTTP
+		return oldTokenProbeWitness{}, errBehaviorHTTP
 	}
 	body, _ := json.Marshal(struct {
 		Refresh string `json:"refresh_token"`
@@ -680,11 +813,39 @@ func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proo
 	data, e := t.post(ctx, "/api/v1/auth/refresh", body, "", http.StatusUnauthorized)
 	defer clear(data)
 	if e != nil || verifyBehaviorUnauthorizedError(data) != nil || ctx.Err() != nil {
-		return errBehaviorHTTP
+		return oldTokenProbeWitness{}, errBehaviorHTTP
 	}
 	after, e := t.observeOldRefresh(ctx, user, refresh)
 	if e != nil || !after.targetFound || !after.targetRevoked || !after.targetExpires.After(t.clock()) || after.activeForUser != 0 || after.revoked != after.total || after.total != before.total || after.revoked != before.revoked || after.digest != before.digest || ctx.Err() != nil {
-		return errBehaviorHTTP
+		return oldTokenProbeWitness{}, errBehaviorHTTP
 	}
-	return nil
+	return oldTokenProbeWitness{plan: proof.plan, consent: proof.consent, records: proof.records, database: proof.database, runtime: proof.runtime, certificate: t.certificateSHA, observedAt: t.clock(), tokenExpires: after.targetExpires.UTC(), confirmed: true}, nil
+}
+
+func (t *behaviorHTTPTransport) oldTokenWitnessSnapshot(sourceKey, targetKey []byte) confirmedOldTokenSet {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := confirmedOldTokenSet{
+		access:  map[uuid.UUID]oldTokenProbeWitness{},
+		refresh: map[uuid.UUID]oldTokenProbeWitness{},
+	}
+	if t.secrets == nil || t.secrets.closed || t.secrets.oldTokenDrifted || !bytes.Equal(t.secrets.key, targetKey) {
+		out.drifted = true
+		return out
+	}
+	if len(t.secrets.sourceKey) > 0 && !bytes.Equal(t.secrets.sourceKey, sourceKey) {
+		out.drifted = true
+		return out
+	}
+	for u, w := range t.secrets.oldAccessWitness {
+		if w.confirmed {
+			out.access[u] = w
+		}
+	}
+	for u, w := range t.secrets.oldRefreshWitness {
+		if w.confirmed {
+			out.refresh[u] = w
+		}
+	}
+	return out
 }

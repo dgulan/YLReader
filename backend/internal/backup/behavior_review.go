@@ -15,15 +15,23 @@ import (
 
 var errBehaviorReview = errors.New("backup: bound HTTPS account review unavailable or unconfirmed")
 
+type confirmedOldTokenSet struct {
+	access  map[uuid.UUID]oldTokenProbeWitness
+	refresh map[uuid.UUID]oldTokenProbeWitness
+	drifted bool
+}
+
 type confirmedBehaviorRun struct {
 	plan, consent, ledger, certificate string
 	identity                           handoverTargetIdentity
 	records                            [3]string
 	sessions                           []behaviorSessionResponse
+	windowStart                        time.Time
 	started, finished, expires         time.Time
 	reviewStarted, writeAttempted      bool
 	reviewSHA                          string
 	sourceJWT, targetJWT               []byte
+	oldTokens                          confirmedOldTokenSet
 }
 
 func (*confirmedBehaviorRun) MarshalJSON() ([]byte, error) { return nil, errBehaviorReview }
@@ -48,7 +56,7 @@ func behaviorLedgerDigest(s behaviorLedgerSnapshot) string {
 	return digestBytes(data)
 }
 
-func captureConfirmedBehaviorRun(ctx context.Context, files RestoreRecordReader, p Plan, proof *verifiedBehaviorAccounts, transport *behaviorHTTPTransport, result behaviorDispatchObservation, targetJWT []byte, now time.Time) (*confirmedBehaviorRun, error) {
+func captureConfirmedBehaviorRun(ctx context.Context, files RestoreRecordReader, p Plan, proof *verifiedBehaviorAccounts, transport *behaviorHTTPTransport, result behaviorDispatchObservation, sourceJWT, targetJWT []byte, now time.Time) (*confirmedBehaviorRun, error) {
 	if ctx == nil || proof == nil || transport == nil || !result.ResponsesObserved || len(result.Sessions) < 1 || len(result.Sessions) != len(proof.users) || !validSHA(proof.redis) {
 		return nil, errBehaviorReview
 	}
@@ -65,7 +73,50 @@ func captureConfirmedBehaviorRun(ctx context.Context, files RestoreRecordReader,
 			return nil, errBehaviorReview
 		}
 	}
-	return &confirmedBehaviorRun{plan: p.Digest, consent: proof.consent, ledger: behaviorLedgerDigest(s), certificate: certificate, identity: handoverTargetIdentity{proof.database, proof.runtime, proof.redis}, records: proof.records, sessions: append([]behaviorSessionResponse(nil), result.Sessions...), started: a.intent.Recorded, finished: now, expires: a.intent.Expires}, nil
+	oldTokens := transport.oldTokenWitnessSnapshot(sourceJWT, targetJWT)
+	return &confirmedBehaviorRun{plan: p.Digest, consent: proof.consent, ledger: behaviorLedgerDigest(s), certificate: certificate, identity: handoverTargetIdentity{proof.database, proof.runtime, proof.redis}, records: proof.records, sessions: append([]behaviorSessionResponse(nil), result.Sessions...), windowStart: a.intent.Issued, started: a.intent.Recorded, finished: now, expires: a.intent.Expires, oldTokens: oldTokens}, nil
+}
+
+func (g *restoreGuard) attachOldTokenWitness(user uuid.UUID, isAccess bool, w oldTokenProbeWitness, targetKey, sourceKey []byte) {
+	if g == nil || user == uuid.Nil || !w.confirmed {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	run := g.behaviorRun
+	if g.locations == nil || run == nil || run.reviewStarted || run.reviewSHA != "" || run.oldTokens.drifted {
+		return
+	}
+	if !bytes.Equal(run.targetJWT, targetKey) || (isAccess && (len(sourceKey) < 32 || !bytes.Equal(run.sourceJWT, sourceKey))) {
+		run.oldTokens.drifted = true
+		return
+	}
+	if w.plan != run.plan || w.consent != run.consent || w.records != run.records || w.database != run.identity.Database || w.runtime != run.identity.Runtime || w.certificate != run.certificate || !validStamp(w.observedAt) || !validStamp(w.tokenExpires) || w.observedAt.Before(run.windowStart) || !w.observedAt.Before(run.expires) {
+		run.oldTokens.drifted = true
+		return
+	}
+	found := false
+	for _, s := range run.sessions {
+		if s.UserID == user {
+			found = true
+			break
+		}
+	}
+	if !found {
+		run.oldTokens.drifted = true
+		return
+	}
+	if isAccess {
+		if run.oldTokens.access == nil {
+			run.oldTokens.access = map[uuid.UUID]oldTokenProbeWitness{}
+		}
+		run.oldTokens.access[user] = w
+		return
+	}
+	if run.oldTokens.refresh == nil {
+		run.oldTokens.refresh = map[uuid.UUID]oldTokenProbeWitness{}
+	}
+	run.oldTokens.refresh[user] = w
 }
 
 type boundBehaviorReview struct {
@@ -118,8 +169,14 @@ func (r boundBehaviorReview) validate() error {
 		return errBehaviorReview
 	}
 	for i, c := range r.Checks {
+		if i == 10 {
+			if c.ID != ids[i] || (c.Status != "unavailable" && c.Status != "pass") {
+				return errBehaviorReview
+			}
+			continue
+		}
 		want := "pass"
-		if i >= 10 {
+		if i >= 11 {
 			want = "unavailable"
 		}
 		if c.ID != ids[i] || c.Status != want {
@@ -138,6 +195,29 @@ func loadBoundBehaviorReview(reader io.Reader) (boundBehaviorReview, error) {
 		return boundBehaviorReview{}, errBehaviorReview
 	}
 	return r, nil
+}
+
+func oldTokenRejectionConfirmed(p Plan, run *confirmedBehaviorRun, s behaviorLedgerSnapshot, a behaviorLedgerAssessment, actual handoverTargetIdentity, now time.Time) bool {
+	if run == nil || run.oldTokens.drifted || len(a.intent.Users) == 0 || len(a.intent.Users) != len(run.sessions) || len(run.oldTokens.access) != len(a.intent.Users) || len(run.oldTokens.refresh) != len(a.intent.Users) {
+		return false
+	}
+	for _, uidStr := range a.intent.Users {
+		uid, e := uuid.Parse(uidStr)
+		if e != nil || uid == uuid.Nil {
+			return false
+		}
+		acc, okA := run.oldTokens.access[uid]
+		ref, okR := run.oldTokens.refresh[uid]
+		if !okA || !okR {
+			return false
+		}
+		for _, w := range []oldTokenProbeWitness{acc, ref} {
+			if !w.confirmed || w.plan != p.Digest || w.plan != run.plan || w.consent != a.intent.ConsentID || w.consent != run.consent || w.records != s.base.control.tokens || w.records != run.records || w.database != actual.Database || w.database != run.identity.Database || w.runtime != actual.Runtime || w.runtime != run.identity.Runtime || w.certificate != run.certificate || !validSHA(w.certificate) || !validStamp(w.observedAt) || !validStamp(w.tokenExpires) || w.observedAt.Before(a.intent.Issued) || !w.observedAt.Before(run.expires) || w.observedAt.After(now) || now.Sub(w.observedAt) > 5*time.Minute || !now.Before(w.tokenExpires) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func checkConfirmedBehaviorRun(p Plan, run *confirmedBehaviorRun, s behaviorLedgerSnapshot, a behaviorLedgerAssessment, now time.Time) error {
@@ -229,10 +309,13 @@ func (g *restoreGuard) collectBoundBehaviorReview(ctx context.Context, inputs ha
 	if now.Add(5 * time.Minute).Before(expires) {
 		expires = now.Add(5 * time.Minute)
 	}
+	oldTokensPass := oldTokenRejectionConfirmed(p, run, after, assessed, actual, now)
 	r := boundBehaviorReview{Format: "ylreader-bound-behavior-review", Version: 1, Profile: "bound-https-account-verification-v1", Scope: "localfs-bound-https-account-review", Status: "partial", OperationID: p.OperationID, BackupID: p.BackupID, ConsentID: run.consent, PlanDigest: p.Digest, PackageSHA: p.PackageSHA, ManifestSHA: p.ManifestSHA, TargetID: p.TargetID, Storage: p.TargetFingerprint, Tree: after.base.control.pub.TreeFingerprint, Generation: after.base.control.op.Generation, OperationSHA: run.records[0], AttemptSHA: run.records[1], PublicationSHA: run.records[2], Identity: actual, Certificate: run.certificate, Ledger: run.ledger, AccountCount: len(run.sessions), SessionCount: len(run.sessions), Started: run.started, Finished: now, Expires: expires}
 	for i, id := range boundBehaviorCheckIDs() {
 		status := "pass"
-		if i >= 10 {
+		if i == 10 && !oldTokensPass {
+			status = "unavailable"
+		} else if i >= 11 {
 			status = "unavailable"
 		}
 		r.Checks = append(r.Checks, handoverReviewCheck{id, status})

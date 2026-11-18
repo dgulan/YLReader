@@ -215,11 +215,11 @@ try:
         assert all(review[k] is False for k in ['execution_authorized', 'ready_for_cutover', 'deployment_authorized'])
         ids = ['schema_ledger', 'database_identity', 'database_role', 'published_objects', 'header_keyring', 'redis_isolation', 'sessions_revoked', 'tasks_disabled', 'credential_preflight', 'https_login_logout', 'old_token_http_rejection', 'reader_roundtrip']
         assert [c['id'] for c in review['checks']] == ids
-        assert [c['status'] for c in review['checks']] == ['pass'] * 10 + ['unavailable'] * 2
+        assert [c['status'] for c in review['checks']] == ['pass'] * 11 + ['unavailable']
         for key in ['tls_certificate_sha256', 'behavior_ledger_sha256', 'plan_digest', 'package_sha256', 'manifest_sha256']:
             assert re.fullmatch('[0-9a-f]{64}', review[key])
         (OUT / 'bound-behavior-review.json').write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
-        result['bound_behavior_review'] = {'profile': review['profile'], 'status': 'partial', 'verified_checks': 10, 'unavailable_checks': 2}
+        result['bound_behavior_review'] = {'profile': review['profile'], 'status': 'partial', 'verified_checks': 11, 'unavailable_checks': 1}
     data_reviews = [json.loads(s.removeprefix('RESTORE_DATA_REVIEW ')) for s in lines if s.startswith('RESTORE_DATA_REVIEW ')]
     assert len(data_reviews) == (1 if args.handover_data else 0)
     if args.handover_data:

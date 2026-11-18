@@ -35,6 +35,11 @@ func assertBoundBehaviorReview(t *testing.T, g *restoreGuard, inputs handoverPro
 		if r, e := g.collectBoundBehaviorReview(ctx, bad, clock); e != errBehaviorReview || r.Format != "" {
 			t.Fatal("JWT material drift kept the same runtime identity")
 		}
+		badSource := inputs
+		badSource.SourceJWT = make([]byte, 32)
+		if r, e := g.collectBoundBehaviorReview(ctx, badSource, clock); e != errBehaviorReview || r.Format != "" {
+			t.Fatal("source JWT material drift accepted")
+		}
 	})
 	t.Run("bound_review_wrong_runtime", func(t *testing.T) {
 		bad := inputs
@@ -49,8 +54,8 @@ func assertBoundBehaviorReview(t *testing.T, g *restoreGuard, inputs handoverPro
 		if e != nil || report.validate() != nil || report.Status != "partial" || report.Profile != "bound-https-account-verification-v1" || report.AccountCount != 2 || report.SessionCount != 2 || report.Execution || report.Ready || report.Deployment {
 			t.Fatal("guarded partial review failed", e)
 		}
-		if report.Checks[10].Status != "unavailable" || report.Checks[11].Status != "unavailable" {
-			t.Fatal("missing HTTP/read evidence promoted")
+		if report.Checks[10].ID != "old_token_http_rejection" || report.Checks[10].Status != "pass" || report.Checks[11].ID != "reader_roundtrip" || report.Checks[11].Status != "unavailable" {
+			t.Fatal("unexpected old-token or read check status", report.Checks[10], report.Checks[11])
 		}
 		if !bytes.Equal(inputs.TargetJWT, originalTargetJWT) || !bytes.Equal(g.behaviorRun.sourceJWT, make([]byte, len(g.behaviorRun.sourceJWT))) || !bytes.Equal(g.behaviorRun.targetJWT, make([]byte, len(g.behaviorRun.targetJWT))) {
 			t.Fatal("witness secret ownership/erasure mismatch")

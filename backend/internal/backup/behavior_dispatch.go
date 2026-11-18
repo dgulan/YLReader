@@ -237,7 +237,7 @@ func (g *restoreGuard) dispatchBehaviorOnce(ctx context.Context, prepared *prepa
 	result, err := dispatchBehaviorCore(ctx, g.locations.files[3], g, g.plan, prepared, proof, transport, clock, recheck)
 	if err == nil {
 		if concrete, ok := transport.(*behaviorHTTPTransport); ok {
-			run, e := captureConfirmedBehaviorRun(ctx, g.locations.files[3], g.plan, proof, concrete, result, targetKey, clock())
+			run, e := captureConfirmedBehaviorRun(ctx, g.locations.files[3], g.plan, proof, concrete, result, sourceKey, targetKey, clock())
 			if e != nil {
 				result.Stage = "confirmed_witness_capture"
 				return result, errBehaviorDispatch

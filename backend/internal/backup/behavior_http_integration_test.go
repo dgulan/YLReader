@@ -124,14 +124,17 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	t.Run("https_dispatch", func(t *testing.T) {
 		var proof *verifiedBehaviorAccounts
 		if mode == "good" {
-			for i, credential := range prepared.accounts {
-				if transport.rejectOldAccess(ctx, users[i], f.old[i].User.TokenVersion+1, credential.OldAccess, inputs.SourceJWT) != nil {
-					t.Fatal("valid source access token rejection unconfirmed")
-				}
-			}
 			proof, e = g.verifyBehaviorAccounts(ctx, prepared, inputs, clock)
 			if e != nil {
 				t.Fatal("pre-login verified account proof failed", e)
+			}
+			for i, credential := range prepared.accounts {
+				if transport.confirmOldAccess(ctx, proof, users[i], f.old[i].User.TokenVersion+1, credential.OldAccess, inputs.SourceJWT) != nil {
+					t.Fatal("valid source access token rejection unconfirmed")
+				}
+				if transport.confirmOldAccess(ctx, proof, users[i], f.old[i].User.TokenVersion+1, credential.OldAccess, inputs.SourceJWT) != errBehaviorHTTP {
+					t.Fatal("old access probe replayed")
+				}
 			}
 			if transport.rejectOldRefresh(ctx, proof, users[0], prepared.accounts[0].OldRefresh) != nil {
 				t.Fatal("pre-login old refresh token rejection unconfirmed")
