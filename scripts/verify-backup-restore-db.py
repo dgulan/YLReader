@@ -200,6 +200,9 @@ try:
         assert {o['mode'] for o in http_observations} == set(wanted_http)
         for o in http_observations:
             assert o['old_access_requests'] == (2 if o['mode'] == 'good' else 0)
+            assert o['old_refresh_requests'] == (2 if o['mode'] == 'good' else 0)
+            assert o['reader_requests'] == (12 if o['mode'] == 'good' else 0)
+            assert o['external_fetches'] == 0
             assert o['scope'] == 'isolated-https-dispatch'
             assert (o['login_requests'], o['logout_requests'], o['new_sessions'], o['active_after_dispatch']) == wanted_http[o['mode']]
             assert o['redirect_or_proxy_requests'] == 0 and o['deployment_authorized'] is False
@@ -211,15 +214,15 @@ try:
         review = bound_reviews[0]
         assert review['report_format'] == 'ylreader-bound-behavior-review' and review['report_version'] == 1
         assert review['profile'] == 'bound-https-account-verification-v1' and review['scope'] == 'localfs-bound-https-account-review'
-        assert review['status'] == 'partial' and review['account_count'] == review['session_count'] == 2
+        assert review['status'] == 'complete' and review['account_count'] == review['session_count'] == 2
         assert all(review[k] is False for k in ['execution_authorized', 'ready_for_cutover', 'deployment_authorized'])
         ids = ['schema_ledger', 'database_identity', 'database_role', 'published_objects', 'header_keyring', 'redis_isolation', 'sessions_revoked', 'tasks_disabled', 'credential_preflight', 'https_login_logout', 'old_token_http_rejection', 'reader_roundtrip']
         assert [c['id'] for c in review['checks']] == ids
-        assert [c['status'] for c in review['checks']] == ['pass'] * 11 + ['unavailable']
+        assert [c['status'] for c in review['checks']] == ['pass'] * 12
         for key in ['tls_certificate_sha256', 'behavior_ledger_sha256', 'plan_digest', 'package_sha256', 'manifest_sha256']:
             assert re.fullmatch('[0-9a-f]{64}', review[key])
         (OUT / 'bound-behavior-review.json').write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
-        result['bound_behavior_review'] = {'profile': review['profile'], 'status': 'partial', 'verified_checks': 11, 'unavailable_checks': 1}
+        result['bound_behavior_review'] = {'profile': review['profile'], 'status': 'complete', 'verified_checks': 12, 'unavailable_checks': 0}
     data_reviews = [json.loads(s.removeprefix('RESTORE_DATA_REVIEW ')) for s in lines if s.startswith('RESTORE_DATA_REVIEW ')]
     assert len(data_reviews) == (1 if args.handover_data else 0)
     if args.handover_data:

@@ -48,14 +48,14 @@ func assertBoundBehaviorReview(t *testing.T, g *restoreGuard, inputs handoverPro
 			t.Fatal("wrong runtime became reviewed")
 		}
 	})
-	t.Run("bound_review_collect_partial", func(t *testing.T) {
+	t.Run("bound_review_collect_complete", func(t *testing.T) {
 		var e error
 		report, e = g.collectBoundBehaviorReview(ctx, inputs, clock)
-		if e != nil || report.validate() != nil || report.Status != "partial" || report.Profile != "bound-https-account-verification-v1" || report.AccountCount != 2 || report.SessionCount != 2 || report.Execution || report.Ready || report.Deployment {
-			t.Fatal("guarded partial review failed", e)
+		if e != nil || report.validate() != nil || report.Status != "complete" || report.Profile != "bound-https-account-verification-v1" || report.AccountCount != 2 || report.SessionCount != 2 || report.Execution || report.Ready || report.Deployment {
+			t.Fatal("guarded complete review failed", e)
 		}
-		if report.Checks[10].ID != "old_token_http_rejection" || report.Checks[10].Status != "pass" || report.Checks[11].ID != "reader_roundtrip" || report.Checks[11].Status != "unavailable" {
-			t.Fatal("unexpected old-token or read check status", report.Checks[10], report.Checks[11])
+		if report.Checks[10].ID != "old_token_http_rejection" || report.Checks[10].Status != "pass" || report.Checks[11].ID != "reader_roundtrip" || report.Checks[11].Status != "pass" {
+			t.Fatal("unexpected old-token or reader check status", report.Checks[10], report.Checks[11])
 		}
 		if !bytes.Equal(inputs.TargetJWT, originalTargetJWT) || !bytes.Equal(g.behaviorRun.sourceJWT, make([]byte, len(g.behaviorRun.sourceJWT))) || !bytes.Equal(g.behaviorRun.targetJWT, make([]byte, len(g.behaviorRun.targetJWT))) {
 			t.Fatal("witness secret ownership/erasure mismatch")

@@ -26,6 +26,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"yreader/backend/internal/api"
 	"yreader/backend/internal/pkg/storage"
 )
 
@@ -70,6 +71,47 @@ func (oldTokenProbeWitness) Format(s fmt.State, _ rune) {
 }
 func (oldTokenProbeWitness) MarshalJSON() ([]byte, error) { return nil, errBehaviorHTTP }
 
+type readerRoundtripWitness struct {
+	plan, consent string
+	records       [3]string
+	database      string
+	runtime       string
+	certificate   string
+	sessionID     uuid.UUID
+	bookID        uuid.UUID
+	otherBookID   uuid.UUID
+	observedAt    time.Time
+	beforeDigest  string
+	afterDigest   string
+	confirmed     bool
+}
+
+func (readerRoundtripWitness) Format(s fmt.State, _ rune) {
+	io.WriteString(s, "[private reader roundtrip witness]")
+}
+func (readerRoundtripWitness) MarshalJSON() ([]byte, error) { return nil, errBehaviorHTTP }
+
+type readerExpectedBookmark struct {
+	id           uuid.UUID
+	chapterIndex int
+	charOffset   int
+	note         *string
+}
+
+type readerDBSnapshot struct {
+	sessionActive      bool
+	activeJobs         int64
+	bookID             uuid.UUID
+	chapterIndex       int
+	otherBookID        uuid.UUID
+	otherChapterIndex  int
+	progressChapter    int
+	progressCharOffset int
+	progressVersion    int64
+	bookmarks          []readerExpectedBookmark
+	digest             string
+}
+
 type behaviorHTTPSecrets struct {
 	key               []byte
 	sourceKey         []byte
@@ -81,6 +123,9 @@ type behaviorHTTPSecrets struct {
 	oldAccessWitness  map[uuid.UUID]oldTokenProbeWitness
 	oldRefreshWitness map[uuid.UUID]oldTokenProbeWitness
 	oldTokenDrifted   bool
+	readerTried       map[uuid.UUID]bool
+	readerWitness     map[uuid.UUID]readerRoundtripWitness
+	readerDrifted     bool
 	closed            bool
 }
 type behaviorHTTPTransport struct {
@@ -95,6 +140,7 @@ type behaviorHTTPTransport struct {
 	clock              func() time.Time
 	secrets            *behaviorHTTPSecrets
 	oldRefreshObserver func(context.Context, uuid.UUID, string) (oldRefreshSessionSnapshot, error)
+	readerObserver     func(context.Context, uuid.UUID, uuid.UUID) (readerDBSnapshot, error)
 }
 
 func (behaviorHTTPTransport) Format(s fmt.State, _ rune) {
@@ -161,7 +207,7 @@ func newBehaviorHTTPTransport(c behaviorHTTPConfig) (*behaviorHTTPTransport, err
 		return nil
 	}}
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &behaviorHTTPTransport{mu: &sync.Mutex{}, client: client, endpoint: strings.TrimSuffix(u.String(), "/"), binding: c.Binding, certificateSHA: hex.EncodeToString(expected[:]), databaseURL: c.DatabaseURL, source: c.Source, target: c.Target, users: users, clock: clock, secrets: &behaviorHTTPSecrets{key: append([]byte(nil), c.JWT...), known: map[uuid.UUID]behaviorHTTPKnown{}, loginTried: map[uuid.UUID]bool{}, completed: map[uuid.UUID]behaviorSessionResponse{}, oldAccessTried: map[uuid.UUID]bool{}, oldRefreshTried: map[uuid.UUID]bool{}, oldAccessWitness: map[uuid.UUID]oldTokenProbeWitness{}, oldRefreshWitness: map[uuid.UUID]oldTokenProbeWitness{}}}, nil
+	return &behaviorHTTPTransport{mu: &sync.Mutex{}, client: client, endpoint: strings.TrimSuffix(u.String(), "/"), binding: c.Binding, certificateSHA: hex.EncodeToString(expected[:]), databaseURL: c.DatabaseURL, source: c.Source, target: c.Target, users: users, clock: clock, secrets: &behaviorHTTPSecrets{key: append([]byte(nil), c.JWT...), known: map[uuid.UUID]behaviorHTTPKnown{}, loginTried: map[uuid.UUID]bool{}, completed: map[uuid.UUID]behaviorSessionResponse{}, oldAccessTried: map[uuid.UUID]bool{}, oldRefreshTried: map[uuid.UUID]bool{}, oldAccessWitness: map[uuid.UUID]oldTokenProbeWitness{}, oldRefreshWitness: map[uuid.UUID]oldTokenProbeWitness{}, readerTried: map[uuid.UUID]bool{}, readerWitness: map[uuid.UUID]readerRoundtripWitness{}}}, nil
 }
 func (t *behaviorHTTPTransport) Close() {
 	if t == nil {
@@ -180,6 +226,8 @@ func (t *behaviorHTTPTransport) Close() {
 	clear(t.secrets.oldRefreshTried)
 	clear(t.secrets.oldAccessWitness)
 	clear(t.secrets.oldRefreshWitness)
+	clear(t.secrets.readerTried)
+	clear(t.secrets.readerWitness)
 	t.client.CloseIdleConnections()
 }
 
@@ -218,8 +266,43 @@ func (b behaviorRequestBody) Close() error {
 	return nil
 }
 
-func (t *behaviorHTTPTransport) post(ctx context.Context, path string, payload []byte, access string, status int) (result []byte, err error) {
-	if ctx == nil || ctx.Err() != nil {
+func (t *behaviorHTTPTransport) doJSON(ctx context.Context, req *http.Request, expectJSON bool, status int, limit int64) (result []byte, err error) {
+	if ctx == nil || ctx.Err() != nil || req == nil {
+		return nil, errBehaviorHTTP
+	}
+	r, e := t.client.Do(req)
+	if e != nil {
+		if r != nil && r.Body != nil {
+			r.Body.Close()
+		}
+		return nil, errBehaviorHTTP
+	}
+	defer func() {
+		if r.Body.Close() != nil {
+			clear(result)
+			result = nil
+			err = errBehaviorHTTP
+		}
+	}()
+	if r.StatusCode != status || r.ContentLength > limit || (r.Header.Get("Content-Encoding") != "" && r.Header.Get("Content-Encoding") != "identity") {
+		return nil, errBehaviorHTTP
+	}
+	if expectJSON {
+		kind, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if e != nil || kind != "application/json" {
+			return nil, errBehaviorHTTP
+		}
+	}
+	data, e := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if e != nil || int64(len(data)) > limit || ctx.Err() != nil {
+		clear(data)
+		return nil, errBehaviorHTTP
+	}
+	return data, nil
+}
+
+func (t *behaviorHTTPTransport) post(ctx context.Context, path string, payload []byte, access string, status int) ([]byte, error) {
+	if ctx == nil || ctx.Err() != nil || strings.ContainsAny(access, "\r\n") {
 		return nil, errBehaviorHTTP
 	}
 	var limit int64
@@ -255,35 +338,62 @@ func (t *behaviorHTTPTransport) post(ctx context.Context, path string, payload [
 	if access != "" {
 		req.Header.Set("Authorization", "Bearer "+access)
 	}
-	r, e := t.client.Do(req)
+	return t.doJSON(ctx, req, status == http.StatusOK || status == http.StatusUnauthorized, status, limit)
+}
+
+func allowedReaderGETPath(path string, status int) (int64, bool) {
+	if path == "/api/v1/books" && status == http.StatusOK {
+		return 1 << 20, true
+	}
+	const prefix = "/api/v1/books/"
+	if !strings.HasPrefix(path, prefix) {
+		return 0, false
+	}
+	rest := strings.TrimPrefix(path, prefix)
+	slash := strings.IndexByte(rest, '/')
+	if slash <= 0 {
+		return 0, false
+	}
+	if !validUUID(rest[:slash]) {
+		return 0, false
+	}
+	tail := rest[slash:]
+	switch {
+	case tail == "/chapters" && status == http.StatusOK:
+		return 1 << 20, true
+	case tail == "/progress" && status == http.StatusOK:
+		return 64 << 10, true
+	case tail == "/bookmarks" && status == http.StatusOK:
+		return 256 << 10, true
+	case strings.HasPrefix(tail, "/content?chapter_index="):
+		idxRaw := strings.TrimPrefix(tail, "/content?chapter_index=")
+		idx, e := strconv.Atoi(idxRaw)
+		if e != nil || idx < 0 || strconv.Itoa(idx) != idxRaw {
+			return 0, false
+		}
+		if status == http.StatusOK {
+			return 1 << 20, true
+		}
+		if status == http.StatusNotFound {
+			return 8192, true
+		}
+	}
+	return 0, false
+}
+
+func (t *behaviorHTTPTransport) get(ctx context.Context, path, access string, status int) ([]byte, error) {
+	limit, ok := allowedReaderGETPath(path, status)
+	if !ok || ctx == nil || ctx.Err() != nil || access == "" || strings.ContainsAny(access, "\r\n") {
+		return nil, errBehaviorHTTP
+	}
+	req, e := http.NewRequestWithContext(ctx, http.MethodGet, t.endpoint+path, nil)
 	if e != nil {
-		if r != nil && r.Body != nil {
-			r.Body.Close()
-		}
 		return nil, errBehaviorHTTP
 	}
-	defer func() {
-		if r.Body.Close() != nil {
-			clear(result)
-			result = nil
-			err = errBehaviorHTTP
-		}
-	}()
-	if r.StatusCode != status || r.ContentLength > limit || (r.Header.Get("Content-Encoding") != "" && r.Header.Get("Content-Encoding") != "identity") {
-		return nil, errBehaviorHTTP
-	}
-	if status == http.StatusOK || status == http.StatusUnauthorized {
-		kind, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
-		if e != nil || kind != "application/json" {
-			return nil, errBehaviorHTTP
-		}
-	}
-	data, e := io.ReadAll(io.LimitReader(r.Body, limit+1))
-	if e != nil || int64(len(data)) > limit || ctx.Err() != nil {
-		clear(data)
-		return nil, errBehaviorHTTP
-	}
-	return data, nil
+	req.Header.Set("Authorization", "Bearer "+access)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept-Encoding", "identity")
+	return t.doJSON(ctx, req, true, status, limit)
 }
 
 type behaviorHTTPTokenUser struct {
@@ -496,6 +606,10 @@ func (t *behaviorHTTPTransport) resolve(ctx context.Context, refresh string, use
 }
 
 func verifyBehaviorUnauthorizedError(data []byte) error {
+	return verifyBehaviorError(data, "unauthorized")
+}
+
+func verifyBehaviorError(data []byte, wantCode string) error {
 	outer, e := strictHTTPObject(data, []string{"error"}, nil)
 	if e != nil {
 		return errBehaviorHTTP
@@ -505,7 +619,7 @@ func verifyBehaviorUnauthorizedError(data []byte) error {
 		return errBehaviorHTTP
 	}
 	var code, message string
-	if json.Unmarshal(fields["code"], &code) != nil || code != "unauthorized" || json.Unmarshal(fields["message"], &message) != nil || len(message) == 0 {
+	if json.Unmarshal(fields["code"], &code) != nil || code != wantCode || json.Unmarshal(fields["message"], &message) != nil || len(message) == 0 {
 		return errBehaviorHTTP
 	}
 	if raw, ok := fields["request_id"]; ok {
@@ -845,6 +959,370 @@ func (t *behaviorHTTPTransport) oldTokenWitnessSnapshot(sourceKey, targetKey []b
 	for u, w := range t.secrets.oldRefreshWitness {
 		if w.confirmed {
 			out.refresh[u] = w
+		}
+	}
+	return out
+}
+
+func checkUniqueJSONToken(d *json.Decoder, first json.Token, depth int) error {
+	if depth > 64 {
+		return errBehaviorHTTP
+	}
+	delim, ok := first.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]bool{}
+		for d.More() {
+			tok, e := d.Token()
+			key, ok := tok.(string)
+			if e != nil || !ok || seen[key] {
+				return errBehaviorHTTP
+			}
+			seen[key] = true
+			val, e := d.Token()
+			if e != nil || checkUniqueJSONToken(d, val, depth+1) != nil {
+				return errBehaviorHTTP
+			}
+		}
+		end, e := d.Token()
+		if e != nil || end != json.Delim('}') {
+			return errBehaviorHTTP
+		}
+	case '[':
+		for d.More() {
+			val, e := d.Token()
+			if e != nil || checkUniqueJSONToken(d, val, depth+1) != nil {
+				return errBehaviorHTTP
+			}
+		}
+		end, e := d.Token()
+		if e != nil || end != json.Delim(']') {
+			return errBehaviorHTTP
+		}
+	default:
+		return errBehaviorHTTP
+	}
+	return nil
+}
+
+func decodeStrictReaderJSON(data []byte, out any) error {
+	if len(data) == 0 || !utf8.Valid(data) || !pairedUnicodeEscapes(data) || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return errBehaviorHTTP
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	first, e := d.Token()
+	if e != nil || checkUniqueJSONToken(d, first, 0) != nil {
+		return errBehaviorHTTP
+	}
+	if _, e = d.Token(); e != io.EOF {
+		return errBehaviorHTTP
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if dec.Decode(out) != nil {
+		return errBehaviorHTTP
+	}
+	if _, e = dec.Token(); e != io.EOF {
+		return errBehaviorHTTP
+	}
+	return nil
+}
+
+func (t *behaviorHTTPTransport) observeReader(ctx context.Context, user, sessionID uuid.UUID) (readerDBSnapshot, error) {
+	if t.readerObserver != nil {
+		return t.readerObserver(ctx, user, sessionID)
+	}
+	return t.observeReaderDB(ctx, user, sessionID)
+}
+
+func (t *behaviorHTTPTransport) observeReaderDB(ctx context.Context, user, sessionID uuid.UUID) (result readerDBSnapshot, err error) {
+	if ctx == nil || user == uuid.Nil || sessionID == uuid.Nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cfg, e := ParseTarget(t.databaseURL)
+	if e != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	c, e := pgx.ConnectConfig(ctx, cfg)
+	if e != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		if c.Close(cleanup) != nil {
+			result = readerDBSnapshot{}
+			err = errBehaviorHTTP
+		}
+	}()
+	tx, e := c.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if e != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		_ = tx.Rollback(cleanup)
+	}()
+	if accountObservationPolicy(ctx, tx, t.source, t.target, cfg, false) != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	var disabled bool
+	if tx.QueryRow(ctx, `SELECT is_disabled FROM public.users WHERE id=$1`, user).Scan(&disabled) != nil || disabled {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	var sessOwner uuid.UUID
+	var sessActive bool
+	var sessExpires time.Time
+	if tx.QueryRow(ctx, `SELECT user_id,revoked_at IS NULL,expires_at FROM public.auth_sessions WHERE id=$1`, sessionID).Scan(&sessOwner, &sessActive, &sessExpires) != nil || sessOwner != user || !sessActive || !sessExpires.After(t.clock()) {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	snap := readerDBSnapshot{sessionActive: true}
+	if tx.QueryRow(ctx, `SELECT count(*) FROM public.jobs WHERE status IN ('queued','running')`).Scan(&snap.activeJobs) != nil || snap.activeJobs != 0 {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	var activeSource uuid.UUID
+	if tx.QueryRow(ctx, `SELECT id,active_source_id FROM public.books WHERE user_id=$1 AND book_type='local' AND active_source_id IS NOT NULL ORDER BY id LIMIT 1`, user).Scan(&snap.bookID, &activeSource) != nil || snap.bookID == uuid.Nil || activeSource == uuid.Nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	if tx.QueryRow(ctx, `SELECT chapter_index FROM public.chapters WHERE book_id=$1 AND source_id=$2 AND is_volume=false AND chapter_index IS NOT NULL ORDER BY sort_order ASC,id ASC LIMIT 1`, snap.bookID, activeSource).Scan(&snap.chapterIndex) != nil || snap.chapterIndex < 0 {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	if tx.QueryRow(ctx, `SELECT b.id,COALESCE((SELECT MIN(c.chapter_index) FROM public.chapters c WHERE c.book_id=b.id AND c.is_volume=false AND c.chapter_index IS NOT NULL),0) FROM public.books b WHERE b.user_id<>$1 ORDER BY b.id LIMIT 1`, user).Scan(&snap.otherBookID, &snap.otherChapterIndex) != nil || snap.otherBookID == uuid.Nil || snap.otherBookID == snap.bookID || snap.otherChapterIndex < 0 {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	e = tx.QueryRow(ctx, `SELECT chapter_index,char_offset,version FROM public.reading_progress WHERE user_id=$1 AND book_id=$2`, user, snap.bookID).Scan(&snap.progressChapter, &snap.progressCharOffset, &snap.progressVersion)
+	if errors.Is(e, pgx.ErrNoRows) {
+		snap.progressChapter, snap.progressCharOffset, snap.progressVersion = 0, 0, 1
+	} else if e != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	rows, e := tx.Query(ctx, `SELECT id,chapter_index,char_offset,note FROM public.bookmarks WHERE user_id=$1 AND book_id=$2 ORDER BY chapter_index ASC,char_offset ASC,id ASC`, user, snap.bookID)
+	if e != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var bm readerExpectedBookmark
+		if rows.Scan(&bm.id, &bm.chapterIndex, &bm.charOffset, &bm.note) != nil || bm.id == uuid.Nil {
+			return readerDBSnapshot{}, errBehaviorHTTP
+		}
+		snap.bookmarks = append(snap.bookmarks, bm)
+	}
+	if rows.Err() != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	rows.Close()
+	var payload string
+	e = tx.QueryRow(ctx, `SELECT json_build_array(
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,username,token_version,is_disabled,updated_at FROM public.users) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,revoked_at,expires_at FROM public.auth_sessions) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,book_type,name,active_source_id,total_chapters,last_read_at,version,updated_at FROM public.books) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,book_id,source_id,chapter_index,sort_order,title,is_volume,updated_at FROM public.chapters) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,book_id,chapter_index,char_offset,version,server_updated_at FROM public.reading_progress) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,book_id,chapter_index,char_offset,note,created_at FROM public.bookmarks) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,book_source_url,version,updated_at FROM public.book_sources) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,book_id,source_id,sync_status,last_synced_at,updated_at FROM public.book_source_mappings) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,book_id,chapter_index,source_id,status,updated_at FROM public.chapter_source_overrides) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,is_enabled,updated_at FROM public.replace_rules) t),
+		(SELECT coalesce(json_agg(t ORDER BY id),'[]'::json) FROM (SELECT id,user_id,type,status,attempts,created_at,started_at,finished_at FROM public.jobs) t),
+		(SELECT coalesce(json_agg(t ORDER BY user_id,key),'[]'::json) FROM (SELECT user_id,key,value,updated_at FROM public.app_settings) t)
+	)::text`).Scan(&payload)
+	if e != nil || ctx.Err() != nil || tx.Commit(ctx) != nil {
+		return readerDBSnapshot{}, errBehaviorHTTP
+	}
+	sum := sha256.Sum256([]byte(payload))
+	snap.digest = hex.EncodeToString(sum[:])
+	return snap, nil
+}
+
+func (t *behaviorHTTPTransport) verifyReaderRoundtripHTTP(ctx context.Context, access string, expected readerDBSnapshot) error {
+	booksRaw, e := t.get(ctx, "/api/v1/books", access, http.StatusOK)
+	defer clear(booksRaw)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	var shelf api.BookPage
+	if decodeStrictReaderJSON(booksRaw, &shelf) != nil || shelf.Total < 1 || len(shelf.Items) < 1 {
+		return errBehaviorHTTP
+	}
+	foundBook := false
+	for _, b := range shelf.Items {
+		if b.Id == expected.bookID && b.BookType == api.BookBookType("local") {
+			foundBook = true
+			break
+		}
+	}
+	if !foundBook {
+		return errBehaviorHTTP
+	}
+
+	bookStr := expected.bookID.String()
+	chaptersRaw, e := t.get(ctx, "/api/v1/books/"+bookStr+"/chapters", access, http.StatusOK)
+	defer clear(chaptersRaw)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	var chapters api.ChapterList
+	if decodeStrictReaderJSON(chaptersRaw, &chapters) != nil || chapters.BookId != expected.bookID || chapters.Total < 1 || len(chapters.Items) < 1 {
+		return errBehaviorHTTP
+	}
+	foundChapter := false
+	for _, ch := range chapters.Items {
+		if ch.ChapterIndex != nil && *ch.ChapterIndex == expected.chapterIndex {
+			foundChapter = true
+			break
+		}
+	}
+	if !foundChapter {
+		return errBehaviorHTTP
+	}
+
+	contentRaw, e := t.get(ctx, "/api/v1/books/"+bookStr+"/content?chapter_index="+strconv.Itoa(expected.chapterIndex), access, http.StatusOK)
+	defer clear(contentRaw)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	var content api.ChapterContent
+	if decodeStrictReaderJSON(contentRaw, &content) != nil || content.Cached || content.TraceId != nil || content.Chapter.ChapterIndex == nil || *content.Chapter.ChapterIndex != expected.chapterIndex || strings.TrimSpace(content.Content) == "" || content.WordCount < 1 {
+		return errBehaviorHTTP
+	}
+
+	progressRaw, e := t.get(ctx, "/api/v1/books/"+bookStr+"/progress", access, http.StatusOK)
+	defer clear(progressRaw)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	var progress api.Progress
+	if decodeStrictReaderJSON(progressRaw, &progress) != nil || progress.BookId != expected.bookID || progress.ChapterIndex != expected.progressChapter || progress.CharOffset != expected.progressCharOffset || int64(progress.Version) != expected.progressVersion {
+		return errBehaviorHTTP
+	}
+
+	bookmarksRaw, e := t.get(ctx, "/api/v1/books/"+bookStr+"/bookmarks", access, http.StatusOK)
+	defer clear(bookmarksRaw)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	var bookmarks []api.Bookmark
+	if decodeStrictReaderJSON(bookmarksRaw, &bookmarks) != nil || len(bookmarks) != len(expected.bookmarks) {
+		return errBehaviorHTTP
+	}
+	expMap := make(map[uuid.UUID]readerExpectedBookmark, len(expected.bookmarks))
+	for _, bm := range expected.bookmarks {
+		expMap[bm.id] = bm
+	}
+	for _, bm := range bookmarks {
+		exp, ok := expMap[bm.Id]
+		if !ok || bm.BookId != expected.bookID || bm.ChapterIndex != exp.chapterIndex || bm.CharOffset != exp.charOffset || (bm.Note == nil) != (exp.note == nil) || (bm.Note != nil && *bm.Note != *exp.note) {
+			return errBehaviorHTTP
+		}
+		delete(expMap, bm.Id)
+	}
+	if len(expMap) != 0 {
+		return errBehaviorHTTP
+	}
+
+	crossRaw, e := t.get(ctx, "/api/v1/books/"+expected.otherBookID.String()+"/content?chapter_index="+strconv.Itoa(expected.otherChapterIndex), access, http.StatusNotFound)
+	defer clear(crossRaw)
+	if e != nil || verifyBehaviorError(crossRaw, "not_found") != nil {
+		return errBehaviorHTTP
+	}
+	return nil
+}
+
+// Explicit bounded read-only reader verification during a live authenticated session
+// (after Login confirmation and before Logout revocation).
+func (t *behaviorHTTPTransport) readerRoundtrip(ctx context.Context, consent behaviorConsent, proof *verifiedBehaviorAccounts, s behaviorSessionResponse) error {
+	if t == nil || ctx == nil || ctx.Err() != nil || proof == nil || proof.guard == nil || s.UserID == uuid.Nil || s.SessionID == uuid.Nil {
+		return errBehaviorHTTP
+	}
+	if consent.validate() != nil || !consent.allowsReaderRoundtrip() || consent.ID != proof.consent || consent.PlanDigest != proof.plan || consent.TargetID != t.binding.TargetID || consent.RuntimeSHA != proof.runtime || [3]string{consent.OperationSHA, consent.AttemptSHA, consent.PublicationSHA} != proof.records {
+		return errBehaviorHTTP
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.checkProofWhitelistLocked(proof, s.UserID) != nil {
+		return errBehaviorHTTP
+	}
+	now := t.clock()
+	if now.Before(consent.Issued) || !now.Before(consent.Expires) {
+		return errBehaviorHTTP
+	}
+	known, ok := t.secrets.known[s.SessionID]
+	if !ok || known.user != s.UserID || known.attempted || t.secrets.readerTried[s.UserID] || verifyHTTPAccess(known.access, t.secrets.key, s.UserID, known.version, now) != nil {
+		return errBehaviorHTTP
+	}
+	if t.secrets.readerTried == nil {
+		t.secrets.readerTried = map[uuid.UUID]bool{}
+	}
+	t.secrets.readerTried[s.UserID] = true
+
+	before, e := t.observeReader(ctx, s.UserID, s.SessionID)
+	if e != nil || !before.sessionActive || before.activeJobs != 0 || before.bookID == uuid.Nil || before.otherBookID == uuid.Nil || before.bookID == before.otherBookID || before.chapterIndex < 0 || before.otherChapterIndex < 0 || !validSHA(before.digest) {
+		return errBehaviorHTTP
+	}
+	if t.verifyReaderRoundtripHTTP(ctx, known.access, before) != nil {
+		return errBehaviorHTTP
+	}
+	after, e := t.observeReader(ctx, s.UserID, s.SessionID)
+	if e != nil || !after.sessionActive || after.activeJobs != 0 || after.bookID != before.bookID || after.chapterIndex != before.chapterIndex || after.otherBookID != before.otherBookID || after.digest != before.digest || ctx.Err() != nil {
+		return errBehaviorHTTP
+	}
+	nowAfter := t.clock()
+	if !validStamp(nowAfter) || nowAfter.Before(consent.Issued) || !nowAfter.Before(consent.Expires) || !nowAfter.Before(proof.expires) {
+		return errBehaviorHTTP
+	}
+	if t.secrets.readerWitness == nil {
+		t.secrets.readerWitness = map[uuid.UUID]readerRoundtripWitness{}
+	}
+	t.secrets.readerWitness[s.UserID] = readerRoundtripWitness{
+		plan:         proof.plan,
+		consent:      proof.consent,
+		records:      proof.records,
+		database:     proof.database,
+		runtime:      proof.runtime,
+		certificate:  t.certificateSHA,
+		sessionID:    s.SessionID,
+		bookID:       before.bookID,
+		otherBookID:  before.otherBookID,
+		observedAt:   nowAfter,
+		beforeDigest: before.digest,
+		afterDigest:  after.digest,
+		confirmed:    true,
+	}
+	return nil
+}
+
+func (t *behaviorHTTPTransport) readerWitnessSnapshot(consent behaviorConsent, targetKey []byte) confirmedReaderSet {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !consent.allowsReaderRoundtrip() {
+		drifted := t.secrets == nil || t.secrets.closed || t.secrets.readerDrifted || len(t.secrets.readerTried) != 0 || len(t.secrets.readerWitness) != 0
+		return confirmedReaderSet{authorized: false, drifted: drifted}
+	}
+	out := confirmedReaderSet{
+		authorized: true,
+		users:      map[uuid.UUID]readerRoundtripWitness{},
+	}
+	if t.secrets == nil || t.secrets.closed || t.secrets.readerDrifted || !bytes.Equal(t.secrets.key, targetKey) {
+		out.drifted = true
+		return out
+	}
+	for u, w := range t.secrets.readerWitness {
+		if w.confirmed {
+			if w.consent != consent.ID || w.plan != consent.PlanDigest {
+				out.drifted = true
+				return out
+			}
+			out.users[u] = w
 		}
 	}
 	return out

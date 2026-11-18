@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,9 +21,34 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"yreader/backend/internal/api"
+	"yreader/backend/internal/engine/sandbox"
 	headercrypto "yreader/backend/internal/pkg/crypto"
+	"yreader/backend/internal/pkg/storage"
 	"yreader/backend/internal/service"
 )
+
+func isAllowedReaderHTTPRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet || r.ContentLength != 0 || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		return false
+	}
+	if r.URL.Path == "/api/v1/books" && r.URL.RawQuery == "" {
+		return true
+	}
+	if !strings.HasPrefix(r.URL.Path, "/api/v1/books/") {
+		return false
+	}
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/chapters") && r.URL.RawQuery == "":
+		return true
+	case strings.HasSuffix(r.URL.Path, "/progress") && r.URL.RawQuery == "":
+		return true
+	case strings.HasSuffix(r.URL.Path, "/bookmarks") && r.URL.RawQuery == "":
+		return true
+	case strings.HasSuffix(r.URL.Path, "/content") && strings.HasPrefix(r.URL.RawQuery, "chapter_index="):
+		return true
+	}
+	return false
+}
 
 func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObjects, p Plan, owner, raw, mode string, ring *headercrypto.Keyring, source *pgx.Conn, f *httpFixtureCredentials) {
 	t.Helper()
@@ -34,7 +60,7 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	if e != nil {
 		t.Fatal(e)
 	}
-	a := behaviorConsent{Format: "ylreader-behavior-consent", Version: 1, Scope: "isolated-account-verification-only", ID: uuid.NewString(), OperationID: p.OperationID, OwnerID: owner, PlanDigest: p.Digest, TargetID: p.TargetID, Generation: s.op.Generation, OperationSHA: s.tokens[0], AttemptSHA: s.tokens[1], PublicationSHA: s.tokens[2], RuntimeSHA: draft.TargetIdentity.Runtime, Issued: clock(), Expires: clock().Add(time.Minute)}
+	a := behaviorConsent{Format: "ylreader-behavior-consent", Version: 1, Scope: "isolated-account-verification-only", ID: uuid.NewString(), OperationID: p.OperationID, OwnerID: owner, PlanDigest: p.Digest, TargetID: p.TargetID, Generation: s.op.Generation, OperationSHA: s.tokens[0], AttemptSHA: s.tokens[1], PublicationSHA: s.tokens[2], RuntimeSHA: draft.TargetIdentity.Runtime, ReaderScope: behaviorReaderScopeReadOnly, Issued: clock(), Expires: clock().Add(time.Minute)}
 	data := map[string][]byte{}
 	users := []uuid.UUID{}
 	for i, name := range f.names {
@@ -54,11 +80,35 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	defer prePool.Close()
 	postPool := newIsolatedTargetPool(t, ctx, raw)
 	defer postPool.Close()
-	preHandler := api.NewServer(api.Deps{Auth: service.NewAuthService(prePool, inputs.TargetJWT, time.Minute, time.Hour), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
-	postHandler := api.NewServer(api.Deps{Auth: service.NewAuthService(postPool, inputs.TargetJWT, time.Minute, time.Hour), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
+	oldRing := headercrypto.DefaultKeyring()
+	headercrypto.SetDefaultKeyring(ring)
+	defer headercrypto.SetDefaultKeyring(oldRing)
+	receipt, _, e := (publicationStore{Files: g.locations.files[3]}).Load(ctx, p.OperationID)
+	if e != nil || receipt.State != "verified" {
+		t.Fatal("publication receipt required", e)
+	}
+	provider, e := storage.NewLocalFS(filepath.Join(g.config.Target.Storage.Root, g.config.Target.Storage.Namespace, receipt.Output))
+	if e != nil {
+		t.Fatal("published localfs root unavailable", e)
+	}
+	ft := &forbiddenHTTPFetcher{}
+	sb := sandbox.New(sandbox.Config{ScriptTimeout: time.Second}, nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	preHandler := api.NewServer(api.Deps{Auth: service.NewAuthService(prePool, inputs.TargetJWT, time.Minute, time.Hour), Log: logger}).Handler()
+	postHandler := api.NewServer(api.Deps{
+		Auth:      service.NewAuthService(postPool, inputs.TargetJWT, time.Minute, time.Hour),
+		Books:     service.NewBookService(postPool, provider, logger),
+		Sources:   service.NewSourceService(postPool),
+		TOC:       service.NewTOCService(postPool, ft, sb),
+		Content:   service.NewContentService(postPool, ft, sb, nil, provider, logger),
+		Progress:  service.NewProgressService(postPool),
+		Bookmarks: service.NewBookmarkService(postPool, logger),
+		Storage:   provider,
+		Log:       logger,
+	}).Handler()
 	var activeHandler atomic.Pointer[http.Handler]
 	activeHandler.Store(&preHandler)
-	var loginRequests, logoutRequests, oldAccessRequests, oldRefreshRequests, trapRequests, unsafe atomic.Int32
+	var loginRequests, logoutRequests, oldAccessRequests, oldRefreshRequests, readerRequests, trapRequests, unsafe atomic.Int32
 	trap := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { trapRequests.Add(1); w.WriteHeader(500) }))
 	defer trap.Close()
 	t.Setenv("HTTP_PROXY", trap.URL)
@@ -103,6 +153,8 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "" {
 				unsafe.Add(1)
 			}
+		} else if mode == "good" && isAllowedReaderHTTPRequest(r) {
+			readerRequests.Add(1)
 		} else {
 			unsafe.Add(1)
 		}
@@ -205,12 +257,12 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 		}
 	})
 	t.Run("https_network_safety", func(t *testing.T) {
-		wantOld := int32(0)
+		wantOld, wantReader := int32(0), int32(0)
 		if mode == "good" {
-			wantOld = 2
+			wantOld, wantReader = 2, 12
 		}
-		if oldAccessRequests.Load() != wantOld || oldRefreshRequests.Load() != wantOld {
-			t.Fatal("unexpected old token request count")
+		if oldAccessRequests.Load() != wantOld || oldRefreshRequests.Load() != wantOld || readerRequests.Load() != wantReader || ft.calls.Load() != 0 {
+			t.Fatal("unexpected old token, reader, or external fetch request count")
 		}
 		if int(loginRequests.Load()) != wantLogin || int(logoutRequests.Load()) != wantLogout || trapRequests.Load() != 0 || unsafe.Load() != 0 {
 			t.Fatal("redirect/proxy/retry or credential boundary violated")
@@ -239,7 +291,7 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 			t.Fatal(e)
 		}
 	}
-	t.Logf(`BEHAVIOR_HTTP_EVIDENCE {"scope":"isolated-https-dispatch","mode":%q,"login_requests":%d,"logout_requests":%d,"new_sessions":%d,"active_after_dispatch":%d,"old_access_requests":%d,"old_refresh_requests":%d,"redirect_or_proxy_requests":0,"deployment_authorized":false}`, mode, wantLogin, wantLogout, newSessions, active, oldAccessRequests.Load(), oldRefreshRequests.Load())
+	t.Logf(`BEHAVIOR_HTTP_EVIDENCE {"scope":"isolated-https-dispatch","mode":%q,"login_requests":%d,"logout_requests":%d,"new_sessions":%d,"active_after_dispatch":%d,"old_access_requests":%d,"old_refresh_requests":%d,"reader_requests":%d,"external_fetches":%d,"redirect_or_proxy_requests":0,"deployment_authorized":false}`, mode, loginRequests.Load(), logoutRequests.Load(), newSessions, active, oldAccessRequests.Load(), oldRefreshRequests.Load(), readerRequests.Load(), ft.calls.Load())
 }
 
 func snapshotAuthSessions(t *testing.T, ctx context.Context, queryer interface {

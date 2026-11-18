@@ -26,6 +26,10 @@ type behaviorLoginTransport interface {
 	Logout(context.Context, behaviorSessionResponse) error
 }
 
+type behaviorReaderTransport interface {
+	readerRoundtrip(context.Context, behaviorConsent, *verifiedBehaviorAccounts, behaviorSessionResponse) error
+}
+
 type behaviorAction struct {
 	Format      string    `json:"action_format"`
 	Version     int       `json:"action_version"`
@@ -169,6 +173,14 @@ func dispatchBehaviorCore(ctx context.Context, files storage.ConditionalFiles, g
 		result.Stage = "post_login_persist_or_logout"
 		cleanup, stop := context.WithTimeout(context.Background(), 2*time.Second)
 		responseSHA, responseErr := persistBehaviorAction(cleanup, files, a)
+		var readerErr error
+		if responseErr == nil && ctx.Err() == nil && check() == nil && prepared.consent.allowsReaderRoundtrip() {
+			if readerTransport, ok := transport.(behaviorReaderTransport); !ok {
+				readerErr = errBehaviorDispatch
+			} else if readerTransport.readerRoundtrip(ctx, prepared.consent, proof, response) != nil {
+				readerErr = errBehaviorDispatch
+			}
+		}
 		logoutErr := transport.Logout(cleanup, response)
 		if responseSHA == "" {
 			encoded, _ := json.Marshal(a)
@@ -182,7 +194,10 @@ func dispatchBehaviorCore(ctx context.Context, files storage.ConditionalFiles, g
 		}
 		_, writeErr := persistBehaviorAction(cleanup, files, a)
 		stop()
-		if responseErr != nil || logoutErr != nil || writeErr != nil || ctx.Err() != nil || check() != nil {
+		if responseErr != nil || readerErr != nil || logoutErr != nil || writeErr != nil || ctx.Err() != nil || check() != nil {
+			if responseErr == nil && logoutErr == nil && writeErr == nil && readerErr != nil {
+				result.Stage = "reader_roundtrip"
+			}
 			return result, errBehaviorDispatch
 		}
 	}
@@ -232,12 +247,23 @@ func (g *restoreGuard) dispatchBehaviorOnce(ctx context.Context, prepared *prepa
 		if e != nil || s.tokens != proof.records || prepared.consent.matches(g.plan, s, proof.runtime, clock()) != nil {
 			return errBehaviorDispatch
 		}
+		if g.locations.files[1] != nil {
+			root, e := g.locations.files[1].OpenDirectory(ctx, s.pub.Output, false)
+			if e != nil {
+				return errBehaviorDispatch
+			}
+			location, locErr := root.Location(ctx)
+			closeErr := root.Close()
+			if locErr != nil || closeErr != nil || fingerprint(location, "publication") != s.pub.TreeFingerprint {
+				return errBehaviorDispatch
+			}
+		}
 		return nil
 	}
 	result, err := dispatchBehaviorCore(ctx, g.locations.files[3], g, g.plan, prepared, proof, transport, clock, recheck)
 	if err == nil {
 		if concrete, ok := transport.(*behaviorHTTPTransport); ok {
-			run, e := captureConfirmedBehaviorRun(ctx, g.locations.files[3], g.plan, proof, concrete, result, sourceKey, targetKey, clock())
+			run, e := captureConfirmedBehaviorRun(ctx, g.locations.files[3], g.plan, prepared.consent, proof, concrete, result, sourceKey, targetKey, clock())
 			if e != nil {
 				result.Stage = "confirmed_witness_capture"
 				return result, errBehaviorDispatch

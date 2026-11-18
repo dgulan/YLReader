@@ -17,6 +17,8 @@ type behaviorConsentAccount struct {
 	CredentialKey string `json:"credential_key"`
 }
 
+const behaviorReaderScopeReadOnly = "readonly-local-reader-roundtrip"
+
 // This is operator intent only, never a behaviorGrant or restore capability.
 type behaviorConsent struct {
 	Format         string                   `json:"consent_format"`
@@ -32,13 +34,18 @@ type behaviorConsent struct {
 	AttemptSHA     string                   `json:"attempt_record_sha256"`
 	PublicationSHA string                   `json:"publication_record_sha256"`
 	RuntimeSHA     string                   `json:"runtime_config_revision_sha256"`
+	ReaderScope    string                   `json:"reader_scope,omitempty"`
 	Issued         time.Time                `json:"issued_at"`
 	Expires        time.Time                `json:"expires_at"`
 	Accounts       []behaviorConsentAccount `json:"accounts"`
 }
 
+func (a behaviorConsent) allowsReaderRoundtrip() bool {
+	return a.ReaderScope == behaviorReaderScopeReadOnly
+}
+
 func (a behaviorConsent) validate() error {
-	if a.Format != "ylreader-behavior-consent" || a.Version != 1 || a.Scope != "isolated-account-verification-only" || !validUUID(a.ID) || !validUUID(a.OperationID) || !validUUID(a.OwnerID) || !validUUID(a.TargetID) || !validSHA(a.PlanDigest) || !validSHA(a.OperationSHA) || !validSHA(a.AttemptSHA) || !validSHA(a.PublicationSHA) || !validSHA(a.RuntimeSHA) || a.Generation < 1 || a.Generation > 9007199254740991 || !validStamp(a.Issued) || !validStamp(a.Expires) || !a.Expires.After(a.Issued) || a.Expires.Sub(a.Issued) > 5*time.Minute || len(a.Accounts) < 1 || len(a.Accounts) > 8 {
+	if a.Format != "ylreader-behavior-consent" || a.Version != 1 || a.Scope != "isolated-account-verification-only" || (a.ReaderScope != "" && a.ReaderScope != behaviorReaderScopeReadOnly) || !validUUID(a.ID) || !validUUID(a.OperationID) || !validUUID(a.OwnerID) || !validUUID(a.TargetID) || !validSHA(a.PlanDigest) || !validSHA(a.OperationSHA) || !validSHA(a.AttemptSHA) || !validSHA(a.PublicationSHA) || !validSHA(a.RuntimeSHA) || a.Generation < 1 || a.Generation > 9007199254740991 || !validStamp(a.Issued) || !validStamp(a.Expires) || !a.Expires.After(a.Issued) || a.Expires.Sub(a.Issued) > 5*time.Minute || len(a.Accounts) < 1 || len(a.Accounts) > 8 {
 		return errBehaviorConsent
 	}
 	users, keys := map[string]bool{}, map[string]bool{}
