@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -58,10 +59,16 @@ func installBridge(rt *goja.Runtime, ec *execCtx) {
 		return rt.ToValue(hex.EncodeToString(sum[:]))
 	})
 	java.Set("aesEncode", func(call goja.FunctionCall) goja.Value {
-		return rt.ToValue(aesEncrypt(call.Argument(0).String(), call.Argument(1).String()))
+		return rt.ToValue(evalAESEncode(call))
 	})
 	java.Set("aesDecode", func(call goja.FunctionCall) goja.Value {
-		return rt.ToValue(aesDecrypt(call.Argument(0).String(), call.Argument(1).String()))
+		return rt.ToValue(evalAESDecode(call))
+	})
+	java.Set("aesBase64DecodeToString", func(call goja.FunctionCall) goja.Value {
+		return rt.ToValue(evalAESDecode(call))
+	})
+	java.Set("aesDecodeToString", func(call goja.FunctionCall) goja.Value {
+		return rt.ToValue(evalAESDecode(call))
 	})
 	java.Set("timeFormat", func(call goja.FunctionCall) goja.Value {
 		return rt.ToValue(formatTime(time.Now(), call.Argument(0).String()))
@@ -125,11 +132,148 @@ func formatTime(t time.Time, pattern string) string {
 	).Replace(pattern)
 }
 
-// aesEncrypt / aesDecrypt：AES-128-ECB + PKCS7，key 取 MD5(keyStr) 前 16 字节。
-// 占位实现，后续 Stage 对齐 Legado 的 CBC 语义。
+const maxAESInputBytes = 4 << 20
+
+func evalAESEncode(call goja.FunctionCall) string {
+	data := call.Argument(0).String()
+	key := call.Argument(1).String()
+	if len(call.Arguments) <= 2 {
+		return aesEncrypt(data, key)
+	}
+	transform := call.Argument(2).String()
+	iv := ""
+	if len(call.Arguments) >= 4 && !goja.IsUndefined(call.Argument(3)) && !goja.IsNull(call.Argument(3)) {
+		iv = call.Argument(3).String()
+	}
+	if strings.TrimSpace(transform) == "" {
+		return aesEncrypt(data, key)
+	}
+	return aesEncryptWithMode(data, key, transform, iv)
+}
+
+func evalAESDecode(call goja.FunctionCall) string {
+	data := call.Argument(0).String()
+	key := call.Argument(1).String()
+	if len(call.Arguments) <= 2 {
+		return aesDecrypt(data, key)
+	}
+	transform := call.Argument(2).String()
+	iv := ""
+	if len(call.Arguments) >= 4 && !goja.IsUndefined(call.Argument(3)) && !goja.IsNull(call.Argument(3)) {
+		iv = call.Argument(3).String()
+	}
+	if strings.TrimSpace(transform) == "" {
+		return aesDecrypt(data, key)
+	}
+	return aesDecryptWithMode(data, key, transform, iv)
+}
+
+// aesEncrypt / aesDecrypt：两参数默认实现（AES-128-ECB + PKCS7，key 取 MD5(keyStr)）。
 func aesKey(key string) []byte {
 	sum := md5.Sum([]byte(key))
 	return sum[:]
+}
+
+func aesRawOrMD5Key(key string) []byte {
+	kb := []byte(key)
+	switch len(kb) {
+	case 16, 24, 32:
+		return kb
+	default:
+		sum := md5.Sum(kb)
+		return sum[:]
+	}
+}
+
+func aesIVBytes(iv string) []byte {
+	buf := make([]byte, aes.BlockSize)
+	copy(buf, []byte(iv))
+	return buf
+}
+
+func parseAESTransformation(transform string) (mode, padding string, ok bool) {
+	parts := strings.Split(strings.ToUpper(strings.TrimSpace(transform)), "/")
+	if len(parts) == 1 && parts[0] == "AES" {
+		return "ECB", "PKCS7PADDING", true
+	}
+	if len(parts) != 3 || parts[0] != "AES" {
+		return "", "", false
+	}
+	mode, padding = parts[1], parts[2]
+	if mode != "ECB" && mode != "CBC" {
+		return "", "", false
+	}
+	switch padding {
+	case "PKCS5PADDING", "PKCS7PADDING", "NOPADDING":
+		return mode, padding, true
+	default:
+		return "", "", false
+	}
+}
+
+func aesEncryptWithMode(plain, key, transform, iv string) string {
+	if plain == "" || len(plain) > maxAESInputBytes {
+		return ""
+	}
+	mode, padding, ok := parseAESTransformation(transform)
+	if !ok {
+		return ""
+	}
+	block, err := aes.NewCipher(aesRawOrMD5Key(key))
+	if err != nil {
+		return ""
+	}
+	src := []byte(plain)
+	if padding == "NOPADDING" {
+		if len(src)%aes.BlockSize != 0 {
+			return ""
+		}
+	} else {
+		src = pkcs7Pad(src, aes.BlockSize)
+	}
+	out := make([]byte, len(src))
+	if mode == "CBC" {
+		cipher.NewCBCEncrypter(block, aesIVBytes(iv)).CryptBlocks(out, src)
+	} else {
+		for i := 0; i < len(src); i += aes.BlockSize {
+			block.Encrypt(out[i:i+aes.BlockSize], src[i:i+aes.BlockSize])
+		}
+	}
+	return base64.StdEncoding.EncodeToString(out)
+}
+
+func aesDecryptWithMode(cipherText, key, transform, iv string) string {
+	if cipherText == "" || len(cipherText) > maxAESInputBytes {
+		return ""
+	}
+	mode, padding, ok := parseAESTransformation(transform)
+	if !ok {
+		return ""
+	}
+	data, err := base64.StdEncoding.DecodeString(cipherText)
+	if err != nil || len(data) == 0 || len(data)%aes.BlockSize != 0 {
+		return ""
+	}
+	block, err := aes.NewCipher(aesRawOrMD5Key(key))
+	if err != nil {
+		return ""
+	}
+	out := make([]byte, len(data))
+	if mode == "CBC" {
+		cipher.NewCBCDecrypter(block, aesIVBytes(iv)).CryptBlocks(out, data)
+	} else {
+		for i := 0; i < len(data); i += aes.BlockSize {
+			block.Decrypt(out[i:i+aes.BlockSize], data[i:i+aes.BlockSize])
+		}
+	}
+	if padding == "NOPADDING" {
+		return string(out)
+	}
+	unpadded, err := pkcs7Unpad(out)
+	if err != nil {
+		return ""
+	}
+	return string(unpadded)
 }
 
 func aesEncrypt(plain, key string) string {

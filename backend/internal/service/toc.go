@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -177,7 +178,7 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 		return err
 	}
 
-	chapters, err := s.fetchTOC(ctx, parseTOCRules(src.Rules), bookURL)
+	chapters, err := s.fetchTOCWithHeaders(ctx, parseTOCRules(src.Rules), bookURL, parseSourceHeaders(src.Header))
 	if err != nil {
 		return err
 	}
@@ -320,6 +321,10 @@ func bookURLForSource(book *repository.Book, sourceID uuid.UUID, getMapping func
 
 // fetchTOC 抓取目录（含多页翻页），返回有序章节行。
 func (s *TOCService) fetchTOC(ctx context.Context, rules tocRules, startURL string) ([]repository.Chapter, error) {
+	return s.fetchTOCWithHeaders(ctx, rules, startURL, nil)
+}
+
+func (s *TOCService) fetchTOCWithHeaders(ctx context.Context, rules tocRules, startURL string, srcHeader http.Header) ([]repository.Chapter, error) {
 	if strings.TrimSpace(rules.ChapterList) == "" {
 		return nil, fmt.Errorf("%w: toc chapterList rule is empty", sandbox.ErrRuleExecution)
 	}
@@ -346,7 +351,7 @@ func (s *TOCService) fetchTOC(ctx context.Context, rules tocRules, startURL stri
 		visited[tocPageKey(pageURL)] = true
 		pages++
 
-		resp, err := s.ft.Get(ctx, pageURL, nil)
+		resp, err := s.ft.Get(ctx, pageURL, srcHeader)
 		if err != nil {
 			return nil, err
 		}

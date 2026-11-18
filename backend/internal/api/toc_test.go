@@ -288,15 +288,16 @@ func TestTOCOverrideAssociationAndStale(t *testing.T) {
 	)
 	s1Hrefs := []string{"/s1/1", "/s1/2", "/s1/3", "/s1/4", "/s1/5", "/s1/6", "/s1/7", "/s1/8", "/s1/9", "/s1/10"}
 	mock := newTOCMock(map[string]string{
-		urlS1: tocPage(false, s1Hrefs, ""),
-		urlS2: tocPage(false, []string{"/s2/1", "/s2/2", "/s2/3", "/s2/4", "/s2/5"}, ""),
+		urlS1:                              tocPage(false, s1Hrefs, ""),
+		urlS2:                              tocPage(false, []string{"/s2/1", "/s2/2", "/s2/3", "/s2/4", "/s2/5"}, ""),
+		"https://toc4-s2.example.com/s2/8": `<html><body><div id="content"><p>S2 第9章试抓正文</p></div></body></html>`,
 	})
 	ts, pool := newTestServer(t, mock)
 	base := ts.URL + "/api/v1"
 	userID, username, password := seedUser(t, pool)
 	token := login(t, base, username, password)
 	s1 := seedSource(t, pool, userID, "https://toc4-s1.example.com", tocRulesJSON("ul.list li", "a@text", "a@href", "", ""))
-	s2 := seedSource(t, pool, userID, "https://toc4-s2.example.com", tocRulesJSON("ul.list li", "a@text", "a@href", "", ""))
+	s2 := seedSource(t, pool, userID, "https://toc4-s2.example.com", contentRulesJSON("ul.list li", "a@text", "a@href", "", "", "div#content@text", ""))
 	_, book := createBook(t, base, token, "覆盖标记书", s1, urlS1)
 	if _, err := pool.Exec(context.Background(), `
 		INSERT INTO book_source_mappings (book_id, source_id, book_url, sync_status)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -198,6 +199,32 @@ func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookI
 	return nil
 }
 
+// TrialFetchForOverride 试抓单章覆盖目标正文并准备缓存写入回调（由调用方在 DB 事务提交后执行）。
+func (s *ContentService) TrialFetchForOverride(ctx context.Context, userID, bookID uuid.UUID, chapterIndex int32, src *repository.BookSource, targetURL string) (string, func(context.Context), error) {
+	userRules, err := s.rules.ListEnabledForContent(ctx, s.pool, userID)
+	if err != nil {
+		return "", nil, err
+	}
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, targetURL, userRules)
+	if err != nil {
+		return "", nil, err
+	}
+	key := fmt.Sprintf("%s:%s:%s:%d", contentCachePrefix, bookID, src.ID, chapterIndex)
+	payload := cachedPayload{
+		TargetURL:             targetURL,
+		RulesFingerprint:      contentRulesFingerprint(src.Rules, userRules),
+		Content:               content,
+		WordCount:             utf8.RuneCountInString(content),
+		AppliedReplaceRuleIDs: appliedIDs,
+		SourceID:              src.ID,
+		TraceID:               traceID,
+	}
+	writeCache := func(cacheCtx context.Context) {
+		s.storeCache(cacheCtx, key, payload)
+	}
+	return content, writeCache, nil
+}
+
 // getLocalContent 读取本地书章节正文：只做用户替换规则 + 基础整理，
 // 不生成 trace_id（本地读不涉及规则求值），也不写缓存。
 func (s *ContentService) getLocalContent(
@@ -312,7 +339,8 @@ func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, sr
 	rules := parseContentRules(src.Rules)
 	traceID := "tr_" + uuid.NewString()
 
-	content, err := s.fetchContent(ctx, rules, startURL)
+	srcHeader := parseSourceHeaders(src.Header)
+	content, err := s.fetchContentWithHeaders(ctx, rules, startURL, srcHeader)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -332,6 +360,10 @@ func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, sr
 }
 
 func (s *ContentService) fetchContent(ctx context.Context, rules contentRules, startURL string) (string, error) {
+	return s.fetchContentWithHeaders(ctx, rules, startURL, nil)
+}
+
+func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules contentRules, startURL string, srcHeader http.Header) (string, error) {
 	if strings.TrimSpace(rules.Content) == "" {
 		return "", fmt.Errorf("%w: content rule is empty", sandbox.ErrRuleExecution)
 	}
@@ -349,7 +381,7 @@ func (s *ContentService) fetchContent(ctx context.Context, rules contentRules, s
 		}
 		visited[pageURL] = true
 
-		resp, err := s.ft.Get(ctx, pageURL, nil)
+		resp, err := s.ft.Get(ctx, pageURL, srcHeader)
 		if err != nil {
 			return "", err
 		}

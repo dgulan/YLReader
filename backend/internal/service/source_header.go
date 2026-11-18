@@ -1,0 +1,80 @@
+package service
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+)
+
+const maxSourceHeaderValueBytes = 8192
+
+// parseSourceHeaders parses BookSource.Header JSON into a sanitized http.Header.
+// Only safe outbound headers are permitted; control characters and hop-by-hop/host
+// headers are dropped to prevent header injection or request smuggling.
+func parseSourceHeaders(raw json.RawMessage) http.Header {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil || len(obj) == 0 {
+		return nil
+	}
+	out := make(http.Header)
+	for k, v := range obj {
+		str, ok := v.(string)
+		if !ok {
+			continue
+		}
+		if !isSafeHeaderName(k) || !isSafeHeaderValue(str) {
+			continue
+		}
+		canonical := http.CanonicalHeaderKey(strings.TrimSpace(k))
+		if !isAllowedSourceHeader(canonical) {
+			continue
+		}
+		out.Set(canonical, str)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mergeHeaders merges base source headers with per-request override headers.
+// Override headers take precedence over base headers with the same canonical name.
+func mergeHeaders(base, override http.Header) http.Header {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+	out := make(http.Header, len(base)+len(override))
+	for k, vs := range base {
+		out[k] = append([]string(nil), vs...)
+	}
+	for k, vs := range override {
+		out[k] = append([]string(nil), vs...)
+	}
+	return out
+}
+
+func isSafeHeaderName(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" || len(trimmed) > 128 {
+		return false
+	}
+	return !strings.ContainsAny(trimmed, "\r\n\x00: \t")
+}
+
+func isSafeHeaderValue(val string) bool {
+	if len(val) > maxSourceHeaderValueBytes {
+		return false
+	}
+	return !strings.ContainsAny(val, "\r\n\x00")
+}
+
+func isAllowedSourceHeader(canonical string) bool {
+	switch canonical {
+	case "User-Agent", "Accept", "Accept-Language", "Referer", "Origin", "Cookie", "Authorization":
+		return true
+	}
+	return strings.HasPrefix(canonical, "X-")
+}

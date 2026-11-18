@@ -96,6 +96,7 @@ func newTestServerWithPool(t *testing.T, ft service.Fetcher, mutate func(pool *p
 	deps.Log = logger
 	deps.Books = service.NewBookService(pool, store, logger)
 	deps.Content = service.NewContentService(pool, ft, sb, testCache(), store, logger)
+	deps.Overrides = service.NewOverrideService(pool).WithContent(deps.Content)
 	deps.Import = service.NewImportService(pool, store, logger)
 	deps.Settings = service.NewSettingsService(pool, logger)
 	deps.Bookmarks = service.NewBookmarkService(pool, logger)

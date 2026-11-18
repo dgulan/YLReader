@@ -83,7 +83,7 @@ func (s *DebugService) resolveInput(ctx context.Context, src *repository.BookSou
 	if rawURL != nil && strings.TrimSpace(*rawURL) != "" {
 		target = strings.TrimSpace(*rawURL)
 	}
-	resp, err := s.ft.Get(ctx, target, nil)
+	resp, err := s.ft.Get(ctx, target, parseSourceHeaders(src.Header))
 	if err != nil {
 		return "", err
 	}

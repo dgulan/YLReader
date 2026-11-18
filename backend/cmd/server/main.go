@@ -187,7 +187,7 @@ func run() error {
 		Books:         service.NewBookService(pool, storageProvider, log),
 		Progress:      service.NewProgressService(pool),
 		Mapping:       service.NewMappingService(pool),
-		Overrides:     service.NewOverrideService(pool),
+		Overrides:     service.NewOverrideService(pool).WithContent(contentSvc),
 		TOC:           service.NewTOCService(pool, ft, sb),
 		Content:       contentSvc,
 		Import:        service.NewImportService(pool, storageProvider, log),

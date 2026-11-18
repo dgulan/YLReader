@@ -19,12 +19,12 @@ func (s *Server) SetChapterOverride(w http.ResponseWriter, r *http.Request, book
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
-	ov, src, err := s.Overrides.Set(r.Context(), uid, bookId, int32(chapterIndex), req.ChapterUrl, req.SourceId)
+	ov, src, preview, err := s.Overrides.SetWithPreview(r.Context(), uid, bookId, int32(chapterIndex), req.ChapterUrl, req.SourceId)
 	if err != nil {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPIOverride(ov, src))
+	writeJSON(w, http.StatusOK, toAPIOverride(ov, src, preview))
 }
 
 // DeleteChapterOverride 处理 DELETE .../override（幂等：无论是否存在都返回 204）。
@@ -41,14 +41,14 @@ func (s *Server) DeleteChapterOverride(w http.ResponseWriter, r *http.Request, b
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// toAPIOverride 映射单章覆盖响应（M2a 不做正文试抓，content_preview 为空串）。
-func toAPIOverride(o *repository.ChapterSourceOverride, src *repository.BookSource) ChapterOverride {
+// toAPIOverride 映射单章覆盖响应（含试抓正文前 512 Unicode 字符预览）。
+func toAPIOverride(o *repository.ChapterSourceOverride, src *repository.BookSource, preview string) ChapterOverride {
 	out := ChapterOverride{
 		BookId:         o.BookID,
 		ChapterIndex:   int(o.ChapterIndex),
 		ChapterTitle:   o.ChapterTitle,
 		ChapterUrl:     o.ChapterURL,
-		ContentPreview: "",
+		ContentPreview: preview,
 		CreatedAt:      o.CreatedAt,
 		SourceId:       o.SourceID,
 		SourceName:     src.BookSourceName,

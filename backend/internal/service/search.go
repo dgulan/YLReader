@@ -203,13 +203,14 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 		return nil, err
 	}
 	target := resolveURL(src.BookSourceURL, request.url)
+	headers := mergeHeaders(parseSourceHeaders(src.Header), request.header)
 	var resp *fetcher.Response
 	if request.method == http.MethodGet {
-		resp, err = s.ft.Get(ctx, target, request.header)
+		resp, err = s.ft.Get(ctx, target, headers)
 	} else if full, ok := s.ft.(interface {
 		Fetch(context.Context, string, string, http.Header, io.Reader) (*fetcher.Response, error)
 	}); ok {
-		resp, err = full.Fetch(ctx, request.method, target, request.header, strings.NewReader(request.body))
+		resp, err = full.Fetch(ctx, request.method, target, headers, strings.NewReader(request.body))
 	} else {
 		return nil, requestOptionError()
 	}

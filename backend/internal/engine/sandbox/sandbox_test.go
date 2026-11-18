@@ -128,6 +128,57 @@ func TestSandbox_BridgeBase64Md5(t *testing.T) {
 	}
 }
 
+func TestSandbox_AESModes(t *testing.T) {
+	sb := New(Config{}, nil)
+
+	// 1. Two-arg legacy ECB + MD5 key compatibility
+	out, err := sb.Eval(context.Background(), `
+		var enc = java.aesEncode('hello legado', 'secret-key');
+		result = enc + '|' + java.aesDecode(enc, 'secret-key');
+	`, nil)
+	if err != nil {
+		t.Fatalf("2-arg AES failed: %v", err)
+	}
+	parts := strings.SplitN(out, "|", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] != "hello legado" {
+		t.Fatalf("2-arg AES mismatch: %q", out)
+	}
+
+	// 2. Four-arg AES/CBC/PKCS5Padding + PKCS7Padding with 16-byte key & IV + aliases
+	out, err = sb.Eval(context.Background(), `
+		var k = '1234567890123456';
+		var iv = 'abcdef1234567890';
+		var enc = java.aesEncode('章节正文ABC', k, 'AES/CBC/PKCS5Padding', iv);
+		var d1 = java.aesDecode(enc, k, 'AES/CBC/PKCS7Padding', iv);
+		var d2 = java.aesBase64DecodeToString(enc, k, 'AES/CBC/PKCS5Padding', iv);
+		var d3 = java.aesDecodeToString(enc, k, 'AES/CBC/PKCS5Padding', iv);
+		result = d1 + '|' + d2 + '|' + d3;
+	`, nil)
+	if err != nil {
+		t.Fatalf("CBC AES failed: %v", err)
+	}
+	if out != "章节正文ABC|章节正文ABC|章节正文ABC" {
+		t.Fatalf("CBC AES mismatch: got %q", out)
+	}
+
+	// 3. AES-256-CBC with 32-byte key & NoPadding 16-byte block
+	out, err = sb.Eval(context.Background(), `
+		var k32 = '12345678901234567890123456789012';
+		var iv = '0000000000000000';
+		var enc = java.aesEncode('0123456789abcdef', k32, 'AES/ECB/NoPadding', '');
+		var dec = java.aesDecode(enc, k32, 'AES/ECB/NoPadding', '');
+		var bad = java.aesDecode('!!!not-base64!!!', k32, 'AES/CBC/PKCS5Padding', iv);
+		var badMode = java.aesEncode('abc', k32, 'DES/CBC/PKCS5Padding', iv);
+		result = dec + '|' + bad + '|' + badMode;
+	`, nil)
+	if err != nil {
+		t.Fatalf("NoPadding/invalid AES failed: %v", err)
+	}
+	if out != "0123456789abcdef||" {
+		t.Fatalf("NoPadding/invalid AES mismatch: got %q", out)
+	}
+}
+
 func TestSandbox_SourceVariables(t *testing.T) {
 	sb := New(Config{}, nil)
 	out, err := sb.Eval(context.Background(), "source.setVariable('k', 'v'); result = source.getVariable('k')", nil)

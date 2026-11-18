@@ -344,12 +344,15 @@ func TestProgressZeroValueAndConflict(t *testing.T) {
 // TestSwitchSourceDryRunAndOverrideCleanup 覆盖：URL 继承 / dry_run 回滚 /
 // 动态回填 dry_run 与当前进度 / 非 dry_run 清空单章覆盖并更新活跃源。
 func TestSwitchSourceDryRunAndOverrideCleanup(t *testing.T) {
-	ts, pool := newTestServer(t, nil)
+	mock := newTOCMock(map[string]string{
+		"https://src1.example.com/c/5": `<html><body><div id="content"><p>第5章覆盖试抓正文</p></div></body></html>`,
+	})
+	ts, pool := newTestServer(t, mock)
 	base := ts.URL + "/api/v1"
 	userID, username, password := seedUser(t, pool)
 	token := login(t, base, username, password)
 	s1 := seedSource(t, pool, userID, "https://src1.example.com", `{}`)
-	s2 := seedSource(t, pool, userID, "https://src2.example.com", `{}`)
+	s2 := seedSource(t, pool, userID, "https://src2.example.com", `{"content":{"content":"div#content@text"}}`)
 
 	status, book := createBook(t, base, token, "换源书", s1, "https://src1.example.com/book/s1")
 	if status != http.StatusCreated {
@@ -433,11 +436,15 @@ func TestSwitchSourceDryRunAndOverrideCleanup(t *testing.T) {
 // TestOverrideUpsertTenantAndIdempotentDelete 覆盖：负索引 400 / 非本人源 400 /
 // 禁用源 400 / Upsert 重置 active / DELETE 幂等 204。
 func TestOverrideUpsertTenantAndIdempotentDelete(t *testing.T) {
-	ts, pool := newTestServer(t, nil)
+	mock := newTOCMock(map[string]string{
+		"https://src1.example.com/c/5":  `<html><body><div id="content"><p>第五章试抓正文</p></div></body></html>`,
+		"https://src1.example.com/c/5b": `<html><body><div id="content"><p>第五章更新正文</p></div></body></html>`,
+	})
+	ts, pool := newTestServer(t, mock)
 	base := ts.URL + "/api/v1"
 	userID, username, password := seedUser(t, pool)
 	token := login(t, base, username, password)
-	s1 := seedSource(t, pool, userID, "https://src1.example.com", `{}`)
+	s1 := seedSource(t, pool, userID, "https://src1.example.com", `{"content":{"content":"div#content@text"}}`)
 
 	// 另一个用户的源
 	otherID, _, _ := seedUser(t, pool)
