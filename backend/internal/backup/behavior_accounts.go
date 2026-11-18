@@ -24,6 +24,7 @@ type verifiedBehaviorAccounts struct {
 	redis                            string
 	records                          [3]string
 	users                            []uuid.UUID
+	versions                         []int
 	checked, expires                 time.Time
 }
 
@@ -96,31 +97,37 @@ func probeRestoredAccounts(ctx context.Context, raw string, source, target datab
 }
 
 func probeRestoredAccountsStage(ctx context.Context, raw string, source, target databaseIdentityPin, sourceKey, targetKey []byte, prepared *preparedBehaviorInput, clock func() time.Time) (users []uuid.UUID, stage string, err error) {
+	users, _, stage, err = probeRestoredAccountsVersions(ctx, raw, source, target, sourceKey, targetKey, prepared, clock)
+	return users, stage, err
+}
+
+func probeRestoredAccountsVersions(ctx context.Context, raw string, source, target databaseIdentityPin, sourceKey, targetKey []byte, prepared *preparedBehaviorInput, clock func() time.Time) (users []uuid.UUID, versions []int, stage string, err error) {
 	if ctx == nil || clock == nil || !validBehaviorAccountInput(prepared, sourceKey, targetKey) || !databasePinsSeparate(source, target) {
-		return nil, "account_input", errBehaviorAccounts
+		return nil, nil, "account_input", errBehaviorAccounts
 	}
 	cfg, e := ParseTarget(raw)
 	if e != nil {
-		return nil, "account_target_parse", errBehaviorAccounts
+		return nil, nil, "account_target_parse", errBehaviorAccounts
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	conn, e := pgx.ConnectConfig(ctx, cfg)
 	if e != nil {
-		return nil, "account_db_connect", errBehaviorAccounts
+		return nil, nil, "account_db_connect", errBehaviorAccounts
 	}
 	defer func() {
 		closeCtx, stop := context.WithTimeout(context.Background(), time.Second)
 		defer stop()
 		if conn.Close(closeCtx) != nil {
 			users = nil
+			versions = nil
 			stage = "account_conn_close"
 			err = errBehaviorAccounts
 		}
 	}()
 	tx, e := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if e != nil {
-		return nil, "account_tx_begin", errBehaviorAccounts
+		return nil, nil, "account_tx_begin", errBehaviorAccounts
 	}
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
@@ -128,48 +135,48 @@ func probeRestoredAccountsStage(ctx context.Context, raw string, source, target 
 		_ = tx.Rollback(cleanup)
 	}()
 	if obsStage, e := accountObservationStage(ctx, tx, source, target, cfg, true); e != nil {
-		return nil, obsStage, errBehaviorAccounts
+		return nil, nil, obsStage, errBehaviorAccounts
 	}
-	versions := make([]int, len(prepared.accounts))
+	versions = make([]int, len(prepared.accounts))
 	expiries := make([]time.Time, len(prepared.accounts))
 	for i, a := range prepared.accounts {
 		if ctx.Err() != nil {
-			return nil, "account_ctx_canceled", errBehaviorAccounts
+			return nil, nil, "account_ctx_canceled", errBehaviorAccounts
 		}
 		id, e := uuid.Parse(a.UserID)
 		if e != nil || id == uuid.Nil {
-			return nil, "account_input", errBehaviorAccounts
+			return nil, nil, "account_input", errBehaviorAccounts
 		}
 		var username, hash string
 		var disabled bool
 		if tx.QueryRow(ctx, `SELECT username,password_hash,token_version,is_disabled FROM public.users WHERE id=$1`, id).Scan(&username, &hash, &versions[i], &disabled) != nil || disabled || username != a.Username || checkOldBehaviorAccessAt(a.OldAccess, sourceKey, id, versions[i], clock()) != nil {
-			return nil, "account_user_query", errBehaviorAccounts
+			return nil, nil, "account_user_query", errBehaviorAccounts
 		}
 		ok, e := service.VerifyPassword(hash, a.Password)
 		if e != nil || !ok || ctx.Err() != nil {
-			return nil, "account_password_verify", errBehaviorAccounts
+			return nil, nil, "account_password_verify", errBehaviorAccounts
 		}
 		sum := sha256.Sum256([]byte(a.OldRefresh))
 		var owner uuid.UUID
 		var revoked bool
 		if tx.QueryRow(ctx, `SELECT user_id,revoked_at IS NOT NULL,expires_at FROM public.auth_sessions WHERE refresh_token_hash=$1`, hex.EncodeToString(sum[:])).Scan(&owner, &revoked, &expiries[i]) != nil || owner != id || !revoked || !expiries[i].After(clock()) {
-			return nil, "account_refresh_session", errBehaviorAccounts
+			return nil, nil, "account_refresh_session", errBehaviorAccounts
 		}
 		users = append(users, id)
 	}
 	now := clock()
 	if !validStamp(now) || now.Before(prepared.consent.Issued) || !now.Before(prepared.consent.Expires) {
-		return nil, "account_freshness", errBehaviorAccounts
+		return nil, nil, "account_freshness", errBehaviorAccounts
 	}
 	for i, a := range prepared.accounts {
 		if checkOldBehaviorAccessAt(a.OldAccess, sourceKey, users[i], versions[i], now) != nil || !expiries[i].After(now) {
-			return nil, "account_freshness", errBehaviorAccounts
+			return nil, nil, "account_freshness", errBehaviorAccounts
 		}
 	}
 	if ctx.Err() != nil || tx.Commit(ctx) != nil {
-		return nil, "account_tx_commit", errBehaviorAccounts
+		return nil, nil, "account_tx_commit", errBehaviorAccounts
 	}
-	return users, "verified", nil
+	return users, versions, "verified", nil
 }
 
 func (g *restoreGuard) verifyBehaviorAccounts(ctx context.Context, prepared *preparedBehaviorInput, inputs handoverProbeInputs, clock func() time.Time) (*verifiedBehaviorAccounts, error) {
@@ -255,7 +262,7 @@ func (g *restoreGuard) verifyBehaviorAccounts(ctx context.Context, prepared *pre
 		g.accountStage = "recheck_bindings"
 		return nil, errBehaviorAccounts
 	}
-	users, probeStage, e := probeRestoredAccountsStage(ctx, inputs.DatabaseURL, inputs.SourceDatabase, inputs.TargetDatabase, inputs.SourceJWT, inputs.TargetJWT, prepared, clock)
+	users, versions, probeStage, e := probeRestoredAccountsVersions(ctx, inputs.DatabaseURL, inputs.SourceDatabase, inputs.TargetDatabase, inputs.SourceJWT, inputs.TargetJWT, prepared, clock)
 	if e != nil {
 		g.accountStage = probeStage
 		return nil, errBehaviorAccounts
@@ -271,7 +278,7 @@ func (g *restoreGuard) verifyBehaviorAccounts(ctx context.Context, prepared *pre
 		return nil, errBehaviorAccounts
 	}
 	g.accountStage = "verified"
-	return &verifiedBehaviorAccounts{guard: g, plan: p.Digest, consent: prepared.consent.ID, runtime: draft.TargetIdentity.Runtime, database: draft.TargetIdentity.Database, redis: draft.TargetIdentity.Redis, records: s.tokens, users: users, checked: now, expires: prepared.consent.Expires}, nil
+	return &verifiedBehaviorAccounts{guard: g, plan: p.Digest, consent: prepared.consent.ID, runtime: draft.TargetIdentity.Runtime, database: draft.TargetIdentity.Database, redis: draft.TargetIdentity.Redis, records: s.tokens, users: users, versions: versions, checked: now, expires: prepared.consent.Expires}, nil
 }
 
 // Pins access to the live control handle without retaining it across guard Close.

@@ -53,6 +53,9 @@ func run(ctx context.Context, args []string, out, errs io.Writer, open openContr
 	if len(args) > 0 && (args[0] == "inspect" || args[0] == "plan") {
 		return runPreview(ctx, args, out, errs, open, clock)
 	}
+	if len(args) > 0 && args[0] == "restore" {
+		return runRestore(ctx, args, out, errs, open, clock, backup.RunControlledRestoreFromInput)
+	}
 	usage := func() int {
 		fmt.Fprintln(errs, "usage: backup status|behavior-status --control-root ABSOLUTE_PATH --operation UUID [--format json|text]")
 		return 2
