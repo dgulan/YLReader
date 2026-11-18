@@ -1,0 +1,212 @@
+# YLReader 生产加固编排配方：
+# - 隔离的 sandboxworker-1 / sandboxworker-2 容器（network_mode: none, read_only, cap_drop: ALL, no-new-privileges, 256m/64 pids, 0700 IPC 卷）
+# - Postgres 与 Redis 仅接入 internal: true 私有网络，不暴露宿主端口且强制 .env 注入非默认口令
+# - frontend 仅绑定宿主回环端口，供外部 TLS 反向代理终止 HTTPS 并转发请求
+name: yreader
+
+services:
+  sandboxworker-init:
+    image: alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+    restart: "no"
+    network_mode: "none"
+    read_only: true
+    user: "0:0"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - worker_ipc_1:/run/worker-1
+      - worker_ipc_2:/run/worker-2
+    command:
+      - sh
+      - -c
+      - chown 10001:10001 /run/worker-1 /run/worker-2 && chmod 0700 /run/worker-1 /run/worker-2
+
+  sandboxworker-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sandboxworker
+    depends_on:
+      sandboxworker-init:
+        condition: service_completed_successfully
+    network_mode: "none"
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    cpus: 1.0
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - worker_ipc_1:/ipc
+    command:
+      - -socket
+      - /ipc/worker.sock
+    restart: on-failure:3
+
+  sandboxworker-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.sandboxworker
+    depends_on:
+      sandboxworker-init:
+        condition: service_completed_successfully
+    network_mode: "none"
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    cpus: 1.0
+    environment:
+      TZ: ${TZ:-UTC}
+    volumes:
+      - worker_ipc_2:/ipc
+    command:
+      - -socket
+      - /ipc/worker.sock
+    restart: on-failure:3
+
+  app:
+    build: ./backend
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      PORT: "8080"
+      TZ: ${TZ:-UTC}
+      ENVIRONMENT: production
+      LOCAL_IMPORT_TIMEOUT: ${LOCAL_IMPORT_TIMEOUT:-90s}
+      YREADER_SANDBOX_SOCKETS: /run/worker-1/worker.sock,/run/worker-2/worker.sock
+      YREADER_SANDBOX_INPUT_LIMIT_MB: ${YREADER_SANDBOX_INPUT_LIMIT_MB:-32}
+      YREADER_SANDBOX_INFLIGHT_MB: ${YREADER_SANDBOX_INFLIGHT_MB:-64}
+      YREADER_SANDBOX_MAX_CONCURRENT: ${YREADER_SANDBOX_MAX_CONCURRENT:-2}
+      DATABASE_URL: postgres://${POSTGRES_USER:-yreader}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-yreader}?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
+      STORAGE_DIR: /var/lib/yreader/storage
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
+      YREADER_HEADER_KEY_KID: primary
+      YREADER_HEADER_KEY_primary: ${YREADER_HEADER_KEY_primary:?Set base64 encoded 32-byte header key}
+      SEED_USERNAME: ${SEED_USERNAME:-}
+      SEED_PASSWORD: ${SEED_PASSWORD:-}
+    stop_grace_period: 65s
+    volumes:
+      - storagedata:/var/lib/yreader/storage
+      - worker_ipc_1:/run/worker-1
+      - worker_ipc_2:/run/worker-2
+    networks:
+      - internal_data
+      - app_egress
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      sandboxworker-1:
+        condition: service_started
+      sandboxworker-2:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=8m
+    ports:
+      - "127.0.0.1:${YLREADER_HTTP_PORT:-8080}:80"
+    networks:
+      - app_egress
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-yreader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-yreader}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    networks:
+      - internal_data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-yreader} -d $${POSTGRES_DB:-yreader}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    user: "999:999"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    volumes:
+      - redisdata:/data
+    networks:
+      - internal_data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+networks:
+  internal_data:
+    internal: true
+  app_egress:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  storagedata:
+  worker_ipc_1:
+  worker_ipc_2:

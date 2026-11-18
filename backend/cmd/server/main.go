@@ -41,6 +41,15 @@ func run() error {
 		log.Error("invalid import timeout", "error", err)
 		return err
 	}
+	sandboxCfg, err := parseSandboxConfig(
+		os.Getenv("YREADER_SANDBOX_INPUT_LIMIT_MB"),
+		os.Getenv("YREADER_SANDBOX_INFLIGHT_MB"),
+		os.Getenv("YREADER_SANDBOX_MAX_CONCURRENT"),
+	)
+	if err != nil {
+		log.Error("invalid sandbox configuration", "error", err)
+		return err
+	}
 	secret := os.Getenv("JWT_SECRET")
 	if err := validateJWTSecret(secret, os.Getenv("ENVIRONMENT")); err != nil {
 		log.Error("invalid JWT_SECRET", "error", err)
@@ -128,14 +137,14 @@ func run() error {
 		admission = redisCache
 	}
 	ft := fetcher.New(fetcher.Config{DomainLimiter: fetcher.NewDomainLimiter(admission)})
-	sb := sandbox.New(sandbox.Config{}, sandboxFetcher{ft: ft})
+	sb := sandbox.New(sandboxCfg, sandboxFetcher{ft: ft})
 	var sandboxPing func(context.Context) error
 	if sockets := strings.TrimSpace(os.Getenv("YREADER_SANDBOX_SOCKETS")); sockets != "" {
 		paths := strings.Split(sockets, ",")
 		for i := range paths {
 			paths[i] = strings.TrimSpace(paths[i])
 		}
-		sb, err = sandbox.NewRemote(sandbox.Config{}, sandboxFetcher{ft: ft}, paths)
+		sb, err = sandbox.NewRemote(sandboxCfg, sandboxFetcher{ft: ft}, paths)
 		if err != nil {
 			log.Error("isolated sandbox configuration unavailable")
 			return err
