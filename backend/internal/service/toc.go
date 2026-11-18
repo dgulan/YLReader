@@ -47,6 +47,7 @@ type TOCService struct {
 	sources   *repository.SourceRepository
 	ft        Fetcher
 	sb        *sandbox.Sandbox
+	health    *SourceHealthService
 	sleep     func(ctx context.Context, d time.Duration) error
 	now       func() time.Time
 }
@@ -62,6 +63,7 @@ func NewTOCService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox) *TOCServ
 		sources:   repository.NewSourceRepository(),
 		ft:        ft,
 		sb:        sb,
+		health:    NewSourceHealthService(pool, nil),
 		sleep: func(ctx context.Context, d time.Duration) error {
 			t := time.NewTimer(d)
 			defer t.Stop()
@@ -74,6 +76,12 @@ func NewTOCService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox) *TOCServ
 		},
 		now: time.Now,
 	}
+}
+
+// WithHealth 注入自定义书源健康度服务（测试用）。
+func (s *TOCService) WithHealth(h *SourceHealthService) *TOCService {
+	s.health = h
+	return s
 }
 
 // WithSleep 注入页间防抖实现（测试用）。
@@ -178,10 +186,13 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 		return err
 	}
 
+	fetchStart := time.Now()
 	chapters, err := s.fetchTOCWithHeaders(ctx, parseTOCRules(src.Rules), bookURL, parseSourceHeaders(src.Header))
 	if err != nil {
+		s.health.RecordFailure(userID, src.ID, err)
 		return err
 	}
+	fetchElapsed := time.Since(fetchStart)
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -282,7 +293,11 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 	}
 	// 预览模式（target != active）：只落 chapters，不动 books 元数据、不标 stale。
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	s.health.RecordSuccess(userID, src.ID, fetchElapsed)
+	return nil
 }
 
 func sameSource(a, b *uuid.UUID) bool {

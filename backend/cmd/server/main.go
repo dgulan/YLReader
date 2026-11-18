@@ -168,9 +168,14 @@ func run() error {
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	tocSvc := service.NewTOCService(pool, ft, sb)
 	contentSvc := service.NewContentService(pool, ft, sb, contentCache, storageProvider, log)
 	wp := service.NewWorkerPool(pool, 4, log)
-	jobSvc := service.NewJobService(pool, contentSvc, wp, log)
+	jobSvc := service.NewJobService(pool, contentSvc, wp, log).
+		WithTOC(tocSvc).
+		WithJobMetric(func(jobType, status string) {
+			api.YreaderJobsTotal.WithLabelValues(jobType, status).Inc()
+		})
 	wp.SetExecuteFunc(jobSvc.ExecuteJob)
 	wp.Start(shutdownCtx)
 	defer func() {
@@ -188,7 +193,7 @@ func run() error {
 		Progress:      service.NewProgressService(pool),
 		Mapping:       service.NewMappingService(pool),
 		Overrides:     service.NewOverrideService(pool).WithContent(contentSvc),
-		TOC:           service.NewTOCService(pool, ft, sb),
+		TOC:           tocSvc,
 		Content:       contentSvc,
 		Import:        service.NewImportService(pool, storageProvider, log),
 		ImportTimeout: importTimeout,

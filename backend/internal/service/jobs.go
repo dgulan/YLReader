@@ -38,7 +38,7 @@ type CacheBookInput struct {
 	SourceID    *uuid.UUID
 }
 
-// JobService 负责整本书预热任务的创建、查询、取消与执行。
+// JobService 负责后台异步任务的创建、查询、取消与执行（full_cache / toc_refresh / chapter_prefetch / source_health）。
 type JobService struct {
 	pool     *pgxpool.Pool
 	jobs     *repository.JobRepository
@@ -46,8 +46,11 @@ type JobService struct {
 	sources  *repository.SourceRepository
 	chapters *repository.ChapterRepository
 	content  *ContentService
+	toc      *TOCService
+	health   *SourceHealthService
 	wp       *WorkerPool
 	log      *slog.Logger
+	onMetric func(jobType, status string)
 
 	mu   sync.Mutex
 	runs map[uuid.UUID]context.CancelFunc
@@ -65,9 +68,34 @@ func NewJobService(pool *pgxpool.Pool, content *ContentService, wp *WorkerPool, 
 		sources:  repository.NewSourceRepository(),
 		chapters: repository.NewChapterRepository(),
 		content:  content,
+		health:   NewSourceHealthService(pool, log),
 		wp:       wp,
 		log:      log,
 		runs:     make(map[uuid.UUID]context.CancelFunc),
+	}
+}
+
+// WithTOC 注入目录服务以支持 toc_refresh 任务。
+func (s *JobService) WithTOC(toc *TOCService) *JobService {
+	s.toc = toc
+	return s
+}
+
+// WithHealth 注入书源健康度服务以支持 source_health 任务。
+func (s *JobService) WithHealth(h *SourceHealthService) *JobService {
+	s.health = h
+	return s
+}
+
+// WithJobMetric 注入任务状态指标回调。
+func (s *JobService) WithJobMetric(fn func(jobType, status string)) *JobService {
+	s.onMetric = fn
+	return s
+}
+
+func (s *JobService) recordMetric(jobType, status string) {
+	if s.onMetric != nil {
+		s.onMetric(jobType, status)
 	}
 }
 
@@ -193,6 +221,7 @@ func (s *JobService) CacheBook(ctx context.Context, userID, bookID uuid.UUID, in
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit cache job: %w", err)
 	}
+	s.recordMetric("full_cache", "queued")
 	// 任务已在 DB 权威队列中；Notify 只是唤醒优化（丢失由 5s ticker 兜底）。
 	s.Notify()
 	return job, nil
@@ -229,6 +258,7 @@ func (s *JobService) Cancel(ctx context.Context, userID, jobID uuid.UUID) error 
 	if cancel != nil {
 		cancel()
 	}
+	s.recordMetric(job.Type, "canceled")
 	return nil
 }
 
@@ -241,6 +271,45 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 	if err != nil {
 		return err
 	}
+	s.recordMetric(job.Type, "running")
+
+	switch job.Type {
+	case "full_cache":
+		err = s.executeFullCache(ctx, job, 0)
+	case "chapter_prefetch":
+		err = s.executeFullCache(ctx, job, 20)
+	case "toc_refresh":
+		err = s.executeTOCRefresh(ctx, job)
+	case "source_health":
+		err = s.executeSourceHealth(ctx, job)
+	default:
+		s.failJob(ctx, jobID, "internal_error", "unsupported job type: "+job.Type)
+		s.recordMetric(job.Type, "failed")
+		return fmt.Errorf("unsupported job type: %s", job.Type)
+	}
+	if err != nil {
+		s.recordMetric(job.Type, "failed")
+		return err
+	}
+	if st, serr := s.jobs.GetStatus(context.Background(), s.pool, jobID); serr == nil && st == "succeeded" {
+		s.recordMetric(job.Type, "succeeded")
+	}
+	return nil
+}
+
+func (s *JobService) registerRun(jobID uuid.UUID, cancel context.CancelFunc) func() {
+	s.mu.Lock()
+	s.runs[jobID] = cancel
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		delete(s.runs, jobID)
+		s.mu.Unlock()
+	}
+}
+
+func (s *JobService) executeFullCache(ctx context.Context, job *repository.Job, maxChapters int) error {
+	jobID := job.ID
 	userID := job.UserID
 
 	var p struct {
@@ -265,17 +334,22 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		_ = s.jobs.MarkFailed(context.Background(), s.pool, jobID, "internal_error", "invalid source id in payload")
 		return err
 	}
+	if maxChapters > 0 {
+		from := 0
+		if p.FromChapter != nil && *p.FromChapter >= 0 {
+			from = *p.FromChapter
+		}
+		to := from + 4
+		if p.ToChapter != nil && *p.ToChapter >= from {
+			to = min(*p.ToChapter, from+maxChapters-1)
+		}
+		p.FromChapter = &from
+		p.ToChapter = &to
+	}
 
 	jobCtx, cancel := context.WithTimeout(ctx, 60*time.Minute)
 	defer cancel()
-	s.mu.Lock()
-	s.runs[jobID] = cancel
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.runs, jobID)
-		s.mu.Unlock()
-	}()
+	defer s.registerRun(jobID, cancel)()
 
 	// 源信息用 jobCtx 查询：跟随 60min 预算，Shutdown 取消时才能如实归因为取消，
 	// 而不是误报 "source missing"（P1-1）。
@@ -356,6 +430,108 @@ func (s *JobService) ExecuteJob(ctx context.Context, jobID uuid.UUID) error {
 		"attempted":            done,
 		"target_source_id":     sourceID.String(),
 		"skipped_out_of_range": skipped,
+	})
+}
+
+func (s *JobService) executeTOCRefresh(ctx context.Context, job *repository.Job) error {
+	if s.toc == nil {
+		s.failJob(ctx, job.ID, "internal_error", "toc service unavailable")
+		return errors.New("toc service unavailable")
+	}
+	var p struct {
+		BookID   string  `json:"book_id"`
+		SourceID *string `json:"source_id"`
+	}
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		s.failJob(ctx, job.ID, "internal_error", "invalid job payload")
+		return err
+	}
+	bookID, err := uuid.Parse(p.BookID)
+	if err != nil {
+		s.failJob(ctx, job.ID, "internal_error", "invalid book id in payload")
+		return err
+	}
+	var sourceID *uuid.UUID
+	if p.SourceID != nil && *p.SourceID != "" {
+		sid, perr := uuid.Parse(*p.SourceID)
+		if perr != nil {
+			s.failJob(ctx, job.ID, "internal_error", "invalid source id in payload")
+			return perr
+		}
+		sourceID = &sid
+	}
+
+	jobCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	defer s.registerRun(job.ID, cancel)()
+
+	view, err := s.toc.GetChapters(jobCtx, job.UserID, bookID, sourceID, true)
+	if err != nil {
+		if st, serr := s.jobs.GetStatus(context.Background(), s.pool, job.ID); serr == nil && st == "canceled" {
+			return nil
+		}
+		code := "source_request_failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			code = "source_timeout"
+		}
+		s.failJob(ctx, job.ID, code, "toc refresh failed")
+		return err
+	}
+	return s.jobs.MarkSucceeded(context.Background(), s.pool, job.ID, 100, map[string]any{
+		"book_id":   bookID.String(),
+		"source_id": view.SourceID.String(),
+		"total":     view.Total,
+	})
+}
+
+func (s *JobService) executeSourceHealth(ctx context.Context, job *repository.Job) error {
+	if s.content == nil || s.content.ft == nil {
+		s.failJob(ctx, job.ID, "internal_error", "fetcher unavailable")
+		return errors.New("fetcher unavailable")
+	}
+	var p struct {
+		SourceID string `json:"source_id"`
+		ProbeURL string `json:"probe_url"`
+	}
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		s.failJob(ctx, job.ID, "internal_error", "invalid job payload")
+		return err
+	}
+	sourceID, err := uuid.Parse(p.SourceID)
+	if err != nil {
+		s.failJob(ctx, job.ID, "internal_error", "invalid source id in payload")
+		return err
+	}
+
+	jobCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	defer s.registerRun(job.ID, cancel)()
+
+	src, err := s.sources.Get(jobCtx, s.pool, job.UserID, sourceID)
+	if err != nil {
+		s.failJob(ctx, job.ID, "not_found", "source missing")
+		return err
+	}
+	target := src.BookSourceURL
+	if p.ProbeURL != "" {
+		target = p.ProbeURL
+	}
+	start := time.Now()
+	resp, ferr := s.content.ft.Get(sourceFetchContext(jobCtx, src), target, parseSourceHeaders(src.Header))
+	elapsed := time.Since(start)
+	ok := ferr == nil && resp != nil && resp.StatusCode < 400
+	if !ok {
+		if ferr == nil && resp != nil {
+			ferr = fmt.Errorf("upstream status %d", resp.StatusCode)
+		}
+		s.health.RecordFailure(job.UserID, src.ID, ferr)
+	} else {
+		s.health.RecordSuccess(job.UserID, src.ID, elapsed)
+	}
+	return s.jobs.MarkSucceeded(context.Background(), s.pool, job.ID, 100, map[string]any{
+		"source_id":  src.ID.String(),
+		"ok":         ok,
+		"elapsed_ms": elapsed.Milliseconds(),
 	})
 }
 

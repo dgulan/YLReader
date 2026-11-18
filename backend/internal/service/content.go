@@ -72,6 +72,7 @@ type ContentService struct {
 	sb        *sandbox.Sandbox
 	cache     cache.Cache
 	storage   storage.Provider
+	health    *SourceHealthService
 	log       *slog.Logger
 }
 
@@ -91,8 +92,15 @@ func NewContentService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox, c ca
 		sb:        sb,
 		cache:     c,
 		storage:   st,
+		health:    NewSourceHealthService(pool, log),
 		log:       log,
 	}
+}
+
+// WithHealth 注入自定义书源健康度服务（测试用）。
+func (s *ContentService) WithHealth(h *SourceHealthService) *ContentService {
+	s.health = h
+	return s
 }
 
 // Get 读取章节正文。chapterIndex 与 chapterID 必须且只能提供一个（由 handler 校验）。
@@ -150,10 +158,13 @@ func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chap
 			payload.AppliedReplaceRuleIDs, payload.TraceID, isOverridden, true)
 	}
 
+	fetchStart := time.Now()
 	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, targetURL, userRules)
 	if err != nil {
+		s.health.RecordFailure(userID, targetSourceID, err)
 		return nil, err
 	}
+	s.health.RecordSuccess(userID, targetSourceID, time.Since(fetchStart))
 	wordCount := utf8.RuneCountInString(content)
 	s.storeCache(ctx, key, cachedPayload{
 		TargetURL:        targetURL,
@@ -183,10 +194,13 @@ func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookI
 	if payload, ok := s.loadCache(ctx, key, src.ID); ok && payload.RulesFingerprint == fingerprint && payload.TargetURL == ch.URL {
 		return nil
 	}
+	fetchStart := time.Now()
 	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, src, ch.URL, userRules)
 	if err != nil {
+		s.health.RecordFailure(userID, src.ID, err)
 		return err
 	}
+	s.health.RecordSuccess(userID, src.ID, time.Since(fetchStart))
 	s.storeCache(ctx, key, cachedPayload{
 		TargetURL:             ch.URL,
 		RulesFingerprint:      fingerprint,

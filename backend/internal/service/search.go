@@ -66,6 +66,7 @@ type SearchService struct {
 	sources *repository.SourceRepository
 	ft      Fetcher
 	sb      *sandbox.Sandbox
+	health  *SourceHealthService
 }
 
 // NewSearchService 构造搜索服务。
@@ -75,7 +76,14 @@ func NewSearchService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox) *Sear
 		sources: repository.NewSourceRepository(),
 		ft:      ft,
 		sb:      sb,
+		health:  NewSourceHealthService(pool, nil),
 	}
+}
+
+// WithHealth 注入自定义书源健康度服务（测试用）。
+func (s *SearchService) WithHealth(h *SourceHealthService) *SearchService {
+	s.health = h
+	return s
 }
 
 // Search 执行多源并发搜索。部分失败隔离：任何单源失败都只进 Failures。
@@ -192,14 +200,18 @@ func (s *SearchService) pickSources(ctx context.Context, userID uuid.UUID, sourc
 
 // searchOne 抓取并解析单个书源的搜索结果。
 func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSource, keyword string, page, pageSize int) ([]BookItem, error) {
+	start := time.Now()
 	ctx = sourceFetchContext(ctx, src)
 	rules := parseSearchRules(src.Rules)
 	if rules.SearchURL == "" || rules.BookList == "" {
-		return nil, fmt.Errorf("%w: source has no search rule", sandbox.ErrUnsupportedRule)
+		err := fmt.Errorf("%w: source has no search rule", sandbox.ErrUnsupportedRule)
+		s.health.RecordFailure(src.UserID, src.ID, err)
+		return nil, err
 	}
 
 	request, err := parseSearchRequest(rules.SearchURL, keyword, page)
 	if err != nil {
+		s.health.RecordFailure(src.UserID, src.ID, err)
 		return nil, err
 	}
 	target := resolveURL(src.BookSourceURL, request.url)
@@ -212,14 +224,17 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 	}); ok {
 		resp, err = full.Fetch(ctx, request.method, target, headers, strings.NewReader(request.body))
 	} else {
-		return nil, requestOptionError()
+		err = requestOptionError()
 	}
 	if err != nil {
+		s.health.RecordFailure(src.UserID, src.ID, err)
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
 		// 4xx/5xx 拦截：绝不把错误页送入 bookList 解析。
-		return nil, fmt.Errorf("%w: upstream status %d", fetcher.ErrUpstreamError, resp.StatusCode)
+		err = fmt.Errorf("%w: upstream status %d", &fetcher.HTTPStatusError{StatusCode: resp.StatusCode}, resp.StatusCode)
+		s.health.RecordFailure(src.UserID, src.ID, err)
+		return nil, err
 	}
 
 	base := resp.FinalURL
@@ -228,8 +243,10 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 	}
 	items, err := s.parseBookList(ctx, string(resp.Body), base, rules)
 	if err != nil {
+		s.health.RecordFailure(src.UserID, src.ID, err)
 		return nil, err
 	}
+	s.health.RecordSuccess(src.UserID, src.ID, time.Since(start))
 	if len(items) > pageSize {
 		items = items[:pageSize]
 	}
