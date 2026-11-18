@@ -1,13 +1,35 @@
 <script setup lang="ts">
 import 'element-plus/dist/index.css'
-import { ElAlert, ElButton, ElForm, ElFormItem, ElInputNumber, ElOption, ElSelect, ElMessageBox } from 'element-plus'
+import { onMounted } from 'vue'
+import { ElAlert, ElButton, ElForm, ElFormItem, ElInputNumber, ElOption, ElSelect, ElMessageBox, ElDescriptions, ElDescriptionsItem } from 'element-plus'
 import { useReaderConfig } from '@/stores/readerConfig'
+import { useAccountProfile } from './settingsProfile'
 const config = useReaderConfig()
+const account = useAccountProfile()
+function formatTime(raw?: string | null) {
+  if (!raw) return '—'
+  const d = new Date(raw)
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleString('zh-CN')
+}
+onMounted(() => { void account.load() })
 async function reset() { try { await ElMessageBox.confirm('恢复默认主题和字号？其他设置保持原样。', '恢复阅读默认设置', { confirmButtonText: '恢复默认', cancelButtonText: '取消', type: 'warning' }); config.restoreDefaults() } catch { /* Canceled. */ } }
 </script>
 <template>
   <main class="page-width"><div class="page-heading"><div><span class="eyebrow">舒适阅读，从这里开始</span><h1>阅读设置<span class="heading-dot">.</span></h1><p class="muted">主题和字号按账户保存。修改后自动同步，重新打开仍可沿用。</p></div></div>
     <p><RouterLink to="/settings/replace-rules">管理替换净化规则 →</RouterLink></p>
+    <section class="surface" aria-label="当前账户信息">
+      <div class="section-heading"><h2>当前账户</h2><ElButton :loading="account.loading.value" @click="account.load">刷新账户信息</ElButton></div>
+      <ElAlert v-if="account.error.value" :title="account.error.value" type="warning" :closable="false" />
+      <ElDescriptions v-if="account.profile.value" :column="2" border>
+        <ElDescriptionsItem label="用户名">{{ account.profile.value.username }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="显示名">{{ account.profile.value.display_name || '—' }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="角色">{{ account.profile.value.role === 'admin' ? '管理员' : '普通用户' }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="令牌版本">v{{ account.profile.value.token_version }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="创建时间">{{ formatTime(account.profile.value.created_at) }}</ElDescriptionsItem>
+        <ElDescriptionsItem label="最近登录">{{ formatTime(account.profile.value.last_login_at) }}</ElDescriptionsItem>
+      </ElDescriptions>
+      <p v-else-if="account.loading.value" class="muted">正在读取账户信息…</p>
+    </section>
     <ElAlert v-if="config.error" :title="config.error" type="warning" :closable="false" />
     <section class="surface"><div class="section-heading"><h2>阅读外观</h2><ElButton :disabled="config.loading || config.saving || config.dirty" @click="config.reload">重新读取设置</ElButton></div>
       <ElForm label-position="top" :disabled="config.loading"><ElFormItem label="阅读主题"><ElSelect :model-value="config.theme" aria-label="阅读主题" @update:model-value="config.setTheme"><ElOption label="日间" value="day" /><ElOption label="夜间" value="night" /><ElOption label="羊皮纸" value="paper" /><ElOption label="护眼" value="green" /></ElSelect></ElFormItem><ElFormItem label="正文字号"><ElInputNumber :model-value="config.fontSize" aria-label="正文字号" :min="14" :max="32" :step="1" :precision="0" @update:model-value="value => value != null && config.setFont(value)" /></ElFormItem></ElForm>

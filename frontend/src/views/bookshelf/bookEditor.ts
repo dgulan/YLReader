@@ -11,18 +11,74 @@ export function bookPatch(draft: BookDraft, version: number): Model<'BookUpdate'
 }
 export function useBookEditor(bookId: Ref<string>) {
   const owner = getSession()?.user.id ?? '', book = ref<Model<'Book'>>(), draft = reactive(empty()), busy = ref(false), error = ref(''), notice = ref(''), deleted = ref(false)
+  const mappings = ref<Model<'BookSourceMapping'>[]>([]), sources = ref<Model<'Source'>[]>([])
+  const mappingBusy = ref(false), mappingError = ref(''), mappingNotice = ref('')
   const baseline = ref(JSON.stringify(draft)), dirty = computed(() => JSON.stringify(draft) !== baseline.value)
   let generation = 0
   const valid = (token: number) => Boolean(owner) && token === generation && getSession()?.user.id === owner
-  function reset() { generation++; book.value = undefined; Object.assign(draft, empty()); baseline.value = JSON.stringify(draft); busy.value = false; error.value = ''; notice.value = ''; deleted.value = false }
+  function reset() {
+    generation++; book.value = undefined; Object.assign(draft, empty()); baseline.value = JSON.stringify(draft)
+    busy.value = false; error.value = ''; notice.value = ''; deleted.value = false
+    mappings.value = []; sources.value = []; mappingBusy.value = false; mappingError.value = ''; mappingNotice.value = ''
+  }
   watch(bookId, reset, { flush: 'sync' }); onScopeDispose(reset)
   function apply(value: Model<'Book'>) { book.value = value; Object.assign(draft, { name: value.name, author: value.author || '', status: value.status, intro: value.intro || '' }); baseline.value = JSON.stringify(draft) }
+  async function loadMappings(token: number, id: string) {
+    mappingBusy.value = true; mappingError.value = ''
+    try {
+      const [list, srcPage] = await Promise.all([api.mappings(id), api.sources(1)])
+      if (!valid(token)) return
+      mappings.value = list
+      sources.value = srcPage.items.filter(s => s.book_source_type !== 3 && s.enabled)
+    } catch (e) { if (valid(token)) mappingError.value = errorText(e) }
+    finally { if (valid(token)) mappingBusy.value = false }
+  }
   async function load() {
     if (!valid(generation) || busy.value) return
-    const token = generation; busy.value = true; error.value = ''; notice.value = ''
-    try { const value = await api.book(bookId.value); if (valid(token)) apply(value) }
+    const token = generation, id = bookId.value; busy.value = true; error.value = ''; notice.value = ''
+    try {
+      const value = await api.book(id)
+      if (!valid(token)) return
+      apply(value)
+      if (value.book_type === 'online') await loadMappings(token, id)
+    }
     catch (e) { if (valid(token)) error.value = errorText(e) }
     finally { if (valid(token)) busy.value = false }
+  }
+  async function addBackupMapping(sourceId: string, bookUrl: string) {
+    if (!valid(generation) || mappingBusy.value || !book.value || book.value.book_type !== 'online') return false
+    const token = generation, id = bookId.value, trimmedUrl = bookUrl.trim()
+    mappingError.value = ''; mappingNotice.value = ''
+    if (!sourceId) { mappingError.value = '请选择书源'; return false }
+    if (!/^https?:\/\//i.test(trimmedUrl)) { mappingError.value = '书籍详情地址必须以 http:// 或 https:// 开头'; return false }
+    mappingBusy.value = true
+    try {
+      await api.addMapping(id, { source_id: sourceId, book_url: trimmedUrl })
+      if (!valid(token)) return false
+      const list = await api.mappings(id)
+      if (!valid(token)) return false
+      mappings.value = list
+      mappingNotice.value = '已添加备用书源绑定'
+      return true
+    } catch (e) { if (valid(token)) mappingError.value = errorText(e); return false }
+    finally { if (valid(token)) mappingBusy.value = false }
+  }
+  async function removeBackupMapping(mapping: Model<'BookSourceMapping'>) {
+    if (!valid(generation) || mappingBusy.value || !book.value) return false
+    if (mapping.source_id === book.value.active_source_id) {
+      mappingError.value = '当前激活书源不可移除，请先在阅读器中换源'
+      return false
+    }
+    const token = generation, id = bookId.value
+    mappingBusy.value = true; mappingError.value = ''; mappingNotice.value = ''
+    try {
+      await api.deleteMapping(id, mapping.id)
+      if (!valid(token)) return false
+      mappings.value = mappings.value.filter(m => m.id !== mapping.id)
+      mappingNotice.value = '已移除备用书源绑定'
+      return true
+    } catch (e) { if (valid(token)) mappingError.value = errorText(e); return false }
+    finally { if (valid(token)) mappingBusy.value = false }
   }
   async function save() {
     if (!valid(generation) || busy.value || !book.value || deleted.value) return false
@@ -52,5 +108,5 @@ export function useBookEditor(bookId: Ref<string>) {
     } catch (e) { if (valid(token)) error.value = errorText(e); return false }
     finally { if (valid(token)) busy.value = false }
   }
-  return { book, draft, dirty, busy, error, notice, deleted, load, save, remove }
+  return { book, draft, dirty, busy, error, notice, deleted, mappings, sources, mappingBusy, mappingError, mappingNotice, load, save, remove, addBackupMapping, removeBackupMapping }
 }

@@ -25,6 +25,9 @@ export async function getChapter(owner: string, bookId: string, index: number, c
   const row = await db.chapters.get(chapterKey(owner, bookId, index))
   return row?.context === context ? row.content : undefined
 }
+export async function deleteChapter(owner: string, bookId: string, index: number) {
+  await db.chapters.delete(chapterKey(owner, bookId, index))
+}
 export async function retainWindow(owner: string, bookId: string, center: number) {
   await db.chapters.where('[owner+bookId]').equals([owner, bookId]).filter(c => Math.abs(c.index - center) > 2).delete()
 }

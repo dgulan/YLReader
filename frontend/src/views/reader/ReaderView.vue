@@ -4,11 +4,12 @@ import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { api } from '@/api/reader'
 import { getSession, errorText, ApiError, type Model } from '@/api/client'
-import { db, bookKey, chapterContext, getChapter, putChapter, retainWindow, clearBookCache } from '@/db/chapters'
+import { db, bookKey, chapterContext, getChapter, putChapter, deleteChapter, retainWindow, clearBookCache } from '@/db/chapters'
 import { useReaderConfig } from '@/stores/readerConfig'
 import VirtualList from '@/components/VirtualList.vue'
 import SourceSwitcher from './SourceSwitcher.vue'
 import BookmarksPanel from './BookmarksPanel.vue'
+import ChapterOverrideDialog from './ChapterOverrideDialog.vue'
 import { bookmarkExcerpt } from './bookmarks'
 import { visibleOffset, utf16Offset, codePointLength, chapterFraction } from './position'
 import { reconcileProgress, remoteProgressState } from './progress'
@@ -31,12 +32,18 @@ let generation = 0, revision = 0, saveEpoch = 0, disposed = false, timer: Return
 let bookController = new AbortController()
 const switcher = ref<InstanceType<typeof SourceSwitcher>>()
 const bookmarks = ref<InstanceType<typeof BookmarksPanel>>()
+const overrideDialog = ref<InstanceType<typeof ChapterOverrideDialog>>()
 async function openBookmarks() {
   clearTimeout(timer); capture(); void flush()
   const at = content.value && !error.value ? { chapter_index: index.value, char_offset: offset.value, chapter_title: title.value, excerpt: bookmarkExcerpt(content.value.content, offset.value) } : undefined
   await bookmarks.value?.open(at)
 }
 async function visitBookmark(mark: Model<'Bookmark'>) { await changeChapter(mark.chapter_index, mark.char_offset) }
+async function openOverride() { clearTimeout(timer); capture(); void flush(); await overrideDialog.value?.open() }
+async function overrideUpdated(targetIndex: number) {
+  try { await deleteChapter(owner, bookId.value, targetIndex) } catch { /* Best-effort cache invalidation. */ }
+  if (index.value === targetIndex) await openChapter(targetIndex, offset.value)
+}
 async function openSwitcher() { clearTimeout(timer); capture(); if (!await flush()) { saveError.value = '请先同步阅读进度或解决冲突，再切换书源'; return }; await switcher.value?.open() }
 async function switched() { clearTimeout(timer); controller.abort(); let cacheFailed = false; try { await clearBookCache(owner, bookId.value) } catch { cacheFailed = true }; await boot(); if (cacheFailed) saveError.value = '已切换书源，但本机缓存清理失败，请保持联网' }
 const bookId = computed(() => String(route.params.bookId))
@@ -255,18 +262,19 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 </script>
 <template>
   <main class="reader" :data-theme="config.theme" :style="{ '--reader-size': config.fontSize + 'px' }">
-    <header class="reader-header"><RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink><span>{{ book?.name ?? '阅读器' }}</span><button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button><button :disabled="loading || restoring || !book" @click="openBookmarks">书签</button><button aria-haspopup="dialog" aria-controls="reader-directory" @click="openDirectory" :disabled="!toc">目录</button></header>
+    <header class="reader-header"><RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink><span>{{ book?.name ?? '阅读器' }}</span><button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button><button v-if="book?.book_type === 'online'" :disabled="loading || restoring || !content" @click="openOverride">{{ content?.is_overridden ? '单章覆盖中' : '单章换源' }}</button><button :disabled="loading || restoring || !book" @click="openBookmarks">书签</button><button aria-haspopup="dialog" aria-controls="reader-directory" @click="openDirectory" :disabled="!toc">目录</button></header>
     <div v-if="conflict" class="reader-conflict" role="alert"><p>服务器当前位于第 {{ conflict.chapter_index + 1 }} 章。请选择要保留的位置。</p><button :disabled="reviewing || saving || loading || restoring" @click="keepMine">保留本机位置</button><button :disabled="reviewing || saving || loading || restoring" @click="useRemote">使用另一端位置</button></div>
     <p v-if="uncertain && !conflict" class="reader-notice" role="status">保存结果待确认 <button :disabled="reviewing || saving || loading || restoring" @click="reviewProgress">{{ reviewing ? '正在核对…' : '核对服务器进度' }}</button></p>
     <p v-if="saveError" class="reader-notice" role="status">{{ saveError }}</p>
     <p v-if="config.error" class="reader-notice" role="status">{{ config.error }} <button :disabled="config.loading || config.saving" @click="config.retry">重试设置同步</button></p>
     <section ref="viewport" class="reader-viewport" :aria-busy="loading || restoring" aria-label="章节阅读区" tabindex="0" @scroll="scroll">
       <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="boot">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
-      <article v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章</span><h1>{{ title }}</h1><p ref="body" class="chapter-body">{{ content?.content }}</p><p class="chapter-end">本章完</p></article>
+      <article v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><p ref="body" class="chapter-body">{{ content?.content }}</p><p class="chapter-end">本章完</p></article>
     </section>
     <footer class="reader-footer"><div class="reader-options"><label>主题<select :value="config.theme" :disabled="config.loading || loading || restoring" aria-label="阅读主题" @change="changeAppearance(() => config.setTheme(($event.target as HTMLSelectElement).value))"><option value="day">日间</option><option value="night">夜间</option><option value="paper">羊皮纸</option><option value="green">护眼</option></select></label><button aria-label="缩小字号" :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button><button aria-label="放大字号" :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button></div><div class="reader-nav"><button :disabled="loading || restoring || !content || content.prev_chapter_index == null" @click="changeChapter(content!.prev_chapter_index!)">上一章</button><button :disabled="loading || restoring || !content || content.next_chapter_index == null" @click="changeChapter(content!.next_chapter_index!)">下一章</button><button :disabled="loading || restoring || saving || reviewing" @click="capture(); flush(true)">保存进度</button></div><span class="reader-status" role="status">{{ status }}</span></footer>
     <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" @switched="switched" />
     <BookmarksPanel ref="bookmarks" :book-id="bookId" :total="book?.total_chapters ?? 0" @navigate="visitBookmark" />
+    <ChapterOverrideDialog ref="overrideDialog" :book-id="bookId" :chapter-index="index" :chapter-title="title" :is-overridden="Boolean(content?.is_overridden)" @updated="overrideUpdated" />
     <dialog id="reader-directory" ref="drawer" class="toc-dialog" aria-labelledby="toc-title"><div class="toc-heading"><h2 id="toc-title">章节目录</h2><button autofocus @click="drawer?.close()">关闭</button></div><VirtualList ref="directory" :items="entries" :selected="index" label="章节目录列表" @select="changeChapter" /></dialog>
   </main>
 </template>

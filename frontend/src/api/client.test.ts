@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest'
 import { getSession, setSession, request, ApiError, errorText, type Model } from './client'
+import { api } from './reader'
 const session = (token = 'old'): Model<'TokensResponse'> => ({ access_token: token, refresh_token: `${token}-refresh`, token_type: 'Bearer', expires_in: 900, user: { id: 'user-a', username: 'reader', role: 'user', token_version: 1, created_at: '2026-11-12T00:00:00Z' } })
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } })
 beforeEach(() => setSession(null))
@@ -105,4 +106,27 @@ describe('authenticated requests', () => {
     await expect(request('/books/id/progress')).rejects.toMatchObject({ status: 409, data: { error: { details: { current: { version: 8 } } } } })
   })
   it('ignores malformed persisted sessions', () => { sessionStorage.setItem('yreader-session', '{}'); expect(getSession()).toBeNull() })
+  it('routes newly wired R3 frozen API helpers to exact OpenAPI endpoints', async () => {
+    setSession(session())
+    const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => response({ ok: true }))
+    vi.stubGlobal('fetch', fetcher)
+    await api.me()
+    await api.createSource({ book_source_url: 'https://s.example.com', book_source_name: 'S', book_source_group: '默认', book_source_type: 0, enabled: true, enabled_explore: true, weight: 0 })
+    await api.exportSources(['id-1', 'id-2'])
+    await api.addMapping('b1', { source_id: 's1', book_url: 'https://s.example.com/1' })
+    await api.deleteMapping('b1', 'm1')
+    await api.setChapterOverride('b1', 4, { chapter_url: 'https://s.example.com/c/4' })
+    await api.deleteChapterOverride('b1', 4)
+
+    const called = fetcher.mock.calls.map(c => [c[0], (c[1] as RequestInit | undefined)?.method ?? 'GET'])
+    expect(called).toEqual([
+      ['/api/v1/auth/me', 'GET'],
+      ['/api/v1/sources', 'POST'],
+      ['/api/v1/sources/export?ids=id-1,id-2', 'GET'],
+      ['/api/v1/books/b1/mappings', 'POST'],
+      ['/api/v1/books/b1/mappings/m1', 'DELETE'],
+      ['/api/v1/books/b1/chapters/4/override', 'POST'],
+      ['/api/v1/books/b1/chapters/4/override', 'DELETE'],
+    ])
+  })
 })

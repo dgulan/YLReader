@@ -43,3 +43,29 @@ it('ignores writes returned after account logout', async () => {
   vi.spyOn(api, 'updateBook').mockImplementation(() => new Promise(resolve => { finish = resolve }))
   const pending = state.save(); setSession(null); finish({ ...book, version: 4 }); expect(await pending).toBe(false); expect(state.book.value?.version).toBe(3)
 })
+it('adds and removes backup source mappings while protecting the active source', async () => {
+  vi.spyOn(api, 'book').mockResolvedValue({ ...book, book_type: 'online', active_source_id: 'src-active' } as Model<'Book'>)
+  const mappingsSpy = vi.spyOn(api, 'mappings').mockResolvedValue([
+    { id: 'm-active', book_id: 'book', source_id: 'src-active', book_url: 'https://a.example.com/1', sync_status: 'active' } as Model<'BookSourceMapping'>,
+  ])
+  vi.spyOn(api, 'sources').mockResolvedValue({ items: [{ id: 'src-b', book_source_name: '备用源', book_source_type: 0, enabled: true }], page: 1, page_size: 100, total: 1 } as Model<'SourcePage'>)
+  const addSpy = vi.spyOn(api, 'addMapping').mockResolvedValue({ id: 'm-b', book_id: 'book', source_id: 'src-b', book_url: 'https://b.example.com/1', sync_status: 'pending' } as Model<'BookSourceMapping'>)
+  const delSpy = vi.spyOn(api, 'deleteMapping').mockResolvedValue(undefined)
+
+  const state = setup(); await state.load()
+  expect(state.mappings.value).toHaveLength(1)
+  expect(await state.removeBackupMapping(state.mappings.value[0]!)).toBe(false)
+  expect(delSpy).not.toHaveBeenCalled()
+
+  mappingsSpy.mockResolvedValueOnce([
+    { id: 'm-active', book_id: 'book', source_id: 'src-active', book_url: 'https://a.example.com/1', sync_status: 'active' } as Model<'BookSourceMapping'>,
+    { id: 'm-b', book_id: 'book', source_id: 'src-b', book_url: 'https://b.example.com/1', sync_status: 'pending' } as Model<'BookSourceMapping'>,
+  ])
+  expect(await state.addBackupMapping('src-b', ' https://b.example.com/1 ')).toBe(true)
+  expect(addSpy).toHaveBeenCalledWith('book', { source_id: 'src-b', book_url: 'https://b.example.com/1' })
+  expect(state.mappings.value).toHaveLength(2)
+
+  expect(await state.removeBackupMapping(state.mappings.value[1]!)).toBe(true)
+  expect(delSpy).toHaveBeenCalledWith('book', 'm-b')
+  expect(state.mappings.value).toHaveLength(1)
+})
