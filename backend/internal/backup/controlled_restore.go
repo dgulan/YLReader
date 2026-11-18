@@ -410,12 +410,50 @@ func RunControlledRestoreFromInput(ctx context.Context, inputRoot string, params
 		res.ArtifactsRetained = true
 		return res, ErrAttempt
 	}
-	defer stage.Close()
 	res.Phase = existingOp.Phase
 	res.ArtifactsRetained = true
 
 	tool := PostgresArchiveTool{Executable: params.PGRestorePath}
-	dbRes, e := g.RunDatabaseWithHeaders(ctx, stage, params.OwnerID, params.ConfirmTarget, now, tool, cfg.Limits.Plaintext, ring)
+	ops := controlledRestoreOps{
+		runDB: func(ctx context.Context, s *stagedObjects) (recordedDatabaseResult, error) {
+			return g.RunDatabaseWithHeaders(ctx, s, params.OwnerID, params.ConfirmTarget, now, tool, cfg.Limits.Plaintext, ring)
+		},
+		publish: func(ctx context.Context, s *stagedObjects) (publicationResult, error) {
+			return g.PublishObjects(ctx, s, params.OwnerID, params.ConfirmTarget, now)
+		},
+	}
+	if handover != nil {
+		ops.handover = func(ctx context.Context, s *stagedObjects, r *ControlledRestoreResult) error {
+			return runControlledHandover(ctx, g, s, plan, cfg, ring, params.OwnerID, handover, clock, r)
+		}
+	}
+	return res, executeControlledRestoreStages(ctx, stage, ops, &res)
+}
+
+type controlledRestoreOps struct {
+	runDB    func(context.Context, *stagedObjects) (recordedDatabaseResult, error)
+	publish  func(context.Context, *stagedObjects) (publicationResult, error)
+	handover func(context.Context, *stagedObjects, *ControlledRestoreResult) error
+}
+
+func shouldRetainStageOnDatabaseFailure(e error, dbRes recordedDatabaseResult) bool {
+	return errors.Is(e, ErrRestoreCommitUnknown) ||
+		errors.Is(e, ErrOutcomeRecord) ||
+		errors.Is(e, ErrRestoreRollback) ||
+		dbRes.Attempt.DatabaseOutcome == "unknown" ||
+		errors.Is(e, context.Canceled) ||
+		errors.Is(e, context.DeadlineExceeded)
+}
+
+func executeControlledRestoreStages(ctx context.Context, stage *stagedObjects, ops controlledRestoreOps, res *ControlledRestoreResult) error {
+	retainStage := true
+	defer func() {
+		if retainStage && stage != nil {
+			_ = stage.Retain()
+		}
+	}()
+
+	dbRes, e := ops.runDB(ctx, stage)
 	if dbRes.Operation.Phase != "" {
 		res.Phase = dbRes.Operation.Phase
 	}
@@ -436,10 +474,20 @@ func RunControlledRestoreFromInput(ctx context.Context, inputRoot string, params
 			res.Outcome = "rejected"
 			res.StatusCode = "RESTORE_REJECTED"
 		}
-		return res, e
+		if shouldRetainStageOnDatabaseFailure(e, dbRes) {
+			if retainErr := stage.Retain(); retainErr != nil {
+				return errors.Join(e, retainErr)
+			}
+			return e
+		}
+		retainStage = false
+		if closeErr := stage.Close(); closeErr != nil {
+			return errors.Join(e, closeErr)
+		}
+		return e
 	}
 
-	pubRes, e := g.PublishObjects(ctx, stage, params.OwnerID, params.ConfirmTarget, now)
+	pubRes, e := ops.publish(ctx, stage)
 	if pubRes.Receipt.State != "" {
 		res.PublicationState = pubRes.Receipt.State
 	}
@@ -449,17 +497,27 @@ func RunControlledRestoreFromInput(ctx context.Context, inputRoot string, params
 		if res.PublicationState == "" || res.PublicationState == "not_started" {
 			res.PublicationState = "retained_unconfirmed"
 		}
-		return res, e
+		if retainErr := stage.Retain(); retainErr != nil {
+			return errors.Join(e, retainErr)
+		}
+		return e
 	}
 	res.PublicationState = "verified"
 
-	if handover == nil {
+	if ops.handover == nil {
 		res.Phase = "validating"
 		res.Outcome = "validated_published"
 		res.StatusCode = "RESTORE_VALIDATING_PUBLISHED"
-		return res, nil
+		return stage.Retain()
 	}
-	return res, runControlledHandover(ctx, g, stage, plan, cfg, ring, params.OwnerID, handover, clock, &res)
+	handoverErr := ops.handover(ctx, stage, res)
+	if retainErr := stage.Retain(); retainErr != nil {
+		if handoverErr != nil {
+			return errors.Join(handoverErr, retainErr)
+		}
+		return retainErr
+	}
+	return handoverErr
 }
 
 func runControlledHandover(

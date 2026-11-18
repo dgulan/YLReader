@@ -349,6 +349,55 @@ func TestBackupRestoreCLIIsolated(t *testing.T) {
 		return restoreEnv{base, in, filepath.Join(ctrlSto, "ns"), u.String(), hdrPath, wrongHdrPath, dbName, cfg, preview.Plan}
 	}
 
+	assertScratchDiskState := func(t *testing.T, env restoreEnv, wantPresent bool, wantOutcome string) {
+		t.Helper()
+		rawAttempt, err := os.ReadFile(filepath.Join(env.controlDir, "operations", env.plan.OperationID, "attempt.json"))
+		if err != nil {
+			t.Fatalf("read attempt.json: %v", err)
+		}
+		var att struct {
+			DatabaseOutcome string  `json:"database_outcome"`
+			Generation      *string `json:"generation_reference"`
+		}
+		if err := json.Unmarshal(rawAttempt, &att); err != nil {
+			t.Fatalf("decode attempt.json: %v", err)
+		}
+		if att.DatabaseOutcome != wantOutcome {
+			t.Fatalf("attempt database_outcome=%q want %q", att.DatabaseOutcome, wantOutcome)
+		}
+		targetNS := filepath.Join(env.cfg.Target.Storage.Root, env.cfg.Target.Storage.Namespace)
+		if !wantPresent {
+			entries, err := os.ReadDir(targetNS)
+			if err != nil {
+				t.Fatalf("readdir %s: %v", targetNS, err)
+			}
+			for _, ent := range entries {
+				if strings.HasPrefix(ent.Name(), ".scratch-") {
+					t.Fatalf("expected rollback cleanup to remove %s", ent.Name())
+				}
+			}
+			return
+		}
+		if att.Generation == nil || !strings.HasPrefix(*att.Generation, ".scratch-") {
+			t.Fatalf("expected attempt.json.generation_reference .scratch-* when retained, got %v", att.Generation)
+		}
+		scratchDir := filepath.Join(targetNS, *att.Generation)
+		info, err := os.Stat(scratchDir)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("expected retained scratch dir %s on disk: err=%v", scratchDir, err)
+		}
+		if _, err := os.Stat(filepath.Join(scratchDir, "restore-owner.json")); err != nil {
+			t.Fatalf("expected restore-owner.json in retained %s: %v", scratchDir, err)
+		}
+		for _, obj := range manifest.Objects {
+			objPath := filepath.Join(scratchDir, "object-"+obj.ID)
+			fi, err := os.Stat(objPath)
+			if err != nil || fi.Size() != obj.Bytes {
+				t.Fatalf("expected staged object %s (%d bytes) intact in %s: err=%v info=%v", obj.ID, obj.Bytes, scratchDir, err, fi)
+			}
+		}
+	}
+
 	assertNoSecrets := func(env restoreEnv, combined string) {
 		t.Helper()
 		for _, secret := range []string{id.String(), env.targetDSN, env.inputDir, "Authorization"} {
@@ -426,6 +475,7 @@ func TestBackupRestoreCLIIsolated(t *testing.T) {
 		}
 		assertNoSecrets(failEnv, string(out)+string(errout))
 		assertTargetEmpty(failEnv.targetDSN)
+		assertScratchDiskState(t, failEnv, false, "rolled_back")
 	})
 
 	t.Run("controlled_restore_core_published_and_no_replay", func(t *testing.T) {
@@ -434,6 +484,7 @@ func TestBackupRestoreCLIIsolated(t *testing.T) {
 		if code != 0 || json.Unmarshal(out, &res) != nil || res.StatusCode != "RESTORE_VALIDATING_PUBLISHED" || res.Phase != "validating" || res.DatabaseOutcome != "committed" || !res.HeadersChecked || res.PublicationState != "verified" || !res.ArtifactsRetained || res.RetrySafe || res.ExecutionAuthorized || res.ReadyForCutover || res.DeploymentAuthorized {
 			t.Fatalf("core controlled restore failed: code=%d out=%s err=%s", code, out, errout)
 		}
+		assertScratchDiskState(t, core, true, "committed")
 		assertNoSecrets(core, string(out)+string(errout))
 
 		// Second attempt using same plan.json must be rejected without mutating DB or records.
@@ -513,6 +564,7 @@ func TestBackupRestoreCLIIsolated(t *testing.T) {
 			t.Fatalf("partial handover restore unexpected output: code=%d out=%s err=%s", code, out, errout)
 		}
 		assertNoSecrets(partialEnv, string(out)+string(errout))
+		assertScratchDiskState(t, partialEnv, true, "committed")
 
 		stOut, _, stCode := runCLI("status", "--control-root", partialEnv.controlDir, "--operation", partialEnv.plan.OperationID, "--format", "json")
 		var st backup.RestoreStatus
@@ -520,6 +572,24 @@ func TestBackupRestoreCLIIsolated(t *testing.T) {
 			t.Fatalf("unexpected status after partial handover restore: code=%d out=%s", stCode, stOut)
 		}
 	})
+
+	// Reuse rolled-back empty target DB `yreader_a1_iso_restore_fail` with pre-existing invalid publication receipt
+	// to trigger real ErrPublication inside PublishObjects and verify .scratch-* remains intact on disk.
+	pubFailEnv := newEnv("fail")
+	opDir := filepath.Join(pubFailEnv.controlDir, "operations", pubFailEnv.plan.OperationID)
+	if err := os.MkdirAll(opDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opDir, "publication.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pubOut, pubErrOut, pubCode := runCLI("restore", "--input-root", pubFailEnv.inputDir, "--request-key", "request.json", "--config-key", "config.json", "--plan-key", "plan.json", "--plan-digest", pubFailEnv.plan.Digest, "--confirm-target", pubFailEnv.cfg.Target.InstanceID, "--owner", ownerID, "--header-keys", pubFailEnv.hdrPath, "--pg-restore", pgRestore, "--timeout", "2m")
+	var pubRes backup.ControlledRestoreResult
+	if pubCode != 4 || json.Unmarshal(pubOut, &pubRes) != nil || pubRes.StatusCode != "RESTORE_PUBLICATION_FAILED" || pubRes.Outcome != "publication_failed" || pubRes.DatabaseOutcome != "committed" || !pubRes.ArtifactsRetained {
+		t.Fatalf("publication failure did not retain expected failure state: code=%d out=%s err=%s", pubCode, pubOut, pubErrOut)
+	}
+	assertNoSecrets(pubFailEnv, string(pubOut)+string(pubErrOut))
+	assertScratchDiskState(t, pubFailEnv, true, "committed")
 
 	t.Log(`BACKUP_RESTORE_CLI_EVIDENCE {"scope":"isolated-controlled-restore-cli","checks":7,"phase":"validating","partial_registration_denied":true,"replay_denied":true,"execution_authorized":false,"ready_for_cutover":false,"deployment_authorized":false}`)
 }

@@ -205,6 +205,29 @@ func (s *stagedObjects) Close() error {
 	return nil
 }
 
+// Retain closes only open staging directory handles while leaving this
+// operation's .scratch-<nonce> generation directory and staged files on disk.
+func (s *stagedObjects) Retain() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.temp == nil {
+		return nil
+	}
+	if s.readers != 0 {
+		return storage.ErrBusy
+	}
+	retained, ok := s.temp.(storage.RetainedBackupTemp)
+	if !ok {
+		return storage.ErrCapability
+	}
+	if e := retained.Retain(); e != nil {
+		return &CleanupFailure{s.temp.Reference()}
+	}
+	s.temp = nil
+	s.objects = nil
+	return nil
+}
+
 func (s *stagedObjects) Reference() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

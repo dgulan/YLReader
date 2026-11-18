@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -166,5 +167,168 @@ func TestControlledHandoverSpecAndPreflightRejections(t *testing.T) {
 	}, in, func() time.Time { return now })
 	if !errors.Is(err, ErrPlan) || res.StatusCode != "RESTORE_REJECTED" || res.RetrySafe || res.ExecutionAuthorized || res.ReadyForCutover || res.DeploymentAuthorized {
 		t.Fatalf("mismatched digest should fail with sanitized rejection: err=%v res=%+v", err, res)
+	}
+}
+
+type diskRetainedTemp struct {
+	root     string
+	ref      string
+	retained bool
+	removed  bool
+}
+
+func newDiskRetainedTemp(t *testing.T, files map[string][]byte) *diskRetainedTemp {
+	t.Helper()
+	base := t.TempDir()
+	ref := ".scratch-testgen"
+	dir := filepath.Join(base, ref)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return &diskRetainedTemp{root: dir, ref: ref}
+}
+
+func (d *diskRetainedTemp) Reference() string { return d.ref }
+func (d *diskRetainedTemp) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	return os.Open(filepath.Join(d.root, key))
+}
+func (d *diskRetainedTemp) CreateOnly(_ context.Context, key string, r io.Reader, size int64) error {
+	body, err := io.ReadAll(io.LimitReader(r, size+1))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(d.root, key), body, 0600)
+}
+func (d *diskRetainedTemp) Remove() error {
+	d.removed = true
+	return os.RemoveAll(d.root)
+}
+func (d *diskRetainedTemp) Retain() error {
+	d.retained = true
+	return nil
+}
+
+func TestExecuteControlledRestoreStagesDiskRetention(t *testing.T) {
+	files := map[string][]byte{
+		"restore-owner.json":                      []byte(`{"operation_id":"op-1"}`),
+		"object-11111111111111111111111111111111": []byte("staged-object-bytes"),
+	}
+	assertFilesPresent := func(t *testing.T, dir string) {
+		t.Helper()
+		for name, want := range files {
+			got, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil || string(got) != string(want) {
+				t.Fatalf("staged file %s missing or corrupted on disk after retain: err=%v got=%q", name, err, got)
+			}
+		}
+	}
+
+	cases := []struct {
+		name       string
+		dbRes      recordedDatabaseResult
+		dbErr      error
+		pubRes     publicationResult
+		pubErr     error
+		handover   func(context.Context, *stagedObjects, *ControlledRestoreResult) error
+		wantRetain bool
+		wantCode   string
+	}{
+		{
+			name:       "commit_unknown_retains_scratch_on_disk",
+			dbRes:      recordedDatabaseResult{Operation: Operation{Phase: "validating"}, Attempt: restoreAttempt{DatabaseOutcome: "unknown"}},
+			dbErr:      ErrRestoreCommitUnknown,
+			wantRetain: true,
+			wantCode:   "RESTORE_COMMIT_UNKNOWN",
+		},
+		{
+			name:       "outcome_record_failure_retains_scratch_on_disk",
+			dbRes:      recordedDatabaseResult{Operation: Operation{Phase: "validating"}, Attempt: restoreAttempt{DatabaseOutcome: "unknown"}},
+			dbErr:      ErrOutcomeRecord,
+			wantRetain: true,
+			wantCode:   "RESTORE_COMMIT_UNKNOWN",
+		},
+		{
+			name:       "context_canceled_retains_scratch_on_disk",
+			dbRes:      recordedDatabaseResult{Operation: Operation{Phase: "canceled"}},
+			dbErr:      context.Canceled,
+			wantRetain: true,
+			wantCode:   "RESTORE_CANCELED",
+		},
+		{
+			name:       "publication_failure_retains_scratch_on_disk",
+			dbRes:      recordedDatabaseResult{Operation: Operation{Phase: "validating"}, Attempt: restoreAttempt{DatabaseOutcome: "committed"}, HeadersChecked: true},
+			pubErr:     ErrPublication,
+			wantRetain: true,
+			wantCode:   "RESTORE_PUBLICATION_FAILED",
+		},
+		{
+			name:       "validating_published_retains_scratch_on_disk",
+			dbRes:      recordedDatabaseResult{Operation: Operation{Phase: "validating"}, Attempt: restoreAttempt{DatabaseOutcome: "committed"}, HeadersChecked: true},
+			pubRes:     publicationResult{Receipt: publicationReceipt{State: "verified"}},
+			wantRetain: true,
+			wantCode:   "RESTORE_VALIDATING_PUBLISHED",
+		},
+		{
+			name:   "handover_unconfirmed_retains_scratch_on_disk",
+			dbRes:  recordedDatabaseResult{Operation: Operation{Phase: "validating"}, Attempt: restoreAttempt{DatabaseOutcome: "committed"}, HeadersChecked: true},
+			pubRes: publicationResult{Receipt: publicationReceipt{State: "verified"}},
+			handover: func(_ context.Context, stage *stagedObjects, res *ControlledRestoreResult) error {
+				if stage.Reference() != ".scratch-testgen" {
+					t.Fatalf("expected active stage reference during handover, got %q", stage.Reference())
+				}
+				res.Phase = "validating"
+				res.Outcome = "handover_partial_unregistered"
+				res.StatusCode = "RESTORE_HANDOVER_PARTIAL_UNREGISTERED"
+				return errHandoverUnconfirmed
+			},
+			wantRetain: true,
+			wantCode:   "RESTORE_HANDOVER_PARTIAL_UNREGISTERED",
+		},
+		{
+			name:       "confirmed_rollback_removes_scratch_from_disk",
+			dbRes:      recordedDatabaseResult{Operation: Operation{Phase: "failed"}, Attempt: restoreAttempt{DatabaseOutcome: "rolled_back"}},
+			dbErr:      ErrRestoreDatabase,
+			wantRetain: false,
+			wantCode:   "RESTORE_REJECTED",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			temp := newDiskRetainedTemp(t, files)
+			stage := &stagedObjects{temp: temp}
+			res := ControlledRestoreResult{ArtifactsRetained: true}
+			ops := controlledRestoreOps{
+				runDB: func(context.Context, *stagedObjects) (recordedDatabaseResult, error) {
+					return tc.dbRes, tc.dbErr
+				},
+				publish: func(context.Context, *stagedObjects) (publicationResult, error) {
+					return tc.pubRes, tc.pubErr
+				},
+				handover: tc.handover,
+			}
+			_ = executeControlledRestoreStages(context.Background(), stage, ops, &res)
+			if res.StatusCode != tc.wantCode {
+				t.Fatalf("unexpected status code: got %q want %q", res.StatusCode, tc.wantCode)
+			}
+			if tc.wantRetain {
+				if !temp.retained || temp.removed {
+					t.Fatalf("expected Retain() without Remove(): retained=%v removed=%v", temp.retained, temp.removed)
+				}
+				assertFilesPresent(t, temp.root)
+			} else {
+				if !temp.removed || temp.retained {
+					t.Fatalf("expected Remove() without Retain(): retained=%v removed=%v", temp.retained, temp.removed)
+				}
+				if _, err := os.Stat(temp.root); !os.IsNotExist(err) {
+					t.Fatalf("expected %s removed on confirmed rollback, stat err=%v", temp.root, err)
+				}
+			}
+		})
 	}
 }

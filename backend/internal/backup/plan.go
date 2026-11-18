@@ -170,6 +170,7 @@ func readTarget(ctx context.Context, c Config) (*pgx.ConnConfig, error) {
 	if e != nil {
 		return nil, e
 	}
+	defer clear(data)
 	return ParseTarget(strings.TrimSpace(string(data)))
 }
 

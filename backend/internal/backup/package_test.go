@@ -32,9 +32,9 @@ func (s *memoryScratch) NewTemp(context.Context) (storage.BackupTemp, error) {
 }
 
 type memoryTemp struct {
-	files                 map[string][]byte
-	created               []string
-	removed, cleanupFails bool
+	files                           map[string][]byte
+	created                         []string
+	removed, retained, cleanupFails bool
 }
 type memoryAt struct{ *bytes.Reader }
 
@@ -71,6 +71,10 @@ func (m *memoryTemp) Remove() error {
 	}
 	m.removed = true
 	m.files = nil
+	return nil
+}
+func (m *memoryTemp) Retain() error {
+	m.retained = true
 	return nil
 }
 

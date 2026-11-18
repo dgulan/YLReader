@@ -111,6 +111,21 @@ func TestBehaviorStatusCommandJSONTextAttention(t *testing.T) {
 	if code := run(context.Background(), []string{"behavior-status", "--control-root", t.TempDir(), "--operation", id2, "--format", "text"}, &out, &errs, func(string) (controlReader, error) { return r2, nil }, clock2); code != 4 || !strings.Contains(out.String(), "待验项清单: reader_roundtrip") || !strings.Contains(out.String(), "允许派发/重试/部署: 否") {
 		t.Fatalf("partial bound review in behavior-status failed: code=%d out=%s", code, out.String())
 	}
+
+	// Complete bound review after CAS registration advances state.json.generation -> ledger status "stale", exit 4.
+	r3, id3, clock3 := behaviorCommandFixture()
+	root3 := "operations/" + id3 + "/"
+	var st3 map[string]any
+	json.Unmarshal(r3.data[root3+"state.json"], &st3)
+	st3["generation"] = st3["generation"].(float64) + 1
+	r3.data[root3+"state.json"] = encode(st3)
+	out.Reset()
+	if code := run(context.Background(), []string{"behavior-status", "--control-root", t.TempDir(), "--operation", id3, "--format", "json"}, &out, &errs, func(string) (controlReader, error) { return r3, nil }, clock3); code != 4 || !strings.Contains(out.String(), `"status":"stale"`) {
+		t.Fatalf("post-registration stale ledger must exit 4: code=%d out=%s", code, out.String())
+	}
+	if code := behaviorStatusExitCode(backup.BehaviorLedgerDiagnostic{Status: "responses_observed", BoundReview: backup.BoundReviewDiagnostic{Status: "complete_registered"}}); code != 4 {
+		t.Fatalf("complete_registered should not yield exit 0: got %d", code)
+	}
 }
 
 func TestBehaviorStatusRejectsArgumentsAndPrivateErrors(t *testing.T) {

@@ -26,7 +26,14 @@ func renderBehaviorStatus(ctx context.Context, reader controlReader, id string, 
 		fmt.Fprintln(errs, "status output failed")
 		return 5
 	}
-	boundOK := status.BoundReview.Status == "absent" || status.BoundReview.Status == "complete_unregistered" || status.BoundReview.Status == "complete_registered"
+	return behaviorStatusExitCode(status)
+}
+
+func behaviorStatusExitCode(status backup.BehaviorLedgerDiagnostic) int {
+	// CAS bound-review registration advances state.json.generation, which makes
+	// ledger status "stale" and mutually exclusive with "responses_observed",
+	// so only pre-registration bound-review states can accompany exit 0.
+	boundOK := status.BoundReview.Status == "absent" || status.BoundReview.Status == "complete_unregistered"
 	if status.Status == "responses_observed" && boundOK {
 		return 0
 	}
