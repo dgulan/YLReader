@@ -213,3 +213,112 @@ func TestBackupStatusCLIIsolated(t *testing.T) {
 		t.Log(`BACKUP_STATUS_EVIDENCE {"scope":"isolated-status-cli-fixture","checks":7,"content_and_modes_unchanged":true,"ready_for_cutover":false,"deployment_authorized":false}`)
 	}
 }
+
+func TestBackupBoundReviewStatusCLIIsolated(t *testing.T) {
+	cli := os.Getenv("BACKUP_STATUS_CLI")
+	if cli == "" {
+		cli = os.Getenv("BACKUP_BEHAVIOR_STATUS_CLI")
+	}
+	if cli == "" {
+		t.Skip("explicit status CLI harness required")
+	}
+	if cli != "/verify/backup-cli" || os.Geteuid() != 10001 {
+		t.Fatal("dedicated non-root CLI binary required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	if os.Chmod(root, 0700) != nil {
+		t.Fatal("fixture permissions")
+	}
+	files, e := storage.OpenBackupFiles(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer files.Close()
+	when := time.Now().UTC().Truncate(time.Microsecond)
+	_, p, s, oldNow := handoverFixture(t)
+	delta := when.Sub(oldNow)
+	shift := func(text string) string {
+		stamp, e := time.Parse(time.RFC3339Nano, text)
+		if e != nil {
+			t.Fatal(e)
+		}
+		return stamp.Add(delta).Format(time.RFC3339Nano)
+	}
+	p.Created, p.Expires = shift(p.Created), shift(p.Expires)
+	p.Digest, e = p.digest()
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.op.CreatedAt, s.op.UpdatedAt, s.op.HeartbeatAt = s.op.CreatedAt.Add(delta), s.op.UpdatedAt.Add(delta), s.op.HeartbeatAt.Add(delta)
+	s.op.PlanDigest, s.attempt.PlanDigest, s.pub.PlanDigest = p.Digest, p.Digest, p.Digest
+	f := &diagnosticReader{data: map[string][]byte{}}
+	writeDiagnosticFixture(t, f, s.op, s.attempt, s.pub)
+	for key, data := range f.data {
+		if files.CreateOnly(ctx, key, bytes.NewReader(data), int64(len(data))) != nil {
+			t.Fatal("bound status fixture files")
+		}
+	}
+	snap, e := stableHandoverSnapshot(ctx, files, p.OperationID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	bound := boundBehaviorReview{
+		Format: "ylreader-bound-behavior-review", Version: 1,
+		Profile: "bound-https-account-verification-v1", Scope: "localfs-bound-https-account-review", Status: "complete",
+		OperationID: p.OperationID, BackupID: p.BackupID, ConsentID: "80000000-0000-4000-8000-000000000001",
+		PlanDigest: p.Digest, PackageSHA: p.PackageSHA, ManifestSHA: p.ManifestSHA, TargetID: p.TargetID,
+		Storage: p.TargetFingerprint, Tree: snap.pub.TreeFingerprint, Generation: snap.op.Generation,
+		OperationSHA: snap.tokens[0], AttemptSHA: snap.tokens[1], PublicationSHA: snap.tokens[2],
+		Identity:    handoverTargetIdentity{strings.Repeat("5", 64), strings.Repeat("6", 64), strings.Repeat("7", 64)},
+		Certificate: strings.Repeat("8", 64), Ledger: strings.Repeat("9", 64),
+		AccountCount: 1, SessionCount: 1, Started: when, Finished: when, Expires: when.Add(time.Minute),
+	}
+	for _, id := range boundBehaviorCheckIDs() {
+		bound.Checks = append(bound.Checks, handoverReviewCheck{id, "pass"})
+	}
+	if e := saveBoundBehaviorReview(ctx, files, bound); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := registerBoundBehaviorReview(ctx, files, p, bound, func() time.Time { return when }); e != nil {
+		t.Fatal("bound review registration failed", e)
+	}
+	before := statusFixtureBytes(t, root)
+	invoke := func(t *testing.T, subcmd, format string, want int) []byte {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, cli, subcmd, "--control-root", root, "--operation", p.OperationID, "--format", format)
+		cmd.Env = []string{"LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
+		var out, errs bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &errs
+		e := cmd.Run()
+		code := 0
+		if e != nil {
+			exit, ok := e.(*exec.ExitError)
+			if !ok {
+				t.Fatal("CLI process unavailable")
+			}
+			code = exit.ExitCode()
+		}
+		if code != want || strings.Contains(out.String()+errs.String(), root) {
+			t.Fatalf("%s unexpected exit code %d want %d (out=%s err=%s)", subcmd, code, want, out.String(), errs.String())
+		}
+		return out.Bytes()
+	}
+	t.Run("status_json_bound_registered", func(t *testing.T) {
+		var st RestoreStatus
+		if json.Unmarshal(invoke(t, "status", "json", 0), &st) != nil || st.Status != "observed_registered" || !st.BoundReview.Present || st.BoundReview.Status != "complete_registered" || st.BoundReview.CurrentGen != snap.op.Generation+1 || st.BoundReview.Persistence != "not_inferred" || st.Ready || st.Deployment {
+			t.Fatalf("unexpected bound status JSON: %+v", st)
+		}
+	})
+	t.Run("status_text_bound_registered", func(t *testing.T) {
+		out := invoke(t, "status", "text", 0)
+		if !bytes.Contains(out, []byte("通用报告状态: complete_registered")) || !bytes.Contains(out, []byte("允许切换/部署: 否")) {
+			t.Fatalf("unexpected bound status text: %s", out)
+		}
+	})
+	if !reflect.DeepEqual(before, statusFixtureBytes(t, root)) {
+		t.Fatal("bound review CLI changed fixture")
+	}
+}

@@ -67,6 +67,50 @@ func TestBehaviorStatusCommandJSONTextAttention(t *testing.T) {
 	if code := run(context.Background(), []string{"behavior-status", "--control-root", t.TempDir(), "--operation", id}, &out, &errs, func(string) (controlReader, error) { return r, nil }, clock); code != 4 || !bytes.Contains(out.Bytes(), []byte("response_parent_unconfirmed")) {
 		t.Fatal("unknown parent granted success")
 	}
+
+	// Partial bound review present on behavior-status -> exit 4 + pending_checks listed
+	r2, id2, clock2 := behaviorCommandFixture()
+	root2 := "operations/" + id2 + "/"
+	hash := func(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+	encode := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	var state map[string]any
+	json.Unmarshal(r2.data[root2+"state.json"], &state)
+	checks := []map[string]string{}
+	for _, name := range strings.Fields("schema_ledger database_identity database_role published_objects header_keyring redis_isolation sessions_revoked tasks_disabled credential_preflight https_login_logout old_token_http_rejection reader_roundtrip") {
+		st := "pass"
+		if name == "reader_roundtrip" {
+			st = "unavailable"
+		}
+		checks = append(checks, map[string]string{"id": name, "status": st})
+	}
+	var intent map[string]any
+	json.Unmarshal(r2.data[root2+"behavior-intent.json"], &intent)
+	actionHashes := [8][3]string{}
+	for j, fn := range []string{"dispatch.json", "response.json", "logout.json"} {
+		actionHashes[0][j] = hash(r2.data[root2+"behavior-actions/0/"+fn])
+	}
+	ledgerSHA := hash(encode(map[string]any{"control": []string{hash(r2.data[root2+"state.json"]), hash(r2.data[root2+"attempt.json"]), hash(r2.data[root2+"publication.json"])}, "intent": hash(r2.data[root2+"behavior-intent.json"]), "actions": actionHashes}))
+	h := func(c string) string { return strings.Repeat(c, 64) }
+	stamp := func(t time.Time) string { return t.Format(time.RFC3339Nano) }
+	r2.data[root2+"behavior-account-review.json"] = encode(map[string]any{
+		"report_format": "ylreader-bound-behavior-review", "report_version": 1,
+		"profile": "bound-https-account-verification-v1", "scope": "localfs-bound-https-account-review",
+		"status": "partial", "operation_id": id2, "backup_id": state["backup_id"],
+		"consent_id": intent["consent_id"], "plan_digest": state["plan_digest"],
+		"package_sha256": h("b"), "manifest_sha256": h("c"), "target_instance_id": state["owner_id"],
+		"target_storage_fingerprint": h("d"), "publication_tree_fingerprint": h("e"),
+		"observed_generation": state["generation"], "operation_record_sha256": hash(r2.data[root2+"state.json"]),
+		"attempt_record_sha256": hash(r2.data[root2+"attempt.json"]), "publication_record_sha256": hash(r2.data[root2+"publication.json"]),
+		"target_identity":        map[string]string{"database_identity_sha256": h("1"), "runtime_config_revision_sha256": h("6"), "redis_identity_sha256": h("3")},
+		"tls_certificate_sha256": h("4"), "behavior_ledger_sha256": ledgerSHA,
+		"account_count": 1, "session_count": 1,
+		"started_at": stamp(clock2()), "finished_at": stamp(clock2()), "expires_at": stamp(clock2().Add(time.Minute)),
+		"checks": checks, "execution_authorized": false, "ready_for_cutover": false, "deployment_authorized": false,
+	})
+	out.Reset()
+	if code := run(context.Background(), []string{"behavior-status", "--control-root", t.TempDir(), "--operation", id2, "--format", "text"}, &out, &errs, func(string) (controlReader, error) { return r2, nil }, clock2); code != 4 || !strings.Contains(out.String(), "待验项清单: reader_roundtrip") || !strings.Contains(out.String(), "允许派发/重试/部署: 否") {
+		t.Fatalf("partial bound review in behavior-status failed: code=%d out=%s", code, out.String())
+	}
 }
 
 func TestBehaviorStatusRejectsArgumentsAndPrivateErrors(t *testing.T) {

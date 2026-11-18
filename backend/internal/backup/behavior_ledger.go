@@ -49,19 +49,20 @@ func (a behaviorLedgerSnapshot) equal(b behaviorLedgerSnapshot) bool {
 }
 
 type BehaviorLedgerDiagnostic struct {
-	Format       string `json:"diagnostic_format"`
-	Version      int    `json:"diagnostic_version"`
-	Scope        string `json:"scope"`
-	OperationID  string `json:"operation_id"`
-	Status       string `json:"status"`
-	Reason       string `json:"reason"`
-	Dispatches   int    `json:"dispatch_records"`
-	Known        int    `json:"known_session_records"`
-	LogoutClaims int    `json:"logout_response_claims"`
-	Persistence  string `json:"persistence_confirmation"`
-	Dispatch     bool   `json:"dispatch_authorized"`
-	Retry        bool   `json:"retry_authorized"`
-	Deployment   bool   `json:"deployment_authorized"`
+	Format       string                `json:"diagnostic_format"`
+	Version      int                   `json:"diagnostic_version"`
+	Scope        string                `json:"scope"`
+	OperationID  string                `json:"operation_id"`
+	Status       string                `json:"status"`
+	Reason       string                `json:"reason"`
+	Dispatches   int                   `json:"dispatch_records"`
+	Known        int                   `json:"known_session_records"`
+	LogoutClaims int                   `json:"logout_response_claims"`
+	Persistence  string                `json:"persistence_confirmation"`
+	BoundReview  BoundReviewDiagnostic `json:"bound_behavior_review"`
+	Dispatch     bool                  `json:"dispatch_authorized"`
+	Retry        bool                  `json:"retry_authorized"`
+	Deployment   bool                  `json:"deployment_authorized"`
 }
 type behaviorLedgerAssessment struct {
 	intent     behaviorIntent
@@ -70,7 +71,7 @@ type behaviorLedgerAssessment struct {
 }
 
 func ledgerDiagnostic(id string) BehaviorLedgerDiagnostic {
-	return BehaviorLedgerDiagnostic{Format: "ylreader-behavior-ledger-diagnostic", Version: 1, Scope: "control-records-only", OperationID: id, Status: "unavailable", Reason: "records_unavailable", Persistence: "not_inferred"}
+	return BehaviorLedgerDiagnostic{Format: "ylreader-behavior-ledger-diagnostic", Version: 1, Scope: "control-records-only", OperationID: id, Status: "unavailable", Reason: "records_unavailable", Persistence: "not_inferred", BoundReview: defaultBoundReviewDiagnostic("unavailable", "records_unavailable")}
 }
 
 func inspectBehaviorLedger(s behaviorLedgerSnapshot, id string, now time.Time) (result behaviorLedgerAssessment, err error) {
@@ -218,6 +219,7 @@ func DiagnoseBehaviorLedger(ctx context.Context, r RestoreRecordReader, id strin
 	if !validUUID(id) {
 		d := ledgerDiagnostic("")
 		d.Reason = "invalid_input"
+		d.BoundReview = defaultBoundReviewDiagnostic("unavailable", "invalid_input")
 		return d
 	}
 	if ctx == nil {
@@ -225,6 +227,7 @@ func DiagnoseBehaviorLedger(ctx context.Context, r RestoreRecordReader, id strin
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, a, _ := stableBehaviorLedger(ctx, r, id, now)
+	snap, a, e := stableBehaviorLedger(ctx, r, id, now)
+	attachBoundReviewToBehaviorDiagnostic(ctx, r, id, now, snap, a, e, &a.diagnostic)
 	return a.diagnostic
 }

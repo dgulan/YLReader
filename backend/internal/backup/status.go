@@ -13,31 +13,33 @@ import (
 // RestoreStatus reports file observations, never historical durability or
 // authority to resume/cut over. No target connection or write capability.
 type RestoreStatus struct {
-	Format          string `json:"diagnostic_format"`
-	Version         int    `json:"diagnostic_version"`
-	Scope           string `json:"scope"`
-	OperationID     string `json:"operation_id"`
-	Status          string `json:"status"`
-	Reason          string `json:"reason"`
-	Generation      int64  `json:"observed_generation,omitempty"`
-	Phase           string `json:"operation_phase,omitempty"`
-	Database        string `json:"database_outcome,omitempty"`
-	Publication     string `json:"publication_state,omitempty"`
-	ReportClaims    string `json:"report_claims"`
-	ReportFreshness string `json:"report_freshness"`
-	Registration    string `json:"registration_state"`
-	Chain           string `json:"registration_chain"`
-	Persistence     string `json:"persistence_confirmation"`
-	Ready           bool   `json:"ready_for_cutover"`
-	Deployment      bool   `json:"deployment_authorized"`
+	Format          string                `json:"diagnostic_format"`
+	Version         int                   `json:"diagnostic_version"`
+	Scope           string                `json:"scope"`
+	OperationID     string                `json:"operation_id"`
+	Status          string                `json:"status"`
+	Reason          string                `json:"reason"`
+	Generation      int64                 `json:"observed_generation,omitempty"`
+	Phase           string                `json:"operation_phase,omitempty"`
+	Database        string                `json:"database_outcome,omitempty"`
+	Publication     string                `json:"publication_state,omitempty"`
+	ReportClaims    string                `json:"report_claims"`
+	ReportFreshness string                `json:"report_freshness"`
+	Registration    string                `json:"registration_state"`
+	Chain           string                `json:"registration_chain"`
+	Persistence     string                `json:"persistence_confirmation"`
+	BoundReview     BoundReviewDiagnostic `json:"bound_behavior_review"`
+	Ready           bool                  `json:"ready_for_cutover"`
+	Deployment      bool                  `json:"deployment_authorized"`
 }
 
 type statusSnapshot struct {
 	control                    diagnosticSnapshot
 	report                     handoverReview
 	registration               handoverRegistration
+	bound                      optionalBoundReviewRead
 	hasReport, hasRegistration bool
-	tokens                     [5]string
+	tokens                     [6]string
 }
 
 func optionalStatusBytes(ctx context.Context, r RestoreRecordReader, key string, limit int64) ([]byte, bool, error) {
@@ -87,6 +89,11 @@ func readStatusSnapshot(ctx context.Context, r RestoreRecordReader, id string) (
 		}
 		s.tokens[4] = digestBytes(data)
 	}
+	s.bound, e = readOptionalBoundReview(ctx, r, id)
+	if e != nil {
+		return s, e
+	}
+	s.tokens[5] = s.bound.sha
 	return s, ctx.Err()
 }
 
@@ -99,7 +106,7 @@ func statusControlBound(s diagnosticSnapshot) bool {
 // DiagnoseRestoreStatus uses only bounded Get reads. Registered visibility is
 // deliberately indistinguishable from a lost-ack write with the same bytes.
 func DiagnoseRestoreStatus(ctx context.Context, r RestoreRecordReader, id string, now time.Time) RestoreStatus {
-	out := RestoreStatus{Format: "ylreader-restore-status", Version: 1, Scope: "control-records-only", Status: "unavailable", Reason: "invalid_input", ReportClaims: "not_observed", ReportFreshness: "not_observed", Registration: "not_observed", Chain: "not_applicable", Persistence: "not_inferred"}
+	out := RestoreStatus{Format: "ylreader-restore-status", Version: 1, Scope: "control-records-only", Status: "unavailable", Reason: "invalid_input", ReportClaims: "not_observed", ReportFreshness: "not_observed", Registration: "not_observed", Chain: "not_applicable", Persistence: "not_inferred", BoundReview: defaultBoundReviewDiagnostic("unavailable", "invalid_input")}
 	if !validUUID(id) {
 		return out
 	}
@@ -112,20 +119,26 @@ func DiagnoseRestoreStatus(ctx context.Context, r RestoreRecordReader, id string
 	s, e := readStatusSnapshot(ctx, r, id)
 	if e != nil {
 		out.Reason = "record_invalid_or_unavailable"
+		out.BoundReview = defaultBoundReviewDiagnostic("unavailable", "records_unavailable")
 		if errors.Is(e, storage.ErrNotFound) {
 			out.Reason = "record_missing"
 		}
 		return out
 	}
 	second, e := readStatusSnapshot(ctx, r, id)
-	if e != nil || s.tokens != second.tokens {
+	if e != nil || s.tokens != second.tokens || s.bound.present != second.bound.present {
 		out.Status, out.Reason = "changed", "snapshot_changed"
+		out.BoundReview = defaultBoundReviewDiagnostic("changed", "snapshot_changed")
 		return out
 	}
 	c := s.control
 	o, a, p := c.op, c.attempt, c.pub
 	if !statusControlBound(c) {
 		out.Status, out.Reason = "inconsistent", "control_binding_mismatch"
+		out.BoundReview = defaultBoundReviewDiagnostic("inconsistent", "control_binding_mismatch")
+		if s.bound.present {
+			out.BoundReview.Present = true
+		}
 		return out
 	}
 	out.Generation, out.Phase, out.Database, out.Publication = o.Generation, o.Phase, a.DatabaseOutcome, p.State
@@ -133,12 +146,21 @@ func DiagnoseRestoreStatus(ctx context.Context, r RestoreRecordReader, id string
 	if s.hasRegistration {
 		out.Registration = s.registration.State
 	}
+	out.BoundReview = evaluateBoundReview(c, s.bound, s.hasRegistration, s.registration, now, nil)
 	out.Status, out.Reason = "records_only", "report_absent"
-	if s.hasRegistration && !s.hasReport {
-		out.Status, out.Reason = "inconsistent", "registration_without_report"
-		return out
+	useBoundReport := (s.hasRegistration && s.registration.Scope == "bound-behavior-review-registration") || (!s.hasRegistration && !s.hasReport && s.bound.present)
+	if useBoundReport {
+		applyBoundStatusToRestore(&out, s)
+		if out.Status == "inconsistent" || out.Status == "blocked" || out.Status == "unavailable" {
+			return out
+		}
+	} else {
+		if s.hasRegistration && !s.hasReport {
+			out.Status, out.Reason = "inconsistent", "registration_without_report"
+			return out
+		}
 	}
-	if s.hasReport {
+	if !useBoundReport && s.hasReport {
 		report := s.report
 		if report.BackupID != o.BackupID || report.PlanDigest != o.PlanDigest || report.PackageSHA != p.PackageSHA || report.ManifestSHA != p.ManifestSHA || report.StorageFingerprint != p.TargetFingerprint || report.TreeFingerprint != p.TreeFingerprint || report.AttemptSHA != c.tokens[1] || report.PublicationSHA != c.tokens[2] {
 			out.Status, out.Reason = "inconsistent", "report_binding_mismatch"

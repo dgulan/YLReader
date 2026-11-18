@@ -8,12 +8,36 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"yreader/backend/internal/backup"
 	"yreader/backend/internal/pkg/storage"
 )
+
+func formatBoundReviewText(b backup.BoundReviewDiagnostic) string {
+	presence := "不存在"
+	if b.Present {
+		presence = "存在"
+	} else if b.Status == "unavailable" || b.Status == "changed" {
+		presence = "未知(" + b.Status + ")"
+	}
+	reportStatus := b.ReportStatus
+	if reportStatus == "" {
+		reportStatus = "未观察"
+	}
+	pending := "无"
+	if len(b.PendingChecks) > 0 {
+		pending = strings.Join(b.PendingChecks, ",")
+	}
+	regBind := b.RegistrationBind
+	if regBind == "" {
+		regBind = "not_applicable"
+	}
+	return fmt.Sprintf("通用报告存在: %s\n通用报告状态: %s (%s)\n通用报告完整度: %s\n待验项清单: %s\n通用报告时效: %s\n控制绑定: %s (报告版本=%d, 当前版本=%d)\n登记绑定: %s (%s)\n",
+		presence, b.Status, b.Reason, reportStatus, pending, b.Freshness, b.ControlBinding, b.ObservedGen, b.CurrentGen, regBind, b.Registration)
+}
 
 type controlReader interface {
 	backup.RestoreRecordReader
@@ -83,7 +107,7 @@ func run(ctx context.Context, args []string, out, errs io.Writer, open openContr
 	if format == "json" {
 		e = json.NewEncoder(out).Encode(status)
 	} else {
-		_, e = fmt.Fprintf(out, "诊断状态: %s\n原因: %s\n操作版本: %d\n操作阶段: %s\n报告声明: %s\n报告时效: %s\n登记记录: %s\n版本链: %s\n持久确认: 无法从磁盘推断\n允许切换/部署: 否\n", status.Status, status.Reason, status.Generation, status.Phase, status.ReportClaims, status.ReportFreshness, status.Registration, status.Chain)
+		_, e = fmt.Fprintf(out, "诊断状态: %s\n原因: %s\n操作版本: %d\n操作阶段: %s\n报告声明: %s\n报告时效: %s\n登记记录: %s\n版本链: %s\n%s持久确认: 无法从磁盘推断\n允许切换/部署: 否\n", status.Status, status.Reason, status.Generation, status.Phase, status.ReportClaims, status.ReportFreshness, status.Registration, status.Chain, formatBoundReviewText(status.BoundReview))
 	}
 	if e != nil {
 		fmt.Fprintln(errs, "status output failed")

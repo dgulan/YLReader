@@ -172,3 +172,81 @@ func TestBehaviorLedgerRejectsDuplicateAndSkippedAccounts(t *testing.T) {
 		})
 	}
 }
+
+func TestBehaviorLedgerBoundReviewAfterRegistration(t *testing.T) {
+	files, p, clock := ledgerFixture(t)
+	now := clock()
+	ctx := context.Background()
+	snap, a, e := stableBehaviorLedger(ctx, files, p.OperationID, now)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctrl := Control{files}
+	before, sha, e := ctrl.Load(ctx, p.OperationID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	report := boundBehaviorReview{
+		Format:         "ylreader-bound-behavior-review",
+		Version:        1,
+		Profile:        "bound-https-account-verification-v1",
+		Scope:          "localfs-bound-https-account-review",
+		Status:         "complete",
+		OperationID:    p.OperationID,
+		BackupID:       before.BackupID,
+		ConsentID:      a.intent.ConsentID,
+		PlanDigest:     before.PlanDigest,
+		PackageSHA:     p.PackageSHA,
+		ManifestSHA:    p.ManifestSHA,
+		TargetID:       p.TargetID,
+		Storage:        snap.base.control.pub.TargetFingerprint,
+		Tree:           snap.base.control.pub.TreeFingerprint,
+		Generation:     before.Generation,
+		OperationSHA:   sha,
+		AttemptSHA:     snap.base.control.tokens[1],
+		PublicationSHA: snap.base.control.tokens[2],
+		Identity:       handoverTargetIdentity{strings.Repeat("5", 64), a.intent.RuntimeSHA, strings.Repeat("7", 64)},
+		Certificate:    strings.Repeat("8", 64),
+		Ledger:         behaviorLedgerDigest(snap),
+		AccountCount:   len(a.intent.Users),
+		SessionCount:   len(a.known),
+		Started:        a.intent.Recorded,
+		Finished:       now,
+		Expires:        a.intent.Expires,
+	}
+	for _, id := range boundBehaviorCheckIDs() {
+		report.Checks = append(report.Checks, handoverReviewCheck{id, "pass"})
+	}
+	if e := saveBoundBehaviorReview(ctx, files, report); e != nil {
+		t.Fatal(e)
+	}
+	nextTime := now.Add(time.Second)
+	nextOp := before
+	nextOp.Generation = before.Generation + 1
+	nextOp.UpdatedAt = nextTime
+	nextOp.HeartbeatAt = nextTime
+	nextData, _ := json.Marshal(nextOp)
+	nextSHA := digestBytes(nextData)
+	reg := handoverRegistration{
+		Format: "ylreader-handover-registration", Version: 1,
+		Scope: "bound-behavior-review-registration", OperationID: p.OperationID,
+		BackupID: before.BackupID, OwnerID: before.OwnerID, PlanDigest: before.PlanDigest,
+		ReportSHA:      digestBytes(files.data["operations/"+p.OperationID+"/behavior-account-review.json"]),
+		BaseGeneration: before.Generation, BaseSHA: sha,
+		NextGeneration: nextOp.Generation, NextSHA: nextSHA,
+		Recorded: nextTime, State: "registered",
+	}
+	regKey, _ := registrationKey(p.OperationID)
+	files.data[regKey], _ = json.Marshal(reg)
+	files.data["operations/"+p.OperationID+"/state.json"] = nextData
+
+	d := DiagnoseBehaviorLedger(ctx, files, p.OperationID, nextTime)
+	if d.Status != "stale" || d.Reason != "stale_records_outcome_not_inferred" || !d.BoundReview.Present || d.BoundReview.Status != "complete_registered" || d.BoundReview.ObservedGen != report.Generation || d.BoundReview.CurrentGen != nextOp.Generation || d.BoundReview.Registration != "registered" || d.BoundReview.RegistrationBind != "bound_next_observed" || d.BoundReview.Persistence != "not_inferred" || d.Dispatch || d.Retry || d.Deployment {
+		t.Fatalf("unexpected diagnostic after bound registration: %+v", d)
+	}
+
+	expired := DiagnoseBehaviorLedger(ctx, files, p.OperationID, report.Expires)
+	if !expired.BoundReview.Present || expired.BoundReview.Status != "expired" || expired.BoundReview.Reason != "bound_review_expired" {
+		t.Fatalf("expected expired registered bound review diagnostic, got %+v", expired.BoundReview)
+	}
+}

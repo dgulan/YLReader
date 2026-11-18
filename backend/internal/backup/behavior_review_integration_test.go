@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/google/uuid"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func assertBoundBehaviorReview(t *testing.T, g *restoreGuard, inputs handoverProbeInputs, clock func() time.Time, mode string) {
@@ -95,4 +97,36 @@ func assertBoundBehaviorReview(t *testing.T, g *restoreGuard, inputs handoverPro
 	})
 	encoded, _ := json.Marshal(report)
 	t.Logf("BOUND_BEHAVIOR_REVIEW %s", encoded)
+	if os.Getenv("BACKUP_HANDOVER_REGISTER") == "1" {
+		var reg handoverRegistration
+		t.Run("bound_review_registration", func(t *testing.T) {
+			var e error
+			reg, e = g.registerBoundReview(ctx, inputs, clock)
+			if e != nil {
+				t.Fatal("bound review registration failed", e)
+			}
+			if reg.Scope != "bound-behavior-review-registration" || reg.State != "registered" || reg.Ready || reg.Deployment || reg.BaseGeneration != report.Generation || reg.NextGeneration != report.Generation+1 {
+				t.Fatalf("invalid bound registration chain: %+v", reg)
+			}
+			st := DiagnoseRestoreStatus(ctx, g.locations.files[3], g.plan.OperationID, clock())
+			if st.Status != "observed_registered" || !st.BoundReview.Present || st.BoundReview.Status != "complete_registered" || st.BoundReview.CurrentGen != reg.NextGeneration || st.Ready || st.Deployment {
+				t.Fatalf("unexpected status after bound registration: %+v", st)
+			}
+			bd := DiagnoseBehaviorLedger(ctx, g.locations.files[3], g.plan.OperationID, clock())
+			if bd.Status != "stale" || bd.Reason != "stale_records_outcome_not_inferred" || !bd.BoundReview.Present || bd.BoundReview.Status != "complete_registered" || bd.BoundReview.ObservedGen != report.Generation || bd.BoundReview.CurrentGen != reg.NextGeneration || bd.BoundReview.Registration != "registered" || bd.BoundReview.RegistrationBind != "bound_next_observed" || bd.BoundReview.Persistence != "not_inferred" || bd.BoundReview.Execution || bd.BoundReview.Ready || bd.BoundReview.Deployment || bd.Dispatch || bd.Retry || bd.Deployment {
+				t.Fatalf("unexpected behavior-status after bound registration: %+v", bd)
+			}
+			regBytes, _ := json.Marshal(reg)
+			t.Logf("BOUND_REVIEW_REGISTRATION %s", regBytes)
+		})
+		t.Run("bound_review_registration_no_replay", func(t *testing.T) {
+			if _, e := g.registerBoundReview(ctx, inputs, clock); e != errRegistrationUnknown {
+				t.Fatal("bound registration replay accepted", e)
+			}
+			op, sha, e := (Control{g.locations.files[3]}).Load(ctx, g.plan.OperationID)
+			if e != nil || op.Generation != reg.NextGeneration || op.Phase != "validating" || sha != reg.NextSHA {
+				t.Fatal("bound registration replay mutated operation state")
+			}
+		})
+	}
 }

@@ -28,17 +28,17 @@ type confirmedReaderSet struct {
 }
 
 type confirmedBehaviorRun struct {
-	plan, consent, ledger, certificate string
-	identity                           handoverTargetIdentity
-	records                            [3]string
-	sessions                           []behaviorSessionResponse
-	windowStart                        time.Time
-	started, finished, expires         time.Time
-	reviewStarted, writeAttempted      bool
-	reviewSHA                          string
-	sourceJWT, targetJWT               []byte
-	oldTokens                          confirmedOldTokenSet
-	reader                             confirmedReaderSet
+	plan, consent, ledger, certificate             string
+	identity                                       handoverTargetIdentity
+	records                                        [3]string
+	sessions                                       []behaviorSessionResponse
+	windowStart                                    time.Time
+	started, finished, expires                     time.Time
+	reviewStarted, writeAttempted, reviewPersisted bool
+	reviewSHA                                      string
+	sourceJWT, targetJWT                           []byte
+	oldTokens                                      confirmedOldTokenSet
+	reader                                         confirmedReaderSet
 }
 
 func (*confirmedBehaviorRun) MarshalJSON() ([]byte, error) { return nil, errBehaviorReview }
@@ -206,6 +206,57 @@ func loadBoundBehaviorReview(reader io.Reader) (boundBehaviorReview, error) {
 		return boundBehaviorReview{}, errBehaviorReview
 	}
 	return r, nil
+}
+
+func (r boundBehaviorReview) validateBindingsFor(p Plan, s diagnosticSnapshot, live handoverTargetIdentity, now time.Time) error {
+	if r.validate() != nil || checkHandoverSnapshot(p, s) != nil || !live.valid() || !validStamp(now) || live != r.Identity {
+		return errBehaviorReview
+	}
+	o, pub := s.op, s.pub
+	if r.OperationID != o.ID || r.BackupID != o.BackupID || r.Generation != o.Generation || r.PlanDigest != p.Digest || r.PackageSHA != p.PackageSHA || r.ManifestSHA != p.ManifestSHA || r.TargetID != p.TargetID || r.Storage != p.TargetFingerprint || r.Tree != pub.TreeFingerprint || r.OperationSHA != s.tokens[0] || r.AttemptSHA != s.tokens[1] || r.PublicationSHA != s.tokens[2] {
+		return errBehaviorReview
+	}
+	created, _ := time.Parse(time.RFC3339Nano, p.Created)
+	expires, _ := time.Parse(time.RFC3339Nano, p.Expires)
+	if r.Started.Before(created) || r.Started.Before(o.UpdatedAt) || r.Expires.After(expires) || now.Before(r.Finished) || !now.Before(r.Expires) {
+		return errBehaviorReview
+	}
+	return nil
+}
+
+func (r boundBehaviorReview) validateCompleteFor(p Plan, s diagnosticSnapshot, live handoverTargetIdentity, now time.Time) error {
+	if r.validateBindingsFor(p, s, live, now) != nil || r.Status != "complete" || r.Execution || r.Ready || r.Deployment {
+		return errBehaviorReview
+	}
+	for _, c := range r.Checks {
+		if c.Status != "pass" {
+			return errBehaviorReview
+		}
+	}
+	return nil
+}
+
+type boundBehaviorReviewStore struct{ Files storage.ConditionalFiles }
+
+func (s boundBehaviorReviewStore) Load(ctx context.Context, id string) (boundBehaviorReview, string, error) {
+	key, e := boundBehaviorReviewKey(id)
+	if e != nil || s.Files == nil {
+		return boundBehaviorReview{}, "", errBehaviorReview
+	}
+	reader, e := s.Files.Get(ctx, key)
+	if e != nil {
+		return boundBehaviorReview{}, "", errBehaviorReview
+	}
+	data, e := io.ReadAll(io.LimitReader(reader, 32769))
+	closed := reader.Close()
+	if e != nil || closed != nil {
+		return boundBehaviorReview{}, "", errBehaviorReview
+	}
+	r, e := loadBoundBehaviorReview(bytes.NewReader(data))
+	if e != nil || r.OperationID != id {
+		return boundBehaviorReview{}, "", errBehaviorReview
+	}
+	return r, digestBytes(data), nil
 }
 
 func oldTokenRejectionConfirmed(p Plan, run *confirmedBehaviorRun, s behaviorLedgerSnapshot, a behaviorLedgerAssessment, actual handoverTargetIdentity, now time.Time) bool {
@@ -425,5 +476,6 @@ func (g *restoreGuard) persistBoundBehaviorReview(ctx context.Context, r boundBe
 	if e != nil || !s.equal(after) || checkConfirmedBehaviorRun(g.plan, run, after, assessed, clock()) != nil || !clock().Before(r.Expires) || ctx.Err() != nil {
 		return errBehaviorReview
 	}
+	run.reviewPersisted = true
 	return nil
 }

@@ -84,6 +84,75 @@ func TestStatusCommandJSONTextAndAttention(t *testing.T) {
 	}
 }
 
+func TestStatusCommandBoundBehaviorReviewDisplay(t *testing.T) {
+	reader, id, clock := commandFixture()
+	root := "operations/" + id + "/"
+	delete(reader.data, root+"handover-review.json")
+	delete(reader.data, root+"handover-registration.json")
+	sha := func(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+	encode := func(v any) []byte { b, _ := json.Marshal(v); return b }
+	var state map[string]any
+	json.Unmarshal(reader.data[root+"state.json"], &state)
+	h := func(c string) string { return strings.Repeat(c, 64) }
+	stamp := func(n int) string { return time.Date(2026, 11, 16, 0, 0, n, 0, time.UTC).Format(time.RFC3339) }
+	checks := []map[string]string{}
+	for _, name := range strings.Fields("schema_ledger database_identity database_role published_objects header_keyring redis_isolation sessions_revoked tasks_disabled credential_preflight https_login_logout old_token_http_rejection reader_roundtrip") {
+		status := "pass"
+		if name == "reader_roundtrip" {
+			status = "unavailable"
+		}
+		checks = append(checks, map[string]string{"id": name, "status": status})
+	}
+	bound := map[string]any{
+		"report_format": "ylreader-bound-behavior-review", "report_version": 1,
+		"profile": "bound-https-account-verification-v1", "scope": "localfs-bound-https-account-review",
+		"status": "partial", "operation_id": id, "backup_id": state["backup_id"],
+		"consent_id": "00000000-0000-4000-8000-000000000099", "plan_digest": state["plan_digest"],
+		"package_sha256": h("b"), "manifest_sha256": h("c"), "target_instance_id": state["owner_id"],
+		"target_storage_fingerprint": h("d"), "publication_tree_fingerprint": h("e"),
+		"observed_generation": state["generation"], "operation_record_sha256": sha(reader.data[root+"state.json"]),
+		"attempt_record_sha256": sha(reader.data[root+"attempt.json"]), "publication_record_sha256": sha(reader.data[root+"publication.json"]),
+		"target_identity":        map[string]string{"database_identity_sha256": h("1"), "runtime_config_revision_sha256": h("2"), "redis_identity_sha256": h("3")},
+		"tls_certificate_sha256": h("4"), "behavior_ledger_sha256": h("5"),
+		"account_count": 1, "session_count": 1,
+		"started_at": stamp(4), "finished_at": stamp(4), "expires_at": "2026-11-16T00:01:00Z",
+		"checks": checks, "execution_authorized": false, "ready_for_cutover": false, "deployment_authorized": false,
+	}
+	reader.data[root+"behavior-account-review.json"] = encode(bound)
+
+	var out, errs bytes.Buffer
+	code := run(context.Background(), []string{"status", "--control-root", t.TempDir(), "--operation", id, "--format", "text"}, &out, &errs, func(string) (controlReader, error) { return reader, nil }, clock)
+	if code != 4 || errs.Len() != 0 || !strings.Contains(out.String(), "待验项清单: reader_roundtrip") || !strings.Contains(out.String(), "允许切换/部署: 否") {
+		t.Fatalf("partial bound review text output wrong: code=%d out=%s", code, out.String())
+	}
+
+	// Complete & registered bound review -> exit 0, still ready_for_cutover=false
+	checks[11]["status"] = "pass"
+	bound["status"] = "complete"
+	bound["checks"] = checks
+	baseSHA := sha(reader.data[root+"state.json"])
+	reader.data[root+"behavior-account-review.json"] = encode(bound)
+	state["generation"] = 5
+	state["updated_at"] = stamp(5)
+	state["heartbeat_at"] = stamp(5)
+	reader.data[root+"state.json"] = encode(state)
+	reg := map[string]any{
+		"registration_format": "ylreader-handover-registration", "registration_version": 1,
+		"scope": "bound-behavior-review-registration", "operation_id": id,
+		"backup_id": state["backup_id"], "owner_id": state["owner_id"], "plan_digest": state["plan_digest"],
+		"report_sha256":     sha(reader.data[root+"behavior-account-review.json"]),
+		"base_state_sha256": baseSHA, "base_generation": 4,
+		"next_state_sha256": sha(reader.data[root+"state.json"]), "next_generation": 5,
+		"recorded_at": stamp(5), "state": "registered", "ready_for_cutover": false, "deployment_authorized": false,
+	}
+	reader.data[root+"handover-registration.json"] = encode(reg)
+	out.Reset()
+	code = run(context.Background(), []string{"status", "--control-root", t.TempDir(), "--operation", id, "--format", "json"}, &out, &errs, func(string) (controlReader, error) { return reader, nil }, func() time.Time { return time.Date(2026, 11, 16, 0, 0, 6, 0, time.UTC) })
+	if code != 0 || errs.Len() != 0 || !strings.Contains(out.String(), `"complete_registered"`) || !strings.Contains(out.String(), `"ready_for_cutover":false`) {
+		t.Fatalf("registered bound review status wrong: code=%d out=%s", code, out.String())
+	}
+}
+
 func TestStatusCommandRejectsArgumentsBeforeOpen(t *testing.T) {
 	_, id, clock := commandFixture()
 	root := t.TempDir()

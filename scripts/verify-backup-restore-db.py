@@ -156,7 +156,7 @@ try:
         raise RuntimeError('isolated restore tests failed; see tests.txt')
     lines = process.stdout.decode().splitlines()
     passes = [s for s in lines if s.lstrip().startswith('--- PASS:')]
-    expected_passes = (53 if args.handover_register else 45 if args.handover_behavior else 39 if args.handover_data else 32) + (14 if args.behavior_accounts else 0) + (20 if args.behavior_dispatch else 0) + (12 if args.behavior_ledger else 0) + (20 if args.behavior_http else 0) + (8 if args.behavior_review else 0)
+    expected_passes = (53 if args.handover_register else 45 if args.handover_behavior else 39 if args.handover_data else 32) + (14 if args.behavior_accounts else 0) + (20 if args.behavior_dispatch else 0) + (12 if args.behavior_ledger else 0) + (20 if args.behavior_http else 0) + ((10 if args.handover_register else 8) if args.behavior_review else 0)
     assert len(passes) == expected_passes and not any('--- SKIP:' in s or '--- FAIL:' in s for s in lines)
     account_observations = [json.loads(m.group(1)) for s in lines if (m := re.search(r'RESTORED_ACCOUNTS_EVIDENCE (\{.*\})$', s))]
     assert len(account_observations) == (1 if args.behavior_accounts else 0)
@@ -223,6 +223,22 @@ try:
             assert re.fullmatch('[0-9a-f]{64}', review[key])
         (OUT / 'bound-behavior-review.json').write_text(json.dumps(review, indent=2) + '\n', encoding='utf-8')
         result['bound_behavior_review'] = {'profile': review['profile'], 'status': 'complete', 'verified_checks': 12, 'unavailable_checks': 0}
+        bound_regs = [json.loads(m.group(1)) for s in lines if (m := re.search(r'BOUND_REVIEW_REGISTRATION (\{.*\})$', s))]
+        assert len(bound_regs) == (1 if args.handover_register else 0)
+        if args.handover_register:
+            breg = bound_regs[0]
+            assert breg['registration_format'] == 'ylreader-handover-registration' and breg['registration_version'] == 1
+            assert breg['scope'] == 'bound-behavior-review-registration' and breg['state'] == 'registered'
+            assert breg['ready_for_cutover'] is False and breg['deployment_authorized'] is False
+            for key in ['operation_id', 'backup_id', 'plan_digest']:
+                assert breg[key] == review[key]
+            assert breg['base_generation'] == review['observed_generation'] and breg['next_generation'] == breg['base_generation'] + 1
+            assert breg['base_state_sha256'] == review['operation_record_sha256']
+            assert re.fullmatch('[0-9a-f]{64}', breg['next_state_sha256'])
+            raw_bound = next(m.group(1) for s in lines if (m := re.search(r'BOUND_BEHAVIOR_REVIEW (\{.*\})$', s)))
+            assert breg['report_sha256'] == hashlib.sha256(raw_bound.encode('utf-8')).hexdigest()
+            (OUT / 'bound-review-registration.json').write_text(json.dumps(breg, indent=2) + '\n', encoding='utf-8')
+            result['bound_registration'] = {'scope': breg['scope'], 'state': 'registered', 'base_generation': breg['base_generation'], 'next_generation': breg['next_generation'], 'operation_phase': 'validating'}
     data_reviews = [json.loads(s.removeprefix('RESTORE_DATA_REVIEW ')) for s in lines if s.startswith('RESTORE_DATA_REVIEW ')]
     assert len(data_reviews) == (1 if args.handover_data else 0)
     if args.handover_data:

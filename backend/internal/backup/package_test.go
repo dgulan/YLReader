@@ -365,7 +365,7 @@ func TestManifestUTF8ChunkBoundaries(t *testing.T) {
 	if hash, e := manifestUTF8Hash(context.Background(), bytes.NewReader(good)); e != nil || hash != sha(good) {
 		t.Fatal("UTF-8/hash boundary", e)
 	}
-	for _, bad := range [][]byte{append([]byte("ascii"), 0xff), []byte{0xe4, 0xb8}} {
+	for _, bad := range [][]byte{append([]byte("ascii"), 0xff), {0xe4, 0xb8}} {
 		if _, e := manifestUTF8Hash(context.Background(), bytes.NewReader(bad)); !errors.Is(e, ErrPackageSchema) {
 			t.Fatal("invalid UTF-8 accepted")
 		}
