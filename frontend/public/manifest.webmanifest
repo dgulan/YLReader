@@ -1,0 +1,18 @@
+{
+  "name": "YLReader",
+  "short_name": "YLReader",
+  "description": "自托管在线与本地电子书阅读器",
+  "start_url": "/bookshelf",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f4ef",
+  "theme_color": "#315d4d",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
