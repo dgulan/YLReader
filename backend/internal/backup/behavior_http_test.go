@@ -110,7 +110,7 @@ func TestBehaviorHTTPPinAndSecretLifetime(t *testing.T) {
 	}
 	tr.Close()
 	tr.Close()
-	if !tr.secrets.closed || !bytes.Equal(tr.secrets.key, make([]byte, 32)) || len(tr.secrets.known) != 0 {
+	if !tr.secrets.closed || !bytes.Equal(tr.secrets.key, make([]byte, 32)) || len(tr.secrets.known) != 0 || len(tr.secrets.oldRefreshTried) != 0 {
 		t.Fatal("Close retained local secrets")
 	}
 }
@@ -247,5 +247,195 @@ func TestBehaviorHTTPRequestBodyOwnsSensitiveBytes(t *testing.T) {
 	body.Close()
 	if _, e = body.Read(make([]byte, 1)); e != io.EOF || !bytes.Equal(body.buffer.data, make([]byte, len(body.buffer.data))) {
 		t.Fatal("request body retained readable bytes after close")
+	}
+}
+
+func oldRefreshProofFixture(t *testing.T, c behaviorHTTPConfig) (*restoreGuard, *verifiedBehaviorAccounts) {
+	t.Helper()
+	now := c.Clock()
+	plan := Plan{OperationID: uuid.NewString(), TargetID: c.Binding.TargetID, Digest: strings.Repeat("p", 64)}
+	g := &restoreGuard{locations: &Locations{}, plan: plan}
+	proof := &verifiedBehaviorAccounts{guard: g, plan: plan.Digest, consent: uuid.NewString(), runtime: c.Binding.Runtime, database: c.Binding.Database, redis: strings.Repeat("r", 64), users: append([]uuid.UUID(nil), c.Users...), checked: now, expires: now.Add(time.Minute)}
+	return g, proof
+}
+
+func TestBehaviorOldRefreshBoundedObservation(t *testing.T) {
+	modes := []string{
+		"good", "after_logout",
+		"accepted", "forbidden", "redirect", "network", "compressed", "large", "duplicate", "wrong_code", "wrong_shape", "bad_close",
+		"nil_proof", "closed_guard", "wrong_plan_digest", "wrong_target_id", "wrong_db_pin", "wrong_runtime_pin", "same_db_pins", "expired_proof", "stale_proof", "wrong_user", "whitelist_mismatch", "bad_refresh", "closed_transport", "cancel",
+		"active_known_session", "unconfirmed_login",
+		"pre_db_error", "pre_active_session", "pre_expired", "pre_not_revoked",
+		"post_db_error", "post_new_row", "post_revoked_tampered", "post_active_created", "post_expired",
+	}
+	for _, mode := range modes {
+		t.Run(mode, func(t *testing.T) {
+			c := behaviorHTTPFixture(t)
+			now := c.Clock()
+			clock := func() time.Time { return now }
+			c.Clock = clock
+			tr, e := newBehaviorHTTPTransport(c)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tr.Close()
+			g, proof := oldRefreshProofFixture(t, c)
+			id := c.Users[0]
+			refresh := strings.Repeat("b", 64)
+			ctx := context.Background()
+			switch mode {
+			case "after_logout":
+				tr.secrets.loginTried[id] = true
+				tr.secrets.completed[uuid.New()] = behaviorSessionResponse{UserID: id, SessionID: uuid.New()}
+			case "nil_proof":
+				proof = nil
+			case "closed_guard":
+				g.locations = nil
+			case "wrong_plan_digest":
+				proof.plan = strings.Repeat("x", 64)
+			case "wrong_target_id":
+				g.plan.TargetID = uuid.NewString()
+			case "wrong_db_pin":
+				proof.database = strings.Repeat("e", 64)
+			case "wrong_runtime_pin":
+				proof.runtime = strings.Repeat("e", 64)
+			case "same_db_pins":
+				tr.source = tr.target
+			case "expired_proof":
+				now = proof.expires
+			case "stale_proof":
+				now = proof.checked.Add(21 * time.Second)
+			case "wrong_user":
+				id = uuid.New()
+			case "whitelist_mismatch":
+				proof.users = append(proof.users, uuid.New())
+			case "bad_refresh":
+				refresh = "not-a-sha256-refresh"
+			case "closed_transport":
+				tr.Close()
+			case "cancel":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			case "active_known_session":
+				tr.secrets.loginTried[id] = true
+				tr.secrets.known[uuid.New()] = behaviorHTTPKnown{user: id}
+			case "unconfirmed_login":
+				tr.secrets.loginTried[id] = true
+			}
+			dbCalls := 0
+			tr.oldRefreshObserver = func(_ context.Context, gotUser uuid.UUID, gotRefresh string) (oldRefreshSessionSnapshot, error) {
+				dbCalls++
+				if gotUser != id || gotRefresh != refresh {
+					t.Fatal("observer received unexpected arguments")
+				}
+				base := oldRefreshSessionSnapshot{total: 2, revoked: 2, activeForUser: 0, targetFound: true, targetRevoked: true, targetExpires: now.Add(time.Minute), digest: strings.Repeat("1", 64)}
+				switch mode {
+				case "pre_db_error":
+					return oldRefreshSessionSnapshot{}, fmt.Errorf("SECRET db")
+				case "pre_active_session":
+					base.total, base.revoked, base.activeForUser = 3, 2, 1
+					return base, nil
+				case "pre_expired":
+					base.targetExpires = now.Add(-time.Second)
+					return base, nil
+				case "pre_not_revoked":
+					base.targetRevoked = false
+					return base, nil
+				}
+				if dbCalls == 1 {
+					return base, nil
+				}
+				switch mode {
+				case "post_db_error":
+					return oldRefreshSessionSnapshot{}, fmt.Errorf("SECRET post db")
+				case "post_new_row":
+					base.total, base.revoked = 3, 3
+				case "post_revoked_tampered":
+					base.digest = strings.Repeat("2", 64)
+				case "post_active_created":
+					base.total, base.revoked = 3, 2
+				case "post_expired":
+					base.targetExpires = now
+				}
+				return base, nil
+			}
+			calls := 0
+			tr.client.Transport = behaviorRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				rawBody, readErr := io.ReadAll(r.Body)
+				if readErr != nil || string(rawBody) != `{"refresh_token":"`+refresh+`"}` {
+					t.Fatal("unexpected refresh payload")
+				}
+				if r.Method != http.MethodPost || r.URL.String() != c.Endpoint+"/api/v1/auth/refresh" || r.GetBody != nil || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" || r.Header.Get("Idempotency-Key") != "" {
+					t.Fatal("request escaped restricted refresh boundary")
+				}
+				if mode == "network" {
+					return nil, fmt.Errorf("SECRET network")
+				}
+				status := http.StatusUnauthorized
+				body := `{"error":{"code":"unauthorized","message":"Unauthorized"}}`
+				header := http.Header{"Content-Type": []string{"application/json"}}
+				switch mode {
+				case "accepted":
+					status = http.StatusOK
+				case "forbidden":
+					status = http.StatusForbidden
+				case "redirect":
+					status = http.StatusTemporaryRedirect
+					header.Set("Location", "https://127.0.0.1:1")
+				case "compressed":
+					header.Set("Content-Encoding", "gzip")
+				case "large":
+					body = strings.Repeat("x", 8193)
+				case "duplicate":
+					body = `{"error":{"code":"unauthorized","code":"unauthorized","message":"Unauthorized"}}`
+				case "wrong_code":
+					body = `{"error":{"code":"validation_error","message":"No"}}`
+				case "wrong_shape":
+					body = `{"error":{"code":"unauthorized","message":"No","request_id":3}}`
+				}
+				var reader io.ReadCloser = io.NopCloser(strings.NewReader(body))
+				if mode == "bad_close" {
+					reader = behaviorHTTPBadClose{strings.NewReader(body)}
+				}
+				return &http.Response{StatusCode: status, Header: header, Body: reader, Request: r}, nil
+			})
+			err := tr.rejectOldRefresh(ctx, proof, id, refresh)
+			wantPass := mode == "good" || mode == "after_logout"
+			if (err == nil) != wantPass {
+				t.Fatalf("mode %s unexpected error: %v", mode, err)
+			}
+			if err != nil && err != errBehaviorHTTP {
+				t.Fatal("error exposed details")
+			}
+			first := calls
+			if tr.rejectOldRefresh(ctx, proof, id, refresh) != errBehaviorHTTP || calls != first {
+				t.Fatal("old refresh observation replayed")
+			}
+			if wantPass && (calls != 1 || dbCalls != 2) {
+				t.Fatalf("unexpected call counts: http=%d db=%d", calls, dbCalls)
+			}
+			zeroHTTP := []string{
+				"nil_proof", "closed_guard", "wrong_plan_digest", "wrong_target_id", "wrong_db_pin", "wrong_runtime_pin",
+				"same_db_pins", "expired_proof", "stale_proof", "wrong_user", "whitelist_mismatch", "bad_refresh",
+				"closed_transport", "cancel", "active_known_session", "unconfirmed_login",
+				"pre_db_error", "pre_active_session", "pre_expired", "pre_not_revoked",
+			}
+			for _, m := range zeroHTTP {
+				if mode == m && calls != 0 {
+					t.Fatalf("mode %s sent HTTP request", mode)
+				}
+			}
+			if wantPass {
+				if !tr.secrets.oldRefreshTried[id] {
+					t.Fatal("attempt state not recorded")
+				}
+				tr.Close()
+				if !tr.secrets.closed || len(tr.secrets.oldRefreshTried) != 0 {
+					t.Fatal("Close retained oldRefreshTried state")
+				}
+			}
+		})
 	}
 }

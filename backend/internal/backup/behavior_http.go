@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"yreader/backend/internal/pkg/storage"
 )
 
 var errBehaviorHTTP = errors.New("backup: bound HTTPS behavior response unconfirmed; do not retry")
@@ -53,24 +55,26 @@ type behaviorHTTPKnown struct {
 	attempted       bool
 }
 type behaviorHTTPSecrets struct {
-	key            []byte
-	known          map[uuid.UUID]behaviorHTTPKnown
-	loginTried     map[uuid.UUID]bool
-	completed      map[uuid.UUID]behaviorSessionResponse
-	oldAccessTried map[uuid.UUID]bool
-	closed         bool
+	key             []byte
+	known           map[uuid.UUID]behaviorHTTPKnown
+	loginTried      map[uuid.UUID]bool
+	completed       map[uuid.UUID]behaviorSessionResponse
+	oldAccessTried  map[uuid.UUID]bool
+	oldRefreshTried map[uuid.UUID]bool
+	closed          bool
 }
 type behaviorHTTPTransport struct {
-	mu             *sync.Mutex
-	client         *http.Client
-	endpoint       string
-	binding        behaviorTransportBinding
-	certificateSHA string
-	databaseURL    string
-	source, target databaseIdentityPin
-	users          map[uuid.UUID]bool
-	clock          func() time.Time
-	secrets        *behaviorHTTPSecrets
+	mu                 *sync.Mutex
+	client             *http.Client
+	endpoint           string
+	binding            behaviorTransportBinding
+	certificateSHA     string
+	databaseURL        string
+	source, target     databaseIdentityPin
+	users              map[uuid.UUID]bool
+	clock              func() time.Time
+	secrets            *behaviorHTTPSecrets
+	oldRefreshObserver func(context.Context, uuid.UUID, string) (oldRefreshSessionSnapshot, error)
 }
 
 func (behaviorHTTPTransport) Format(s fmt.State, _ rune) {
@@ -137,7 +141,7 @@ func newBehaviorHTTPTransport(c behaviorHTTPConfig) (*behaviorHTTPTransport, err
 		return nil
 	}}
 	client := &http.Client{Transport: tr, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &behaviorHTTPTransport{mu: &sync.Mutex{}, client: client, endpoint: strings.TrimSuffix(u.String(), "/"), binding: c.Binding, certificateSHA: hex.EncodeToString(expected[:]), databaseURL: c.DatabaseURL, source: c.Source, target: c.Target, users: users, clock: clock, secrets: &behaviorHTTPSecrets{key: append([]byte(nil), c.JWT...), known: map[uuid.UUID]behaviorHTTPKnown{}, loginTried: map[uuid.UUID]bool{}, completed: map[uuid.UUID]behaviorSessionResponse{}}}, nil
+	return &behaviorHTTPTransport{mu: &sync.Mutex{}, client: client, endpoint: strings.TrimSuffix(u.String(), "/"), binding: c.Binding, certificateSHA: hex.EncodeToString(expected[:]), databaseURL: c.DatabaseURL, source: c.Source, target: c.Target, users: users, clock: clock, secrets: &behaviorHTTPSecrets{key: append([]byte(nil), c.JWT...), known: map[uuid.UUID]behaviorHTTPKnown{}, loginTried: map[uuid.UUID]bool{}, completed: map[uuid.UUID]behaviorSessionResponse{}, oldAccessTried: map[uuid.UUID]bool{}, oldRefreshTried: map[uuid.UUID]bool{}}}, nil
 }
 func (t *behaviorHTTPTransport) Close() {
 	if t == nil {
@@ -151,6 +155,7 @@ func (t *behaviorHTTPTransport) Close() {
 	clear(t.secrets.loginTried)
 	clear(t.secrets.completed)
 	clear(t.secrets.oldAccessTried)
+	clear(t.secrets.oldRefreshTried)
 	t.client.CloseIdleConnections()
 }
 
@@ -190,7 +195,27 @@ func (b behaviorRequestBody) Close() error {
 }
 
 func (t *behaviorHTTPTransport) post(ctx context.Context, path string, payload []byte, access string, status int) (result []byte, err error) {
-	if ctx == nil || ctx.Err() != nil || (path != "/api/v1/auth/login" && path != "/api/v1/auth/logout") {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errBehaviorHTTP
+	}
+	var limit int64
+	switch path {
+	case "/api/v1/auth/login":
+		if status != http.StatusOK || access != "" {
+			return nil, errBehaviorHTTP
+		}
+		limit = 64 << 10
+	case "/api/v1/auth/logout":
+		if status != http.StatusNoContent || access == "" {
+			return nil, errBehaviorHTTP
+		}
+		limit = 0
+	case "/api/v1/auth/refresh":
+		if status != http.StatusUnauthorized || access != "" {
+			return nil, errBehaviorHTTP
+		}
+		limit = 8192
+	default:
 		return nil, errBehaviorHTTP
 	}
 	body := newBehaviorRequestBody(payload)
@@ -220,21 +245,18 @@ func (t *behaviorHTTPTransport) post(ctx context.Context, path string, payload [
 			err = errBehaviorHTTP
 		}
 	}()
-	if r.StatusCode != status || r.ContentLength > 64<<10 || (r.Header.Get("Content-Encoding") != "" && r.Header.Get("Content-Encoding") != "identity") {
+	if r.StatusCode != status || r.ContentLength > limit || (r.Header.Get("Content-Encoding") != "" && r.Header.Get("Content-Encoding") != "identity") {
 		return nil, errBehaviorHTTP
 	}
-	if status == http.StatusOK {
+	if status == http.StatusOK || status == http.StatusUnauthorized {
 		kind, _, e := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if e != nil || kind != "application/json" {
 			return nil, errBehaviorHTTP
 		}
 	}
-	limit := int64(64 << 10)
-	if status == http.StatusNoContent {
-		limit = 0
-	}
 	data, e := io.ReadAll(io.LimitReader(r.Body, limit+1))
-	if e != nil || int64(len(data)) > limit {
+	if e != nil || int64(len(data)) > limit || ctx.Err() != nil {
+		clear(data)
 		return nil, errBehaviorHTTP
 	}
 	return data, nil
@@ -447,4 +469,222 @@ func (t *behaviorHTTPTransport) resolve(ctx context.Context, refresh string, use
 		return behaviorSessionResponse{}, errBehaviorHTTP
 	}
 	return result, nil
+}
+
+func verifyBehaviorUnauthorizedError(data []byte) error {
+	outer, e := strictHTTPObject(data, []string{"error"}, nil)
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	fields, e := strictHTTPObject(outer["error"], []string{"code", "message"}, []string{"request_id", "details"})
+	if e != nil {
+		return errBehaviorHTTP
+	}
+	var code, message string
+	if json.Unmarshal(fields["code"], &code) != nil || code != "unauthorized" || json.Unmarshal(fields["message"], &message) != nil || len(message) == 0 {
+		return errBehaviorHTTP
+	}
+	if raw, ok := fields["request_id"]; ok {
+		var id string
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &id) != nil {
+			return errBehaviorHTTP
+		}
+	}
+	if raw, ok := fields["details"]; ok {
+		var details map[string]json.RawMessage
+		if json.Unmarshal(raw, &details) != nil || details == nil {
+			return errBehaviorHTTP
+		}
+	}
+	return nil
+}
+
+type oldRefreshSessionSnapshot struct {
+	total, revoked, activeForUser int64
+	targetFound, targetRevoked    bool
+	targetExpires                 time.Time
+	digest                        string
+}
+
+func (t *behaviorHTTPTransport) observeOldRefresh(ctx context.Context, user uuid.UUID, refresh string) (oldRefreshSessionSnapshot, error) {
+	if t.oldRefreshObserver != nil {
+		return t.oldRefreshObserver(ctx, user, refresh)
+	}
+	return t.observeOldRefreshSessions(ctx, user, refresh)
+}
+
+func (t *behaviorHTTPTransport) observeOldRefreshSessions(ctx context.Context, user uuid.UUID, refresh string) (result oldRefreshSessionSnapshot, err error) {
+	if ctx == nil || user == uuid.Nil || !validSHA(refresh) {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cfg, e := ParseTarget(t.databaseURL)
+	if e != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	c, e := pgx.ConnectConfig(ctx, cfg)
+	if e != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		if c.Close(cleanup) != nil {
+			result = oldRefreshSessionSnapshot{}
+			err = errBehaviorHTTP
+		}
+	}()
+	tx, e := c.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if e != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), time.Second)
+		defer stop()
+		_ = tx.Rollback(cleanup)
+	}()
+	if accountObservationPolicy(ctx, tx, t.source, t.target, cfg, false) != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	var disabled bool
+	if tx.QueryRow(ctx, `SELECT is_disabled FROM public.users WHERE id=$1`, user).Scan(&disabled) != nil || disabled {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	tokenHash := sha256.New()
+	_, _ = io.WriteString(tokenHash, refresh)
+	var owner uuid.UUID
+	var revokedAt *time.Time
+	var expires time.Time
+	e = tx.QueryRow(ctx, `SELECT user_id,revoked_at,expires_at FROM public.auth_sessions WHERE refresh_token_hash=$1`, hex.EncodeToString(tokenHash.Sum(nil))).Scan(&owner, &revokedAt, &expires)
+	if e != nil || owner != user || revokedAt == nil || !expires.After(t.clock()) {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	rows, e := tx.Query(ctx, `SELECT id,user_id,revoked_at FROM public.auth_sessions ORDER BY id`)
+	if e != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	defer rows.Close()
+	snap := oldRefreshSessionSnapshot{targetFound: true, targetRevoked: true, targetExpires: expires}
+	tableHash := sha256.New()
+	var buf [8]byte
+	for rows.Next() {
+		var sid, uid uuid.UUID
+		var rev *time.Time
+		if rows.Scan(&sid, &uid, &rev) != nil {
+			return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+		}
+		snap.total++
+		if rev != nil {
+			snap.revoked++
+			tableHash.Write(sid[:])
+			tableHash.Write(uid[:])
+			tableHash.Write([]byte{1})
+			binary.BigEndian.PutUint64(buf[:], uint64(rev.UTC().UnixNano()))
+			tableHash.Write(buf[:])
+		} else {
+			if uid == user {
+				snap.activeForUser++
+			}
+			tableHash.Write(sid[:])
+			tableHash.Write(uid[:])
+			tableHash.Write([]byte{0})
+		}
+	}
+	if rows.Err() != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	rows.Close()
+	if ctx.Err() != nil || tx.Commit(ctx) != nil {
+		return oldRefreshSessionSnapshot{}, errBehaviorHTTP
+	}
+	snap.digest = hex.EncodeToString(tableHash.Sum(nil))
+	return snap, nil
+}
+
+// Explicit internal observation only. Never probe while an active or
+// unconfirmed login session exists for any whitelisted user.
+func (t *behaviorHTTPTransport) rejectOldRefresh(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, refresh string) error {
+	if t == nil || ctx == nil || ctx.Err() != nil || proof == nil || proof.guard == nil || user == uuid.Nil || !validSHA(refresh) {
+		return errBehaviorHTTP
+	}
+	proof.guard.mu.Lock()
+	guardOpen := proof.guard.locations != nil
+	guardPlan := proof.guard.plan
+	var controlFiles storage.ConditionalFiles
+	if guardOpen && proof.guard.locations.files[3] != nil {
+		controlFiles = proof.guard.locations.files[3]
+	}
+	proof.guard.mu.Unlock()
+	if !guardOpen || guardPlan.Digest != proof.plan || guardPlan.TargetID != t.binding.TargetID {
+		return errBehaviorHTTP
+	}
+	if controlFiles != nil {
+		snap, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
+		if e != nil || snap.tokens != proof.records {
+			return errBehaviorHTTP
+		}
+	}
+	if e := t.rejectOldRefreshLocked(ctx, proof, user, refresh); e != nil {
+		return e
+	}
+	if controlFiles != nil {
+		after, e := stableHandoverSnapshot(ctx, controlFiles, guardPlan.OperationID)
+		if e != nil || after.tokens != proof.records {
+			return errBehaviorHTTP
+		}
+	}
+	return nil
+}
+
+func (t *behaviorHTTPTransport) rejectOldRefreshLocked(ctx context.Context, proof *verifiedBehaviorAccounts, user uuid.UUID, refresh string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.clock()
+	if t.secrets == nil || t.secrets.closed || t.secrets.oldRefreshTried[user] || !databasePinsSeparate(t.source, t.target) || proof.database != t.binding.Database || proof.runtime != t.binding.Runtime || !validStamp(now) || now.Before(proof.checked) || now.Sub(proof.checked) > 20*time.Second || !now.Before(proof.expires) || len(proof.users) == 0 || len(proof.users) != len(t.users) {
+		return errBehaviorHTTP
+	}
+	seenUsers := make(map[uuid.UUID]bool, len(proof.users))
+	for _, u := range proof.users {
+		if u == uuid.Nil || seenUsers[u] || !t.users[u] {
+			return errBehaviorHTTP
+		}
+		seenUsers[u] = true
+	}
+	if !seenUsers[user] || len(t.secrets.known) != 0 {
+		return errBehaviorHTTP
+	}
+	if len(t.secrets.loginTried) != 0 {
+		completedUsers := make(map[uuid.UUID]bool, len(t.secrets.completed))
+		for _, s := range t.secrets.completed {
+			completedUsers[s.UserID] = true
+		}
+		for uid, tried := range t.secrets.loginTried {
+			if tried && !completedUsers[uid] {
+				return errBehaviorHTTP
+			}
+		}
+	}
+	if t.secrets.oldRefreshTried == nil {
+		t.secrets.oldRefreshTried = map[uuid.UUID]bool{}
+	}
+	t.secrets.oldRefreshTried[user] = true
+	before, e := t.observeOldRefresh(ctx, user, refresh)
+	if e != nil || !before.targetFound || !before.targetRevoked || !before.targetExpires.After(t.clock()) || before.activeForUser != 0 || before.revoked != before.total || !validSHA(before.digest) {
+		return errBehaviorHTTP
+	}
+	body, _ := json.Marshal(struct {
+		Refresh string `json:"refresh_token"`
+	}{refresh})
+	defer clear(body)
+	data, e := t.post(ctx, "/api/v1/auth/refresh", body, "", http.StatusUnauthorized)
+	defer clear(data)
+	if e != nil || verifyBehaviorUnauthorizedError(data) != nil || ctx.Err() != nil {
+		return errBehaviorHTTP
+	}
+	after, e := t.observeOldRefresh(ctx, user, refresh)
+	if e != nil || !after.targetFound || !after.targetRevoked || !after.targetExpires.After(t.clock()) || after.activeForUser != 0 || after.revoked != after.total || after.total != before.total || after.revoked != before.revoked || after.digest != before.digest || ctx.Err() != nil {
+		return errBehaviorHTTP
+	}
+	return nil
 }

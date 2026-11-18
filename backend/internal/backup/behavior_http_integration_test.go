@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -49,10 +50,15 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 		t.Fatal(e)
 	}
 	defer prepared.Close()
-	pool := newIsolatedTargetPool(t, ctx, raw)
-	defer pool.Close()
-	handler := api.NewServer(api.Deps{Auth: service.NewAuthService(pool, inputs.TargetJWT, time.Minute, time.Hour), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
-	var loginRequests, logoutRequests, oldAccessRequests, trapRequests, unsafe atomic.Int32
+	prePool := newIsolatedTargetPool(t, ctx, raw)
+	defer prePool.Close()
+	postPool := newIsolatedTargetPool(t, ctx, raw)
+	defer postPool.Close()
+	preHandler := api.NewServer(api.Deps{Auth: service.NewAuthService(prePool, inputs.TargetJWT, time.Minute, time.Hour), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
+	postHandler := api.NewServer(api.Deps{Auth: service.NewAuthService(postPool, inputs.TargetJWT, time.Minute, time.Hour), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler()
+	var activeHandler atomic.Pointer[http.Handler]
+	activeHandler.Store(&preHandler)
+	var loginRequests, logoutRequests, oldAccessRequests, oldRefreshRequests, trapRequests, unsafe atomic.Int32
 	trap := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { trapRequests.Add(1); w.WriteHeader(500) }))
 	defer trap.Close()
 	t.Setenv("HTTP_PROXY", trap.URL)
@@ -73,7 +79,7 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 			}
 			if mode == "lost" {
 				record := httptest.NewRecorder()
-				handler.ServeHTTP(record, r)
+				(*activeHandler.Load()).ServeHTTP(record, r)
 				if record.Code != 200 {
 					unsafe.Add(1)
 				}
@@ -92,10 +98,15 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 			if r.Method != http.MethodGet || r.ContentLength != 0 {
 				unsafe.Add(1)
 			}
+		} else if r.URL.Path == "/api/v1/auth/refresh" && mode == "good" {
+			oldRefreshRequests.Add(1)
+			if r.Method != http.MethodPost || r.Header.Get("Authorization") != "" {
+				unsafe.Add(1)
+			}
 		} else {
 			unsafe.Add(1)
 		}
-		handler.ServeHTTP(w, r)
+		(*activeHandler.Load()).ServeHTTP(w, r)
 	}))
 	server.Config.ErrorLog = log.New(io.Discard, "", 0)
 	server.StartTLS()
@@ -111,13 +122,26 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	defer transport.Close()
 	var result behaviorDispatchObservation
 	t.Run("https_dispatch", func(t *testing.T) {
+		var proof *verifiedBehaviorAccounts
 		if mode == "good" {
 			for i, credential := range prepared.accounts {
 				if transport.rejectOldAccess(ctx, users[i], f.old[i].User.TokenVersion+1, credential.OldAccess, inputs.SourceJWT) != nil {
 					t.Fatal("valid source access token rejection unconfirmed")
 				}
 			}
+			proof, e = g.verifyBehaviorAccounts(ctx, prepared, inputs, clock)
+			if e != nil {
+				t.Fatal("pre-login verified account proof failed", e)
+			}
+			if transport.rejectOldRefresh(ctx, proof, users[0], prepared.accounts[0].OldRefresh) != nil {
+				t.Fatal("pre-login old refresh token rejection unconfirmed")
+			}
+			if transport.rejectOldRefresh(ctx, proof, users[0], prepared.accounts[0].OldRefresh) != errBehaviorHTTP || oldRefreshRequests.Load() != 1 {
+				t.Fatal("old refresh probe replayed before login")
+			}
 		}
+		activeHandler.Store(&postHandler)
+		prePool.Close()
 		result, e = g.dispatchBehaviorOnce(ctx, prepared, inputs, transport, clock)
 		wantHTTPStage := "login_transport"
 		if mode == "good" {
@@ -129,6 +153,16 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 		if mode == "good" {
 			if e != nil || !result.ResponsesObserved || len(result.Sessions) != 2 {
 				t.Fatal("HTTPS dispatch failed", e)
+			}
+			beforeRows := snapshotAuthSessions(t, ctx, postPool)
+			if transport.rejectOldRefresh(ctx, proof, users[1], prepared.accounts[1].OldRefresh) != nil {
+				t.Fatal("post-logout old refresh token rejection unconfirmed")
+			}
+			if transport.rejectOldRefresh(ctx, proof, users[1], prepared.accounts[1].OldRefresh) != errBehaviorHTTP || transport.rejectOldRefresh(ctx, proof, users[0], prepared.accounts[0].OldRefresh) != errBehaviorHTTP || oldRefreshRequests.Load() != 2 {
+				t.Fatal("old refresh probe replayed after logout")
+			}
+			if snapshotAuthSessions(t, ctx, postPool) != beforeRows {
+				t.Fatal("auth_sessions mutated by old refresh probe")
 			}
 		} else if e != errBehaviorDispatch || result.ResponsesObserved {
 			t.Fatal("unsafe HTTPS response accepted")
@@ -157,12 +191,12 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	}
 	t.Run("https_session_bounds", func(t *testing.T) {
 		var count, actualActive, foreign int
-		if pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE revoked_at IS NULL),count(*) FILTER(WHERE user_id<>$1 AND user_id<>$2) FROM public.auth_sessions`, users[0], users[1]).Scan(&count, &actualActive, &foreign) != nil || count != 2+newSessions || actualActive != active || foreign != 0 {
+		if postPool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE revoked_at IS NULL),count(*) FILTER(WHERE user_id<>$1 AND user_id<>$2) FROM public.auth_sessions`, users[0], users[1]).Scan(&count, &actualActive, &foreign) != nil || count != 2+newSessions || actualActive != active || foreign != 0 {
 			t.Fatal("unexpected HTTPS session delta")
 		}
 		for _, s := range result.Sessions {
 			var revoked bool
-			if pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM public.auth_sessions WHERE id=$1 AND user_id=$2`, s.SessionID, s.UserID).Scan(&revoked) != nil || !revoked {
+			if postPool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM public.auth_sessions WHERE id=$1 AND user_id=$2`, s.SessionID, s.UserID).Scan(&revoked) != nil || !revoked {
 				t.Fatal("known HTTPS session not revoked")
 			}
 		}
@@ -172,8 +206,8 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 		if mode == "good" {
 			wantOld = 2
 		}
-		if oldAccessRequests.Load() != wantOld {
-			t.Fatal("unexpected old access request count")
+		if oldAccessRequests.Load() != wantOld || oldRefreshRequests.Load() != wantOld {
+			t.Fatal("unexpected old token request count")
 		}
 		if int(loginRequests.Load()) != wantLogin || int(logoutRequests.Load()) != wantLogout || trapRequests.Load() != 0 || unsafe.Load() != 0 {
 			t.Fatal("redirect/proxy/retry or credential boundary violated")
@@ -186,7 +220,7 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	if os.Getenv("BACKUP_BEHAVIOR_REVIEW") == "1" {
 		if mode == "good" {
 			server.Close()
-			pool.Close()
+			postPool.Close()
 			transport.Close()
 		}
 		assertBoundBehaviorReview(t, g, inputs, clock, mode)
@@ -195,12 +229,35 @@ func assertBehaviorHTTPDispatch(t *testing.T, g *restoreGuard, stage *stagedObje
 	// fixture operator cleans the intentionally lost response after assertions.
 	if mode == "lost" {
 		var id uuid.UUID
-		if pool.QueryRow(ctx, `SELECT id FROM public.auth_sessions WHERE user_id=$1 AND revoked_at IS NULL`, users[0]).Scan(&id) != nil {
+		if postPool.QueryRow(ctx, `SELECT id FROM public.auth_sessions WHERE user_id=$1 AND revoked_at IS NULL`, users[0]).Scan(&id) != nil {
 			t.Fatal("lost fixture session")
 		}
-		if _, e := pool.Exec(ctx, `UPDATE public.auth_sessions SET revoked_at=now() WHERE id=$1`, id); e != nil {
+		if _, e := postPool.Exec(ctx, `UPDATE public.auth_sessions SET revoked_at=now() WHERE id=$1`, id); e != nil {
 			t.Fatal(e)
 		}
 	}
-	t.Logf(`BEHAVIOR_HTTP_EVIDENCE {"scope":"isolated-https-dispatch","mode":%q,"login_requests":%d,"logout_requests":%d,"new_sessions":%d,"active_after_dispatch":%d,"old_access_requests":%d,"redirect_or_proxy_requests":0,"deployment_authorized":false}`, mode, wantLogin, wantLogout, newSessions, active, oldAccessRequests.Load())
+	t.Logf(`BEHAVIOR_HTTP_EVIDENCE {"scope":"isolated-https-dispatch","mode":%q,"login_requests":%d,"logout_requests":%d,"new_sessions":%d,"active_after_dispatch":%d,"old_access_requests":%d,"old_refresh_requests":%d,"redirect_or_proxy_requests":0,"deployment_authorized":false}`, mode, wantLogin, wantLogout, newSessions, active, oldAccessRequests.Load(), oldRefreshRequests.Load())
+}
+
+func snapshotAuthSessions(t *testing.T, ctx context.Context, queryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}) string {
+	t.Helper()
+	rows, e := queryer.Query(ctx, `SELECT id::text,user_id::text,COALESCE(to_char(revoked_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),'<null>') FROM public.auth_sessions ORDER BY id`)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer rows.Close()
+	var lines []string
+	for rows.Next() {
+		var id, uid, rev string
+		if e := rows.Scan(&id, &uid, &rev); e != nil {
+			t.Fatal(e)
+		}
+		lines = append(lines, id+"|"+uid+"|"+rev)
+	}
+	if e := rows.Err(); e != nil {
+		t.Fatal(e)
+	}
+	return strings.Join(lines, "\n")
 }

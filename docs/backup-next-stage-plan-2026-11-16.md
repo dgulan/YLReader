@@ -68,4 +68,6 @@
 
 2026-11-17 外部审计整改：[逐条复核](gemini-audit-recheck-2026-11-17.md)与[验收记录](gemini-audit-remediation-verification-2026-11-17.md)已形成。修复孤儿本地章节反向门禁、发布前置锁存和identity路径等价问题；联合恢复链新增orphan回滚，最终127个通过事件。一次复跑的既有StageRecorded计划门禁和意向诊断间歇失败尚未归因，失败记录已保留，需在发布前定位；不能仅凭最终通过收口。后续恢复推进优先补安全脱敏的阶段诊断/稳定性复核，再推进旧refresh授权、同次证据绑定及阅读行为。
 
+2026-11-18 恢复稳定性与阶段诊断进展：已完成 [间歇失败诊断与连接排他同步设计](backup-restore-stability-design-2026-11-18.md) 及 [验收记录](backup-restore-stability-verification-2026-11-18.md)。在不改变哨兵错误语义、不放宽排他检查与超时的前提下，补齐 `ErrPlan`、`ErrTargetDenied` 与 `verifyBehaviorAccounts` / `DispatchBehavior` 的脱敏阶段码；实证定位出 `fb8da7261774` 的两项叠加根因（`PgConn.Close` 发送 `Terminate` 后未等待服务端 `EOF` 的异步退出竞争，以及 PostgreSQL 内置 `autovacuum worker` 在非特权角色 `reader` 下 `usesysid IS NULL` 且 `backend_type` 被掩码为 `NULL` 导致的排他误判）。修复后连续两轮完整合成数据隔离恢复运行（`1782f1b705b0`、`65f779da01af`）均 127 个通过事件、0 失败，历史与诊断失败证据全部保留。下一步推进旧 refresh 核验设计、同次通用证据绑定及只读阅读行为回路。
+
 该计划可与待人工执行的iPhone验收准备并行设计，但不代表第3阶段已完成，不授权提交、推送、生产迁移、部署、服务切换或数据清理。
