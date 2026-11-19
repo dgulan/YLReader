@@ -3,7 +3,9 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -15,6 +17,18 @@ import (
 
 	"yreader/backend/internal/repository"
 )
+
+const (
+	epubMaxEntryBytes = 8 << 20   // 单条目解压上限 8 MiB
+	epubMaxTotalBytes = 128 << 20 // 整本解压累计上限 128 MiB
+	epubMaxTOCEntries = 5000      // 最大目录条目数
+)
+
+var errEPUBEntryNotFound = errors.New("epub entry not found")
+
+type epubReadBudget struct {
+	remaining int64
+}
 
 // ---- EPUB 元数据容器 ----
 
@@ -69,8 +83,11 @@ type tocEntry struct {
 	HasChild bool
 }
 
-// readZipByName 读取 zip 内条目（容忍大小写与 %20 转义差异）。
-func readZipByName(zr *zip.Reader, name string) ([]byte, error) {
+// readZipByName 读取 zip 内条目（容忍大小写与 %20 转义差异），受单条目和整本解压上限保护。
+func readZipByName(ctx context.Context, zr *zip.Reader, name string, budget *epubReadBudget) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	candidates := []string{name, strings.ToLower(name)}
 	if unesc, err := url.PathUnescape(name); err == nil {
 		candidates = append(candidates, unesc, strings.ToLower(unesc))
@@ -78,16 +95,44 @@ func readZipByName(zr *zip.Reader, name string) ([]byte, error) {
 	for _, c := range candidates {
 		for _, f := range zr.File {
 			if strings.EqualFold(f.Name, c) {
-				rc, err := f.Open()
-				if err != nil {
-					return nil, err
-				}
-				defer rc.Close()
-				return io.ReadAll(rc)
+				return readZipFileBounded(ctx, f, budget)
 			}
 		}
 	}
-	return nil, fmt.Errorf("epub: entry %q not found", name)
+	return nil, fmt.Errorf("%w: %q", errEPUBEntryNotFound, name)
+}
+
+func readZipFileBounded(ctx context.Context, f *zip.File, budget *epubReadBudget) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	limit := int64(epubMaxEntryBytes)
+	if budget != nil && budget.remaining < limit {
+		limit = budget.remaining
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > int64(epubMaxEntryBytes) {
+		return nil, fmt.Errorf("%w: epub entry %q exceeds %d bytes limit", repository.ErrInvalidArgument, f.Name, epubMaxEntryBytes)
+	}
+	if budget != nil {
+		if int64(len(data)) > budget.remaining {
+			return nil, fmt.Errorf("%w: epub total uncompressed size exceeds %d bytes limit", repository.ErrInvalidArgument, epubMaxTotalBytes)
+		}
+		budget.remaining -= int64(len(data))
+	}
+	return data, nil
 }
 
 // resolveHref 把 OPF/NCX 内相对路径解析为 zip 内绝对路径。
@@ -122,10 +167,13 @@ type epubEncryption struct {
 
 // checkEPUBDRM 依据 META-INF/encryption.xml 判定内容是否受 DRM 保护：
 // 正文/章节资源被加密即为 DRM；仅字体混淆（.ttf/.otf/.woff）属于合法用途，放行。
-func checkEPUBDRM(zr *zip.Reader) error {
-	raw, err := readZipByName(zr, "META-INF/encryption.xml")
+func checkEPUBDRM(ctx context.Context, zr *zip.Reader, budget *epubReadBudget) error {
+	raw, err := readZipByName(ctx, zr, "META-INF/encryption.xml", budget)
 	if err != nil {
-		return nil // 没有加密清单即未加密
+		if errors.Is(err, errEPUBEntryNotFound) {
+			return nil // 没有加密清单即未加密
+		}
+		return err
 	}
 	lower := strings.ToLower(string(raw))
 	for _, algo := range []string{"adept", "lcp", "marvin"} {
@@ -185,22 +233,34 @@ func walkEPUBText(n *html.Node, b *strings.Builder) {
 }
 
 // flattenNCX 先序打平 NCX 目录。
-func flattenNCX(points []ncxPoint, out *[]tocEntry) {
+func flattenNCX(ctx context.Context, points []ncxPoint, out *[]tocEntry) error {
 	for _, p := range points {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(*out) >= epubMaxTOCEntries {
+			return fmt.Errorf("%w: epub toc entries exceed %d limit", repository.ErrInvalidArgument, epubMaxTOCEntries)
+		}
 		*out = append(*out, tocEntry{
 			Title:    strings.TrimSpace(p.Label),
 			Href:     p.Src,
 			HasChild: len(p.Points) > 0,
 		})
-		flattenNCX(p.Points, out)
+		if err := flattenNCX(ctx, p.Points, out); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // parseEPUBNav 解析 EPUB3 nav 文档中的目录列表。
-func parseEPUBNav(data []byte) []tocEntry {
+func parseEPUBNav(ctx context.Context, data []byte) ([]tocEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	doc, err := html.Parse(bytes.NewReader(data))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	var entries []tocEntry
 	var findNav func(n *html.Node) *html.Node
@@ -221,10 +281,13 @@ func parseEPUBNav(data []byte) []tocEntry {
 	}
 	nav := findNav(doc)
 	if nav == nil {
-		return nil
+		return nil, nil
 	}
-	var walk func(n *html.Node)
-	walk = func(n *html.Node) {
+	var walk func(n *html.Node) error
+	walk = func(n *html.Node) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if n.Type == html.ElementNode && n.Data == "a" {
 			title := strings.TrimSpace(textOfNode(n))
 			href := ""
@@ -234,16 +297,24 @@ func parseEPUBNav(data []byte) []tocEntry {
 				}
 			}
 			if title != "" {
+				if len(entries) >= epubMaxTOCEntries {
+					return fmt.Errorf("%w: epub toc entries exceed %d limit", repository.ErrInvalidArgument, epubMaxTOCEntries)
+				}
 				entries = append(entries, tocEntry{Title: title, Href: href})
 			}
-			return
+			return nil
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
+			if err := walk(c); err != nil {
+				return err
+			}
 		}
+		return nil
 	}
-	walk(nav)
-	return entries
+	if err := walk(nav); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func textOfNode(n *html.Node) string {
@@ -262,16 +333,20 @@ func textOfNode(n *html.Node) string {
 }
 
 // parseEPUB 解析 EPUB：元数据、封面、目录与正文。
-func (s *ImportService) parseEPUB(file *os.File, size int64, fallbackTitle string) (*parsedBook, []string, error) {
+func (s *ImportService) parseEPUB(ctx context.Context, file *os.File, size int64, fallbackTitle string) (*parsedBook, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	zr, err := zip.NewReader(file, size)
 	if err != nil {
 		return nil, nil, fmt.Errorf("epub: open zip: %w", err)
 	}
-	if err := checkEPUBDRM(zr); err != nil {
+	budget := &epubReadBudget{remaining: epubMaxTotalBytes}
+	if err := checkEPUBDRM(ctx, zr, budget); err != nil {
 		return nil, nil, err
 	}
 
-	containerRaw, err := readZipByName(zr, "META-INF/container.xml")
+	containerRaw, err := readZipByName(ctx, zr, "META-INF/container.xml", budget)
 	if err != nil {
 		return nil, nil, fmt.Errorf("epub: %w", err)
 	}
@@ -282,7 +357,7 @@ func (s *ImportService) parseEPUB(file *os.File, size int64, fallbackTitle strin
 	opfPath := path.Clean(ctr.Rootfiles[0].FullPath)
 	opfDir := path.Dir(opfPath)
 
-	opfRaw, err := readZipByName(zr, opfPath)
+	opfRaw, err := readZipByName(ctx, zr, opfPath, budget)
 	if err != nil {
 		return nil, nil, fmt.Errorf("epub: %w", err)
 	}
@@ -313,15 +388,26 @@ func (s *ImportService) parseEPUB(file *os.File, size int64, fallbackTitle strin
 		}
 	}
 	for _, it := range pkg.Manifest.Items {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if coverID != "" && it.ID == coverID {
-			if data, err := readZipByName(zr, resolveHref(opfDir, it.Href)); err == nil {
+			data, cerr := readZipByName(ctx, zr, resolveHref(opfDir, it.Href), budget)
+			if cerr != nil && !errors.Is(cerr, errEPUBEntryNotFound) {
+				return nil, nil, cerr
+			}
+			if cerr == nil {
 				pb.Cover = data
 				pb.CoverExt = strings.TrimPrefix(path.Ext(it.Href), ".")
 			}
 			break
 		}
 		if pb.Cover == nil && strings.Contains(it.Properties, "cover-image") {
-			if data, err := readZipByName(zr, resolveHref(opfDir, it.Href)); err == nil {
+			data, cerr := readZipByName(ctx, zr, resolveHref(opfDir, it.Href), budget)
+			if cerr != nil && !errors.Is(cerr, errEPUBEntryNotFound) {
+				return nil, nil, cerr
+			}
+			if cerr == nil {
 				pb.Cover = data
 				pb.CoverExt = strings.TrimPrefix(path.Ext(it.Href), ".")
 			}
@@ -331,19 +417,36 @@ func (s *ImportService) parseEPUB(file *os.File, size int64, fallbackTitle strin
 	// 目录：EPUB3 nav 优先，回退 EPUB2 NCX。
 	var toc []tocEntry
 	for _, it := range pkg.Manifest.Items {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if strings.Contains(it.Properties, "nav") {
-			if data, err := readZipByName(zr, resolveHref(opfDir, it.Href)); err == nil {
-				toc = parseEPUBNav(data)
+			data, nerr := readZipByName(ctx, zr, resolveHref(opfDir, it.Href), budget)
+			if nerr != nil && !errors.Is(nerr, errEPUBEntryNotFound) {
+				return nil, nil, nerr
+			}
+			if nerr == nil {
+				parsedTOC, terr := parseEPUBNav(ctx, data)
+				if terr != nil {
+					return nil, nil, terr
+				}
+				toc = parsedTOC
 			}
 			break
 		}
 	}
 	if len(toc) == 0 {
 		if ncxItem, ok := manifest["ncx"]; ok {
-			if data, err := readZipByName(zr, resolveHref(opfDir, ncxItem.Href)); err == nil {
+			data, nerr := readZipByName(ctx, zr, resolveHref(opfDir, ncxItem.Href), budget)
+			if nerr != nil && !errors.Is(nerr, errEPUBEntryNotFound) {
+				return nil, nil, nerr
+			}
+			if nerr == nil {
 				var ncx epubNCX
 				if xml.Unmarshal(data, &ncx) == nil {
-					flattenNCX(ncx.NavMap.Points, &toc)
+					if ferr := flattenNCX(ctx, ncx.NavMap.Points, &toc); ferr != nil {
+						return nil, nil, ferr
+					}
 				}
 			}
 		}
@@ -356,25 +459,47 @@ func (s *ImportService) parseEPUB(file *os.File, size int64, fallbackTitle strin
 			spineOrder = append(spineOrder, resolveHref(opfDir, it.Href))
 		}
 	}
-	readSpineText := func(target string) (string, bool) {
-		data, err := readZipByName(zr, target)
-		if err != nil {
-			return "", false
+
+	type cachedSpineText struct {
+		text string
+		ok   bool
+	}
+	spineCache := make(map[string]cachedSpineText, len(spineOrder))
+	readSpineText := func(target string) (string, bool, error) {
+		if cached, hit := spineCache[target]; hit {
+			return cached.text, cached.ok, nil
 		}
-		text, err := extractEPUBText(data)
-		if err != nil {
-			return "", false
+		data, rerr := readZipByName(ctx, zr, target, budget)
+		if rerr != nil {
+			if errors.Is(rerr, errEPUBEntryNotFound) {
+				spineCache[target] = cachedSpineText{}
+				return "", false, nil
+			}
+			return "", false, rerr
 		}
-		return text, true
+		text, perr := extractEPUBText(data)
+		if perr != nil {
+			spineCache[target] = cachedSpineText{}
+			return "", false, nil
+		}
+		spineCache[target] = cachedSpineText{text: text, ok: true}
+		return text, true, nil
 	}
 
 	var chapters []parsedChapter
 	used := make(map[string]bool)
 	for _, entry := range toc {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		target := resolveHref(opfDir, entry.Href)
 		text, ok := "", false
 		if target != "" {
-			text, ok = readSpineText(target)
+			var rerr error
+			text, ok, rerr = readSpineText(target)
+			if rerr != nil {
+				return nil, nil, rerr
+			}
 		}
 		if !ok {
 			// 纯父级节点 → 卷名行；
@@ -389,12 +514,21 @@ func (s *ImportService) parseEPUB(file *os.File, size int64, fallbackTitle strin
 
 	// 目录未覆盖的 spine 文档追加为章节（以文档首个标题或序号命名）。
 	for _, target := range spineOrder {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if used[target] {
 			continue
 		}
-		text, ok := readSpineText(target)
+		text, ok, rerr := readSpineText(target)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
 		if !ok || strings.TrimSpace(text) == "" {
 			continue
+		}
+		if len(chapters) >= epubMaxTOCEntries {
+			return nil, nil, fmt.Errorf("%w: epub chapter count exceeds %d limit", repository.ErrInvalidArgument, epubMaxTOCEntries)
 		}
 		chapters = append(chapters, parsedChapter{
 			Title:   fmt.Sprintf("第 %d 节", len(chapters)+1),

@@ -170,7 +170,7 @@ try:
               '--pids-limit', '64', '--tmpfs', '/data:rw', redis_image, 'redis-server', '--save', '', '--appendonly', 'no')
     password = secrets.token_urlsafe(24)
     environment = {'DATABASE_URL': 'postgres://postgres:@pg:5432/yreader_test?sslmode=disable', 'REDIS_URL': 'redis://redis:6379/0',
-                   'ENVIRONMENT': 'production', 'PORT': '8080', 'JWT_SECRET': secrets.token_hex(32),
+                   'ENVIRONMENT': 'development', 'PORT': '8080', 'JWT_SECRET': secrets.token_hex(32),
                    'YREADER_HEADER_KEY_KID': 'primary', 'YREADER_HEADER_KEY_primary': base64.b64encode(secrets.token_bytes(32)).decode(),
                    'SEED_USERNAME': 'stage3-original', 'SEED_PASSWORD': password, 'STORAGE_DIR': '/storage', 'YREADER_SANDBOX_SOCKETS': ''}
     container(app, '--network', network, '--network-alias', 'app', '--read-only', '--user', '10001:10001',

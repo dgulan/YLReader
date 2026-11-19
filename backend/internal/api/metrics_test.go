@@ -5,17 +5,32 @@ package api_test
 import (
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"yreader/backend/internal/api"
 )
 
-// TestMetricsEndpointExposed 验证 /metrics 免鉴权可访问，且 §8.2 指标已预置零值 series。
+// TestMetricsEndpointExposed 验证公开路由不暴露 /metrics，内部 OpsHandler 暴露 /metrics 与预置零值 series。
 func TestMetricsEndpointExposed(t *testing.T) {
 	ts, _ := newTestServer(t, nil)
 
-	resp, err := http.Get(ts.URL + "/metrics")
+	pubResp, err := http.Get(ts.URL + "/metrics")
 	if err != nil {
-		t.Fatalf("GET /metrics: %v", err)
+		t.Fatalf("GET public /metrics: %v", err)
+	}
+	pubResp.Body.Close()
+	if pubResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("public /metrics status = %d, want 404", pubResp.StatusCode)
+	}
+
+	opsSrv := httptest.NewServer(api.NewServer(api.Deps{}).OpsHandler())
+	defer opsSrv.Close()
+
+	resp, err := http.Get(opsSrv.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET ops /metrics: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -40,29 +55,44 @@ func TestMetricsEndpointExposed(t *testing.T) {
 	}
 }
 
-// TestPprofDisabledByDefault 验证默认环境不挂载 pprof。
+// TestPprofDisabledByDefault 验证默认环境公开路由和运维路由都不挂载 pprof。
 func TestPprofDisabledByDefault(t *testing.T) {
 	ts, _ := newTestServer(t, nil)
+	opsSrv := httptest.NewServer(api.NewServer(api.Deps{}).OpsHandler())
+	defer opsSrv.Close()
 
-	resp, err := http.Get(ts.URL + "/debug/pprof/")
-	if err != nil {
-		t.Fatalf("GET /debug/pprof/: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (pprof disabled by default)", resp.StatusCode)
+	for _, u := range []string{ts.URL + "/debug/pprof/", opsSrv.URL + "/debug/pprof/"} {
+		resp, err := http.Get(u)
+		if err != nil {
+			t.Fatalf("GET %s: %v", u, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s status = %d, want 404 (pprof disabled by default)", u, resp.StatusCode)
+		}
 	}
 }
 
-// TestPprofEnabledWhenConfigured 验证 PPROF_ENABLED=true 时 pprof 已挂载。
-// 注意：必须先 t.Setenv 再构造 Server，路由在构造期读取环境变量。
+// TestPprofEnabledWhenConfigured 验证 PPROF_ENABLED=true 时仅 OpsHandler 挂载 pprof，公开路由仍返回 404。
 func TestPprofEnabledWhenConfigured(t *testing.T) {
 	t.Setenv("PPROF_ENABLED", "true")
 	ts, _ := newTestServer(t, nil)
 
-	resp, err := http.Get(ts.URL + "/debug/pprof/")
+	pubResp, err := http.Get(ts.URL + "/debug/pprof/")
 	if err != nil {
-		t.Fatalf("GET /debug/pprof/: %v", err)
+		t.Fatalf("GET public /debug/pprof/: %v", err)
+	}
+	pubResp.Body.Close()
+	if pubResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("public /debug/pprof/ status = %d, want 404", pubResp.StatusCode)
+	}
+
+	opsSrv := httptest.NewServer(api.NewServer(api.Deps{}).OpsHandler())
+	defer opsSrv.Close()
+
+	resp, err := http.Get(opsSrv.URL + "/debug/pprof/")
+	if err != nil {
+		t.Fatalf("GET ops /debug/pprof/: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

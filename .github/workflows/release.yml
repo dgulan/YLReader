@@ -154,7 +154,7 @@ jobs:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
       REDIS_ADDR: 127.0.0.1:6379
       REDIS_URL: redis://127.0.0.1:6379/0
-      ENVIRONMENT: production
+      ENVIRONMENT: development
       PORT: '8080'
       YREADER_HEADER_KEY_KID: primary
       SEED_USERNAME: reader-ci

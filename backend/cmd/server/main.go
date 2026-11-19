@@ -5,6 +5,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"io"
 	"log/slog"
@@ -50,13 +52,26 @@ func run() error {
 		log.Error("invalid sandbox configuration", "error", err)
 		return err
 	}
+	env := strings.TrimSpace(os.Getenv("ENVIRONMENT"))
 	secret := os.Getenv("JWT_SECRET")
-	if err := validateJWTSecret(secret, os.Getenv("ENVIRONMENT")); err != nil {
+	if err := validateJWTSecret(secret, env); err != nil {
 		log.Error("invalid JWT_SECRET", "error", err)
 		return err
 	}
-	if secret == "" {
-		log.Warn("JWT_SECRET not set; using insecure development fallback")
+	if len(secret) == 0 {
+		ephemeral := make([]byte, 32)
+		if _, err := rand.Read(ephemeral); err != nil {
+			log.Error("generate development JWT_SECRET", "error", err)
+			return err
+		}
+		secret = base64.RawStdEncoding.EncodeToString(ephemeral)
+		log.Warn("JWT_SECRET not set; using ephemeral development secret")
+	}
+	storageDir := strings.TrimSpace(os.Getenv("STORAGE_DIR"))
+	sockets := strings.TrimSpace(os.Getenv("YREADER_SANDBOX_SOCKETS"))
+	if err := validateRuntimeEnv(env, storageDir, sockets); err != nil {
+		log.Error("invalid runtime configuration", "error", err)
+		return err
 	}
 
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
@@ -92,8 +107,8 @@ func run() error {
 		crypto.SetDefaultKeyring(ring)
 		log.Info("book source header encryption enabled", "kid", ring.CurrentKID())
 	case errors.Is(err, crypto.ErrNoKey):
-		if os.Getenv("ENVIRONMENT") == "production" {
-			log.Error("YREADER_HEADER_KEY_<KID> is required in production")
+		if !isDevelopmentEnv(env) {
+			log.Error("YREADER_HEADER_KEY_<KID> is required unless ENVIRONMENT=development")
 			os.Exit(1)
 		}
 		log.Warn("book source header encryption disabled; set YREADER_HEADER_KEY_<KID> to enable")
@@ -139,7 +154,7 @@ func run() error {
 	ft := fetcher.New(fetcher.Config{DomainLimiter: fetcher.NewDomainLimiter(admission)})
 	sb := sandbox.New(sandboxCfg, sandboxFetcher{ft: ft})
 	var sandboxPing func(context.Context) error
-	if sockets := strings.TrimSpace(os.Getenv("YREADER_SANDBOX_SOCKETS")); sockets != "" {
+	if sockets != "" {
 		paths := strings.Split(sockets, ",")
 		for i := range paths {
 			paths[i] = strings.TrimSpace(paths[i])
@@ -160,8 +175,7 @@ func run() error {
 		log.Info("isolated sandbox workers enabled", "workers", len(paths))
 	}
 
-	// 本地书库文件存储：STORAGE_DIR 必填（Docker 里挂卷），否则本地书正文无处落盘。
-	storageDir := strings.TrimSpace(os.Getenv("STORAGE_DIR"))
+	// 本地书库文件存储：非 development 环境已在启动校验中强制非空。
 	if storageDir == "" {
 		storageDir = filepath.Join(os.TempDir(), "yreader-storage")
 		log.Warn("STORAGE_DIR not set; using temp dir", "dir", storageDir)
@@ -218,6 +232,16 @@ func run() error {
 		Log:           log,
 	})
 
+	opsAddr := strings.TrimSpace(os.Getenv("OPS_ADDR"))
+	if opsAddr == "" {
+		opsAddr = "127.0.0.1:9090"
+	}
+	opsSrv := &http.Server{
+		Addr:              opsAddr,
+		Handler:           srv.OpsHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -227,10 +251,29 @@ func run() error {
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Info("yreader backend listening", "port", port)
-	if err := serveUntilCanceled(shutdownCtx, httpSrv); err != nil {
-		log.Error("server exited", "error", err)
-		return err
+
+	srvCtx, srvCancel := context.WithCancel(shutdownCtx)
+	defer srvCancel()
+	opsErrCh := make(chan error, 1)
+	go func() {
+		err := serveUntilCanceled(srvCtx, opsSrv)
+		if err != nil {
+			srvCancel()
+		}
+		opsErrCh <- err
+	}()
+
+	log.Info("yreader backend listening", "port", port, "ops_addr", opsAddr)
+	mainErr := serveUntilCanceled(srvCtx, httpSrv)
+	srvCancel()
+	opsErr := <-opsErrCh
+	if mainErr != nil {
+		log.Error("server exited", "error", mainErr)
+		return mainErr
+	}
+	if opsErr != nil {
+		log.Error("ops server exited", "error", opsErr)
+		return opsErr
 	}
 	return nil
 }

@@ -353,7 +353,7 @@ func (s *ContentService) fetchAndClean(ctx context.Context, userID uuid.UUID, sr
 	rules := parseContentRules(src.Rules)
 	traceID := "tr_" + uuid.NewString()
 
-	srcHeader := parseSourceHeaders(src.Header)
+	srcHeader := scopeHeadersForTarget(src.BookSourceURL, startURL, parseSourceHeaders(src.Header))
 	content, err := s.fetchContentWithHeaders(ctx, rules, startURL, srcHeader)
 	if err != nil {
 		return "", "", nil, err
@@ -388,6 +388,7 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 	visited := make(map[string]bool, maxContentPages)
 	parts := make([]string, 0, maxContentPages)
 	pageURL := strings.TrimSpace(startURL)
+	prevBase := pageURL
 
 	for pages := 0; pageURL != "" && pages < maxContentPages; pages++ {
 		if visited[pageURL] {
@@ -395,7 +396,11 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		}
 		visited[pageURL] = true
 
-		resp, err := s.ft.Get(ctx, pageURL, srcHeader)
+		reqHeader := scopeHeadersForTarget(startURL, pageURL, srcHeader)
+		if pages > 0 && len(reqHeader) > 0 {
+			reqHeader = scopeHeadersForTarget(prevBase, pageURL, reqHeader)
+		}
+		resp, err := s.ft.Get(ctx, pageURL, reqHeader)
 		if err != nil {
 			return "", err
 		}
@@ -439,6 +444,7 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		if next == pageURL || visited[next] || pages+1 == maxContentPages {
 			return "", fmt.Errorf("%w: incomplete content pagination", sandbox.ErrRuleExecution)
 		}
+		prevBase = base
 		pageURL = next
 	}
 	return strings.Join(parts, "\n"), nil
@@ -463,17 +469,23 @@ func contentRulesFingerprint(source json.RawMessage, rules []*repository.Replace
 	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
+const maxReplacedContentBytes = 32 << 20
+
 func applyRuleList(rules []*repository.ReplaceRule, content string) (string, []uuid.UUID) {
 	applied := make([]uuid.UUID, 0, len(rules))
 	for _, r := range rules {
+		if len(r.Pattern) == 0 || len(r.Pattern) > maxReplacePatternBytes || len(r.Replacement) > maxReplaceReplacementBytes {
+			continue
+		}
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {
 			continue
 		}
-		if !re.MatchString(content) {
+		next, matched, capped := replaceBounded(re, content, r.Replacement, maxReplacedContentBytes)
+		if capped || !matched {
 			continue
 		}
-		content = re.ReplaceAllString(content, r.Replacement)
+		content = next
 		applied = append(applied, r.ID)
 	}
 	return content, applied
@@ -486,11 +498,45 @@ func applySourceReplaceRegex(content, rule string) string {
 	if idx := strings.Index(rule, "##"); idx >= 0 {
 		pattern, replacement = rule[:idx], rule[idx+2:]
 	}
+	if len(pattern) == 0 || len(pattern) > maxReplacePatternBytes || len(replacement) > maxReplaceReplacementBytes {
+		return content
+	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return content
 	}
-	return re.ReplaceAllString(content, replacement)
+	next, matched, capped := replaceBounded(re, content, replacement, maxReplacedContentBytes)
+	if capped || !matched {
+		return content
+	}
+	return next
+}
+
+func replaceBounded(re *regexp.Regexp, src, repl string, maxBytes int) (string, bool, bool) {
+	locs := re.FindAllStringIndex(src, -1)
+	if len(locs) == 0 {
+		return src, false, false
+	}
+	var b strings.Builder
+	b.Grow(min(len(src), maxBytes))
+	last := 0
+	for _, loc := range locs {
+		if b.Len()+(loc[0]-last) > maxBytes {
+			return src, false, true
+		}
+		b.WriteString(src[last:loc[0]])
+		expanded := re.ExpandString(nil, repl, src, loc)
+		if b.Len()+len(expanded) > maxBytes {
+			return src, false, true
+		}
+		b.Write(expanded)
+		last = loc[1]
+	}
+	if b.Len()+(len(src)-last) > maxBytes {
+		return src, false, true
+	}
+	b.WriteString(src[last:])
+	return b.String(), true, false
 }
 
 var (

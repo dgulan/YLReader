@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 
 	"yreader/backend/internal/pkg/storage"
 	"yreader/backend/internal/pkg/textnorm"
@@ -32,6 +33,9 @@ const maxImportCoverBytes = 8 << 20
 // maxNameAuthorAttempts 同名同作者冲突时的自动重命名重试上限（并发导入用）。
 // v1.3（M3c）：由 5 提升至 20，充分保证 10~15 路高并发导入同名书顺利收敛。
 const maxNameAuthorAttempts = 20
+
+// maxConcurrentBookImports 限制同时解析和落盘的本地书籍导入并发数，避免大文件导入并发 OOM。
+const maxConcurrentBookImports = 2
 
 // parsedChapter 是解析器产出的章节（未落库）。
 type parsedChapter struct {
@@ -77,6 +81,7 @@ type ImportService struct {
 	mappings    *repository.MappingRepository
 	localSource *LocalSourceService
 	storage     storage.Provider
+	importSem   *semaphore.Weighted
 	log         *slog.Logger
 }
 
@@ -89,6 +94,7 @@ func NewImportService(pool *pgxpool.Pool, st storage.Provider, log *slog.Logger)
 		mappings:    repository.NewMappingRepository(),
 		localSource: NewLocalSourceService(pool),
 		storage:     st,
+		importSem:   semaphore.NewWeighted(maxConcurrentBookImports),
 		log:         log,
 	}
 }
@@ -128,8 +134,15 @@ func (s *ImportService) ImportBook(
 		return nil, fmt.Errorf("check file hash: %w", err)
 	}
 
+	if s.importSem != nil {
+		if err := s.importSem.Acquire(ctx, 1); err != nil {
+			return nil, err
+		}
+		defer s.importSem.Release(1)
+	}
+
 	fallbackTitle := strings.TrimSpace(strings.TrimSuffix(filename, path_ext(filename)))
-	pBook, warnings, err := s.parseByType(file, size, fileType, fallbackTitle)
+	pBook, warnings, err := s.parseByType(ctx, file, size, fileType, fallbackTitle)
 	if err != nil {
 		return nil, err
 	}
@@ -471,12 +484,12 @@ func (s *ImportService) warn(msg string, args ...any) {
 	}
 }
 
-func (s *ImportService) parseByType(file *os.File, size int64, fileType, title string) (*parsedBook, []string, error) {
+func (s *ImportService) parseByType(ctx context.Context, file *os.File, size int64, fileType, title string) (*parsedBook, []string, error) {
 	switch strings.ToLower(fileType) {
 	case "epub":
-		return s.parseEPUB(file, size, title)
+		return s.parseEPUB(ctx, file, size, title)
 	case "txt":
-		return s.parseTXT(file, size, title)
+		return s.parseTXT(ctx, file, size, title)
 	default:
 		return nil, nil, fmt.Errorf("%w: unsupported file type %q", repository.ErrInvalidArgument, fileType)
 	}

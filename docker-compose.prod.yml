@@ -51,7 +51,7 @@ services:
     command:
       - -socket
       - /ipc/worker.sock
-    restart: on-failure:3
+    restart: unless-stopped
 
   sandboxworker-2:
     build:
@@ -78,7 +78,7 @@ services:
     command:
       - -socket
       - /ipc/worker.sock
-    restart: on-failure:3
+    restart: unless-stopped
 
   app:
     build: ./backend

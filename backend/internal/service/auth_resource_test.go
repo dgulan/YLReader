@@ -11,7 +11,7 @@ import (
 // Malformed tokens must be rejected before account lookup without allocating a
 // string slice for every delimiter (GO-2025-3553). No real credentials are used.
 func TestMalformedAccessTokenAllocationBound(t *testing.T) {
-	auth := NewAuthService(nil, []byte("test-key"), 0, 0)
+	auth := NewAuthService(nil, []byte("test-key-0123456789abcdef0123456"), 0, 0)
 	token := strings.Repeat(".", 128<<10)
 	for i := 0; i < 3; i++ {
 		_, _, _ = auth.Authenticate(context.Background(), token)

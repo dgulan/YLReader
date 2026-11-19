@@ -304,7 +304,7 @@ func (f *Fetcher) decode(resp *http.Response, rawURL string) (*Response, error) 
 	}, nil
 }
 
-// checkRedirect 限制跳数、校验 scheme、跨 host 剥离敏感头。
+// checkRedirect 限制跳数、校验 scheme、跨 host 或 https->http 降级剥离敏感头。
 func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= f.cfg.MaxRedirects {
 		return fmt.Errorf("%w: more than %d redirects", ErrRedirectTooMany, f.cfg.MaxRedirects)
@@ -313,13 +313,49 @@ func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("fetcher: unsupported redirect scheme %q", req.URL.Scheme)
 	}
 	if len(via) > 0 {
+		origin := via[0].URL
 		prev := via[len(via)-1].URL
-		if !strings.EqualFold(prev.Hostname(), req.URL.Hostname()) {
-			req.Header.Del("Authorization")
-			req.Header.Del("Cookie")
+		if isCrossOriginOrDowngrade(origin, req.URL) || isCrossOriginOrDowngrade(prev, req.URL) {
+			stripSensitiveRedirectHeaders(req.Header)
 		}
 	}
 	return nil
+}
+
+func isCrossOriginOrDowngrade(prev, next *url.URL) bool {
+	if prev == nil || next == nil {
+		return true
+	}
+	if !strings.EqualFold(prev.Hostname(), next.Hostname()) {
+		return true
+	}
+	return strings.EqualFold(prev.Scheme, "https") && strings.EqualFold(next.Scheme, "http")
+}
+
+func stripSensitiveRedirectHeaders(h http.Header) {
+	if h == nil {
+		return
+	}
+	h.Del("Authorization")
+	h.Del("Proxy-Authorization")
+	h.Del("Cookie")
+	h.Del("Cookie2")
+	for k := range h {
+		canonical := http.CanonicalHeaderKey(k)
+		if strings.HasPrefix(canonical, "X-") || isSensitiveHeaderName(canonical) {
+			h.Del(k)
+		}
+	}
+}
+
+func isSensitiveHeaderName(canonical string) bool {
+	lower := strings.ToLower(canonical)
+	return strings.Contains(lower, "auth") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "session") ||
+		strings.Contains(lower, "cookie") ||
+		strings.Contains(lower, "key")
 }
 
 // dialContext 解析目标全部 IP，过滤被阻断的地址，对剩余 IP 依次拨号，任一成功即返回。

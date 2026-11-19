@@ -15,7 +15,7 @@ services:
       DATABASE_URL: postgres://yreader:yreader@postgres:5432/yreader?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       STORAGE_DIR: /var/lib/yreader/storage
-      ENVIRONMENT: production
+      ENVIRONMENT: ${ENVIRONMENT:-development}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET}
       YREADER_HEADER_KEY_KID: primary
       YREADER_HEADER_KEY_primary: ${YREADER_HEADER_KEY_primary:?Set base64 encoded 32-byte header key}

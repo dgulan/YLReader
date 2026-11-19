@@ -187,7 +187,7 @@ func (s *TOCService) refresh(ctx context.Context, userID uuid.UUID, book *reposi
 	}
 
 	fetchStart := time.Now()
-	chapters, err := s.fetchTOCWithHeaders(ctx, parseTOCRules(src.Rules), bookURL, parseSourceHeaders(src.Header))
+	chapters, err := s.fetchTOCWithHeaders(ctx, parseTOCRules(src.Rules), bookURL, scopeHeadersForTarget(src.BookSourceURL, bookURL, parseSourceHeaders(src.Header)))
 	if err != nil {
 		s.health.RecordFailure(userID, src.ID, err)
 		return err
@@ -352,6 +352,7 @@ func (s *TOCService) fetchTOCWithHeaders(ctx context.Context, rules tocRules, st
 	visited := make(map[string]bool, maxTOCPages)
 
 	pageURL := strings.TrimSpace(startURL)
+	prevBase := pageURL
 	sortOrder := int32(0)
 	chapterIndex := int32(0)
 	pages := 0
@@ -366,7 +367,11 @@ func (s *TOCService) fetchTOCWithHeaders(ctx context.Context, rules tocRules, st
 		visited[tocPageKey(pageURL)] = true
 		pages++
 
-		resp, err := s.ft.Get(ctx, pageURL, srcHeader)
+		reqHeaders := scopeHeadersForTarget(startURL, pageURL, srcHeader)
+		if pages > 1 && len(reqHeaders) > 0 {
+			reqHeaders = scopeHeadersForTarget(prevBase, pageURL, reqHeaders)
+		}
+		resp, err := s.ft.Get(ctx, pageURL, reqHeaders)
 		if err != nil {
 			return nil, err
 		}
@@ -460,6 +465,7 @@ func (s *TOCService) fetchTOCWithHeaders(ctx context.Context, rules tocRules, st
 		if err := s.sleep(ctx, tocPageDelay); err != nil {
 			return nil, err
 		}
+		prevBase = base
 		pageURL = next
 	}
 

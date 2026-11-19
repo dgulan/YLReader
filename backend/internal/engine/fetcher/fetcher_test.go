@@ -288,6 +288,49 @@ func TestFetch_CrossHostStripsAuth(t *testing.T) {
 	}
 }
 
+// TestCheckRedirect_StripsSensitiveHeadersOnCrossHostAndDowngrade 不依赖本地 TCP 监听，
+// 直接验证跨 host 重定向与 https->http 降级剥离 Cookie / Authorization / Proxy-Authorization / X-*。
+func TestCheckRedirect_StripsSensitiveHeadersOnCrossHostAndDowngrade(t *testing.T) {
+	f := New(Config{MaxRedirects: 5})
+	makeReq := func(rawURL string) *http.Request {
+		req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer topsecret")
+		req.Header.Set("Proxy-Authorization", "Basic secret")
+		req.Header.Set("Cookie", "sid=abc")
+		req.Header.Set("X-Auth-Token", "tok-1")
+		req.Header.Set("User-Agent", "YLReader-Test")
+		return req
+	}
+
+	// 同源 HTTPS -> HTTPS 保留认证头。
+	sameReq := makeReq("https://book.example/next")
+	if err := f.checkRedirect(sameReq, []*http.Request{makeReq("https://book.example/start")}); err != nil {
+		t.Fatalf("same-origin checkRedirect: %v", err)
+	}
+	if sameReq.Header.Get("Cookie") != "sid=abc" || sameReq.Header.Get("X-Auth-Token") != "tok-1" {
+		t.Fatalf("same-origin headers unexpectedly stripped: %+v", sameReq.Header)
+	}
+
+	// 跨 host 与 HTTPS -> HTTP 降级均必须剥离敏感头并保留 User-Agent。
+	for _, target := range []string{"https://other.example/steal", "http://book.example/downgrade"} {
+		nextReq := makeReq(target)
+		if err := f.checkRedirect(nextReq, []*http.Request{makeReq("https://book.example/start")}); err != nil {
+			t.Fatalf("checkRedirect(%s): %v", target, err)
+		}
+		for _, stripped := range []string{"Authorization", "Proxy-Authorization", "Cookie", "X-Auth-Token"} {
+			if got := nextReq.Header.Get(stripped); got != "" {
+				t.Fatalf("target %s leaked header %s = %q", target, stripped, got)
+			}
+		}
+		if got := nextReq.Header.Get("User-Agent"); got != "YLReader-Test" {
+			t.Fatalf("target %s dropped User-Agent: %q", target, got)
+		}
+	}
+}
+
 // newLoopbackFetcher 返回一个能连通回环测试服务器、同时保留对字面量回环地址 SSRF
 // 阻断的 Fetcher。测试用假 host 会被解析为 8.8.8.8，拨号时改写回 127.0.0.1 同端口。
 func newLoopbackFetcher() *Fetcher {

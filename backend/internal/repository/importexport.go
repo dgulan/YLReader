@@ -158,6 +158,17 @@ func parseSource(raw json.RawMessage, userID uuid.UUID) (*BookSource, error) {
 		respondTime = 0
 	}
 
+	header := extractHeader(obj)
+	rules := raw
+	if _, hasHeader := obj["header"]; hasHeader {
+		delete(obj, "header")
+		sanitized, err := json.Marshal(obj)
+		if err != nil {
+			return nil, fmt.Errorf("marshal sanitized rules: %w", err)
+		}
+		rules = sanitized
+	}
+
 	return &BookSource{
 		UserID:          userID,
 		BookSourceURL:   *sourceURL,
@@ -172,8 +183,8 @@ func parseSource(raw json.RawMessage, userID uuid.UUID) (*BookSource, error) {
 		ConcurrentRate:  rawString(obj["concurrentRate"]),
 		LoginURL:        rawString(obj["loginUrl"]),
 		LoginCheckJS:    rawString(obj["loginCheckJs"]),
-		Header:          extractHeader(obj),
-		Rules:           raw, // 整段原始 JSON，未知键透传
+		Header:          header,
+		Rules:           rules, // 整段原始 JSON（已剥离明文 header），未知键透传
 	}, nil
 }
 

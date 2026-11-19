@@ -45,3 +45,30 @@ func TestFollowupImportedIdentityAndRulesPreserved(t *testing.T) {
 		t.Fatal(src, err)
 	}
 }
+
+func TestParseSourceStripsPlaintextHeaderFromRules(t *testing.T) {
+	raw := json.RawMessage(`{"bookSourceUrl":"https://example.com","bookSourceName":"Demo","header":"{\"Cookie\":\"sid=topsecret\",\"User-Agent\":\"UA\"}","ruleSearch":{"bookList":"a"}}`)
+	src, err := parseSource(raw, uuid.New())
+	if err != nil {
+		t.Fatalf("parseSource: %v", err)
+	}
+	var rulesObj map[string]json.RawMessage
+	if err := json.Unmarshal(src.Rules, &rulesObj); err != nil {
+		t.Fatalf("unmarshal Rules: %v", err)
+	}
+	if _, leaked := rulesObj["header"]; leaked {
+		t.Fatalf("plaintext header leaked into Rules: %s", src.Rules)
+	}
+	var hdr map[string]string
+	if err := json.Unmarshal(src.Header, &hdr); err != nil || hdr["Cookie"] != "sid=topsecret" {
+		t.Fatalf("unexpected extracted Header = %s (%v)", src.Header, err)
+	}
+	exported := mergeSource(src.Rules, src)
+	var expObj map[string]json.RawMessage
+	if err := json.Unmarshal(exported, &expObj); err != nil {
+		t.Fatalf("unmarshal exported: %v", err)
+	}
+	if _, ok := expObj["header"]; !ok {
+		t.Fatalf("mergeSource did not restore header on export: %s", exported)
+	}
+}

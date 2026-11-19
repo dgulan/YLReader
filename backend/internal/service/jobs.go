@@ -517,7 +517,7 @@ func (s *JobService) executeSourceHealth(ctx context.Context, job *repository.Jo
 		target = p.ProbeURL
 	}
 	start := time.Now()
-	resp, ferr := s.content.ft.Get(sourceFetchContext(jobCtx, src), target, parseSourceHeaders(src.Header))
+	resp, ferr := s.content.ft.Get(sourceFetchContext(jobCtx, src), target, scopeHeadersForTarget(src.BookSourceURL, target, parseSourceHeaders(src.Header)))
 	elapsed := time.Since(start)
 	ok := ferr == nil && resp != nil && resp.StatusCode < 400
 	if !ok {

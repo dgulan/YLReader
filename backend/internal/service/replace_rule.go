@@ -16,6 +16,11 @@ import (
 // ErrInvalidRegex 表示替换规则的 pattern 不是合法正则。
 var ErrInvalidRegex = errors.New("invalid regex pattern")
 
+const (
+	maxReplacePatternBytes     = 1024
+	maxReplaceReplacementBytes = 1024
+)
+
 // ReplaceRuleInput 是新建/更新替换规则的业务入参。
 type ReplaceRuleInput struct {
 	Name        string
@@ -48,6 +53,12 @@ func validateReplaceRuleInput(in *ReplaceRuleInput) error {
 	}
 	if in.Pattern == "" {
 		return fmt.Errorf("%w: pattern is required", repository.ErrInvalidArgument)
+	}
+	if len(in.Pattern) > maxReplacePatternBytes {
+		return fmt.Errorf("%w: pattern exceeds %d bytes", repository.ErrInvalidArgument, maxReplacePatternBytes)
+	}
+	if len(in.Replacement) > maxReplaceReplacementBytes {
+		return fmt.Errorf("%w: replacement exceeds %d bytes", repository.ErrInvalidArgument, maxReplaceReplacementBytes)
 	}
 	if _, err := regexp.Compile(in.Pattern); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRegex, err)

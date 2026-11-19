@@ -119,6 +119,15 @@ func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword st
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicErr := fmt.Errorf("search source panic: %v", r)
+					s.health.RecordFailure(src.UserID, src.ID, panicErr)
+					mu.Lock()
+					out.Failures = append(out.Failures, SearchFailure{SourceID: src.ID, Err: panicErr})
+					mu.Unlock()
+				}
+			}()
 			if err := sem.Acquire(ctx, 1); err != nil {
 				mu.Lock()
 				out.Failures = append(out.Failures, SearchFailure{SourceID: src.ID, Err: err})
@@ -215,7 +224,7 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 		return nil, err
 	}
 	target := resolveURL(src.BookSourceURL, request.url)
-	headers := mergeHeaders(parseSourceHeaders(src.Header), request.header)
+	headers := scopeHeadersForTarget(src.BookSourceURL, target, mergeHeaders(parseSourceHeaders(src.Header), request.header))
 	var resp *fetcher.Response
 	if request.method == http.MethodGet {
 		resp, err = s.ft.Get(ctx, target, headers)

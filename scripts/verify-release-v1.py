@@ -228,7 +228,7 @@ def run_isolated_e2e(go_bin: str, go_env: dict[str, str], tmp_dir: Path) -> dict
             "DATABASE_URL": dsn,
             "REDIS_ADDR": f"127.0.0.1:{redis_port}",
             "REDIS_URL": f"redis://127.0.0.1:{redis_port}/0",
-            "ENVIRONMENT": "production",
+            "ENVIRONMENT": "development",
             "PORT": str(api_port),
             "JWT_SECRET": secrets.token_hex(32),
             "YREADER_HEADER_KEY_KID": "primary",

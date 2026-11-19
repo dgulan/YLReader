@@ -430,7 +430,7 @@ func newTestServerWithSentinel(t *testing.T, mutate func(pool *pgxpool.Pool, dep
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	deps := api.Deps{
-		Auth:         service.NewAuthService(pool, []byte("test-secret"), time.Minute, time.Hour),
+		Auth:         service.NewAuthService(pool, []byte("test-secret-0123456789abcdef0123"), time.Minute, time.Hour),
 		Sources:      service.NewSourceService(pool),
 		Books:        service.NewBookService(pool, store, logger),
 		Progress:     service.NewProgressService(pool),

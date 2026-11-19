@@ -6,13 +6,36 @@ import (
 )
 
 func TestProductionJWTStrength(t *testing.T) {
-	for _, s := range []string{"", "short", strings.Repeat("a", 31)} {
-		if validateJWTSecret(s, "production") == nil {
-			t.Fatal("weak key accepted")
+	valid := strings.Repeat("a", 32)
+	for _, env := range []string{"", "staging", "production"} {
+		for _, s := range []string{"", "short", strings.Repeat("a", 31)} {
+			if validateJWTSecret(s, env) == nil {
+				t.Fatalf("weak key accepted for env=%q", env)
+			}
+		}
+		if validateJWTSecret(valid, env) != nil {
+			t.Fatalf("valid key rejected for env=%q", env)
 		}
 	}
-	if validateJWTSecret(strings.Repeat("a", 32), "production") != nil || validateJWTSecret("", "development") != nil {
-		t.Fatal("valid/dev key rejected")
+	if validateJWTSecret("", "development") != nil {
+		t.Fatal("dev key rejected")
+	}
+}
+
+func TestValidateRuntimeEnvFailClosed(t *testing.T) {
+	for _, env := range []string{"", "staging", "production"} {
+		if validateRuntimeEnv(env, "", "/tmp/w.sock") == nil {
+			t.Fatalf("empty STORAGE_DIR accepted for env=%q", env)
+		}
+		if validateRuntimeEnv(env, "/data/storage", "") == nil {
+			t.Fatalf("empty YREADER_SANDBOX_SOCKETS accepted for env=%q", env)
+		}
+		if err := validateRuntimeEnv(env, "/data/storage", "/tmp/w.sock"); err != nil {
+			t.Fatalf("valid config rejected for env=%q: %v", env, err)
+		}
+	}
+	if err := validateRuntimeEnv("development", "", ""); err != nil {
+		t.Fatalf("development env rejected: %v", err)
 	}
 }
 

@@ -199,7 +199,10 @@ func evalListNodesXPath(rule, content string) ([]RuleNode, error) {
 		if seg == "" {
 			continue
 		}
-		nodes := htmlquery.Find(doc, seg)
+		nodes, err := htmlquery.QueryAll(doc, seg)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid xpath %q: %v", sandbox.ErrRuleExecution, seg, err)
+		}
 		for _, n := range nodes {
 			out = append(out, RuleNode{Kind: NodeHTML, docNode: n})
 		}

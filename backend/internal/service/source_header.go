@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -77,4 +78,61 @@ func isAllowedSourceHeader(canonical string) bool {
 		return true
 	}
 	return strings.HasPrefix(canonical, "X-")
+}
+
+// scopeHeadersForTarget scopes source headers to the origin URL.
+// Cross-host navigation or https -> http downgrade strips Cookie, Authorization,
+// Proxy-Authorization, and custom X-* / credential headers.
+func scopeHeadersForTarget(originURL, targetURL string, headers http.Header) http.Header {
+	if len(headers) == 0 {
+		return nil
+	}
+	if shouldStripSensitiveHeaders(originURL, targetURL) {
+		return cloneWithoutSensitiveHeaders(headers)
+	}
+	return headers
+}
+
+func shouldStripSensitiveHeaders(originRaw, targetRaw string) bool {
+	orig, err1 := url.Parse(strings.TrimSpace(originRaw))
+	targ, err2 := url.Parse(strings.TrimSpace(targetRaw))
+	if err1 != nil || err2 != nil || orig.Hostname() == "" || targ.Hostname() == "" {
+		return true
+	}
+	if !strings.EqualFold(orig.Hostname(), targ.Hostname()) {
+		return true
+	}
+	return strings.EqualFold(orig.Scheme, "https") && strings.EqualFold(targ.Scheme, "http")
+}
+
+func cloneWithoutSensitiveHeaders(headers http.Header) http.Header {
+	out := make(http.Header, len(headers))
+	for k, vs := range headers {
+		canonical := http.CanonicalHeaderKey(k)
+		if isSensitiveSourceHeader(canonical) {
+			continue
+		}
+		out[canonical] = append([]string(nil), vs...)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func isSensitiveSourceHeader(canonical string) bool {
+	switch canonical {
+	case "Authorization", "Proxy-Authorization", "Cookie", "Cookie2":
+		return true
+	}
+	if strings.HasPrefix(canonical, "X-") {
+		return true
+	}
+	lower := strings.ToLower(canonical)
+	return strings.Contains(lower, "auth") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "session") ||
+		strings.Contains(lower, "cookie") ||
+		strings.Contains(lower, "key")
 }

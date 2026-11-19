@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/sync/semaphore"
 	"yreader/backend/internal/repository"
 )
 
@@ -59,7 +61,10 @@ type TokenPair struct {
 	User         *User
 }
 
-const DefaultAccessTTL = 15 * time.Minute
+const (
+	DefaultAccessTTL         = 15 * time.Minute
+	maxConcurrentArgonVerify = 4
+)
 
 // AuthService 实现登录、刷新轮换、登出与 access token 校验。
 type AuthService struct {
@@ -67,12 +72,16 @@ type AuthService struct {
 	secret     []byte
 	accessTTL  time.Duration
 	refreshTTL time.Duration
+	verifySem  *semaphore.Weighted
 }
 
 // NewAuthService 构造认证服务。
 func NewAuthService(pool *pgxpool.Pool, secret []byte, accessTTL, refreshTTL time.Duration) *AuthService {
 	if len(secret) == 0 {
-		secret = []byte("dev-insecure-secret-change-me")
+		panic("auth: JWT secret is required")
+	}
+	if strings.TrimSpace(os.Getenv("ENVIRONMENT")) != "development" && len(secret) < 32 {
+		panic("auth: JWT secret must contain at least 32 bytes unless ENVIRONMENT=development")
 	}
 	if accessTTL <= 0 {
 		accessTTL = DefaultAccessTTL
@@ -80,7 +89,13 @@ func NewAuthService(pool *pgxpool.Pool, secret []byte, accessTTL, refreshTTL tim
 	if refreshTTL <= 0 {
 		refreshTTL = 30 * 24 * time.Hour
 	}
-	return &AuthService{pool: pool, secret: secret, accessTTL: accessTTL, refreshTTL: refreshTTL}
+	return &AuthService{
+		pool:       pool,
+		secret:     append([]byte(nil), secret...),
+		accessTTL:  accessTTL,
+		refreshTTL: refreshTTL,
+		verifySem:  semaphore.NewWeighted(maxConcurrentArgonVerify),
+	}
 }
 
 // HashPassword 生成 argon2id PHC 字符串（m=65536,t=3,p=2，16 字节盐，32 字节 key）。
@@ -138,19 +153,29 @@ const dummyHash = "$argon2id$v=19$m=65536,t=3,p=2$AAECAwQFBgcICQoLDA0ODw$AAECAwQ
 func (a *AuthService) Login(ctx context.Context, username, password string) (*TokenPair, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
-		dummyVerify(password)
+		if _, err := a.dummyVerify(ctx, password); err != nil {
+			return nil, err
+		}
 		return nil, ErrInvalidCredentials
 	}
 	u, err := a.loadByUsername(ctx, username)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			dummyVerify(password)
+			if _, derr := a.dummyVerify(ctx, password); derr != nil {
+				return nil, derr
+			}
 			return nil, ErrInvalidCredentials
 		}
 		return nil, err
 	}
-	ok, verr := VerifyPassword(u.PasswordHash, password)
-	if verr != nil || !ok || u.IsDisabled {
+	ok, verr := a.verifyPasswordBounded(ctx, u.PasswordHash, password)
+	if verr != nil {
+		if errors.Is(verr, context.Canceled) || errors.Is(verr, context.DeadlineExceeded) {
+			return nil, verr
+		}
+		return nil, ErrInvalidCredentials
+	}
+	if !ok || u.IsDisabled {
 		return nil, ErrInvalidCredentials
 	}
 	if _, err := a.pool.Exec(ctx, `UPDATE users SET last_login_at = now() WHERE id = $1`, u.ID); err != nil {
@@ -159,8 +184,22 @@ func (a *AuthService) Login(ctx context.Context, username, password string) (*To
 	return a.issueTokens(ctx, u)
 }
 
-func dummyVerify(password string) {
-	_, _ = VerifyPassword(dummyHash, password)
+func (a *AuthService) verifyPasswordBounded(ctx context.Context, encoded, password string) (bool, error) {
+	if a.verifySem != nil {
+		if err := a.verifySem.Acquire(ctx, 1); err != nil {
+			return false, err
+		}
+		defer a.verifySem.Release(1)
+	}
+	return VerifyPassword(encoded, password)
+}
+
+func (a *AuthService) dummyVerify(ctx context.Context, password string) (bool, error) {
+	ok, err := a.verifyPasswordBounded(ctx, dummyHash, password)
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return false, err
+	}
+	return ok, nil
 }
 
 // Refresh 校验 refresh token 并轮换；命中已吊销 token 视为复用攻击，

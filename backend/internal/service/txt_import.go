@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -31,8 +32,12 @@ var (
 	reNumTitle  = regexp.MustCompile(`(?m)^` + txtLead + `\d+[\.、\s][^\n]{0,30}$`)
 )
 
-// txtSingleChapterMaxRunes 无标题文本的切块阈值。
-const txtSingleChapterMaxRunes = 50000
+// txtSingleChapterMaxRunes 单章切块阈值；txtMaxFileBytes 与 txtMaxChapters 防止大文件/海量章节 OOM。
+const (
+	txtSingleChapterMaxRunes = 50000
+	txtMaxFileBytes          = 64 << 20
+	txtMaxChapters           = 20000
+)
 
 // decodeTXT 按 BOM → UTF-16 → UTF-8 → GBK → Big5 → ISO-8859-1 顺序解码。
 func decodeTXT(raw []byte) string {
@@ -115,7 +120,10 @@ type txtSplitPattern struct {
 }
 
 // parseTXTRaw 把已解码的纯文本切成章节。
-func parseTXTRaw(text, bookTitle string) (*parsedBook, []string) {
+func parseTXTRaw(ctx context.Context, text, bookTitle string) (*parsedBook, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	var warnings []string
 	pb := &parsedBook{Title: bookTitle}
 
@@ -129,6 +137,9 @@ func parseTXTRaw(text, bookTitle string) (*parsedBook, []string) {
 	}
 	bestIdx, bestCount := -1, 0
 	for i, p := range patterns {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if n := len(p.re.FindAllStringIndex(text, -1)); n > bestCount {
 			bestIdx, bestCount = i, n
 		}
@@ -143,10 +154,16 @@ func parseTXTRaw(text, bookTitle string) (*parsedBook, []string) {
 				title = "正文"
 			}
 			pb.Chapters = []parsedChapter{{Title: title, Content: string(runes)}}
-			return pb, warnings
+			return pb, warnings, nil
 		}
 		warnings = append(warnings, fmt.Sprintf("未识别到章节标题，按 %d 字符切块", txtSingleChapterMaxRunes))
 		for i := 0; i < len(runes); i += txtSingleChapterMaxRunes {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
+			if len(pb.Chapters) >= txtMaxChapters {
+				return nil, nil, fmt.Errorf("%w: txt chapter count exceeds %d limit", repository.ErrInvalidArgument, txtMaxChapters)
+			}
 			end := i + txtSingleChapterMaxRunes
 			if end > len(runes) {
 				end = len(runes)
@@ -156,36 +173,86 @@ func parseTXTRaw(text, bookTitle string) (*parsedBook, []string) {
 				Content: string(runes[i:end]),
 			})
 		}
-		return pb, warnings
+		return pb, warnings, nil
 	}
 
 	re := patterns[bestIdx].re
 	locs := re.FindAllStringIndex(text, -1)
+	if len(locs) > txtMaxChapters {
+		return nil, nil, fmt.Errorf("%w: txt chapter count %d exceeds %d limit", repository.ErrInvalidArgument, len(locs), txtMaxChapters)
+	}
+	splitWarned := false
 	for i, loc := range locs {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		title := strings.TrimSpace(text[loc[0]:loc[1]])
 		start := loc[1]
 		end := len(text)
 		if i+1 < len(locs) {
 			end = locs[i+1][0]
 		}
-		pb.Chapters = append(pb.Chapters, parsedChapter{
-			Title:    title,
-			IsVolume: re == reVolume,
-			Content:  normalizeText(text[start:end]),
-		})
+		content := normalizeText(text[start:end])
+		isVol := re == reVolume
+		runes := []rune(content)
+		if len(runes) <= txtSingleChapterMaxRunes {
+			if len(pb.Chapters) >= txtMaxChapters {
+				return nil, nil, fmt.Errorf("%w: txt chapter count exceeds %d limit", repository.ErrInvalidArgument, txtMaxChapters)
+			}
+			pb.Chapters = append(pb.Chapters, parsedChapter{
+				Title:    title,
+				IsVolume: isVol,
+				Content:  content,
+			})
+			continue
+		}
+		if !splitWarned {
+			warnings = append(warnings, fmt.Sprintf("部分超长章节超过 %d 字符，已自动分段", txtSingleChapterMaxRunes))
+			splitWarned = true
+		}
+		for part, pos := 1, 0; pos < len(runes); part, pos = part+1, pos+txtSingleChapterMaxRunes {
+			if len(pb.Chapters) >= txtMaxChapters {
+				return nil, nil, fmt.Errorf("%w: txt chapter count exceeds %d limit", repository.ErrInvalidArgument, txtMaxChapters)
+			}
+			chunkEnd := pos + txtSingleChapterMaxRunes
+			if chunkEnd > len(runes) {
+				chunkEnd = len(runes)
+			}
+			chunkTitle := title
+			if part > 1 {
+				chunkTitle = fmt.Sprintf("%s (%d)", title, part)
+			}
+			pb.Chapters = append(pb.Chapters, parsedChapter{
+				Title:    chunkTitle,
+				IsVolume: isVol && part == 1,
+				Content:  string(runes[pos:chunkEnd]),
+			})
+		}
 	}
-	return pb, warnings
+	return pb, warnings, nil
 }
 
 // parseTXT 解码并分章。
-func (s *ImportService) parseTXT(file *os.File, size int64, bookTitle string) (*parsedBook, []string, error) {
-	raw, err := io.ReadAll(io.LimitReader(file, size+1))
+func (s *ImportService) parseTXT(ctx context.Context, file *os.File, size int64, bookTitle string) (*parsedBook, []string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if size > txtMaxFileBytes {
+		return nil, nil, fmt.Errorf("%w: txt file exceeds %d bytes limit", repository.ErrInvalidArgument, txtMaxFileBytes)
+	}
+	readLimit := size
+	if readLimit < 0 || readLimit > txtMaxFileBytes {
+		readLimit = txtMaxFileBytes
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, readLimit+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("read txt: %w", err)
+	}
+	if int64(len(raw)) > txtMaxFileBytes {
+		return nil, nil, fmt.Errorf("%w: txt file exceeds %d bytes limit", repository.ErrInvalidArgument, txtMaxFileBytes)
 	}
 	if len(raw) == 0 {
 		return nil, nil, fmt.Errorf("%w: empty file", repository.ErrInvalidArgument)
 	}
-	pb, warnings := parseTXTRaw(decodeTXT(raw), bookTitle)
-	return pb, warnings, nil
+	return parseTXTRaw(ctx, decodeTXT(raw), bookTitle)
 }

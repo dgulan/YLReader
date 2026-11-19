@@ -20,9 +20,26 @@ const (
 	defaultSandboxMaxConcurrent = 4
 )
 
+func isDevelopmentEnv(environment string) bool {
+	return strings.TrimSpace(environment) == "development"
+}
+
 func validateJWTSecret(secret, environment string) error {
-	if environment == "production" && len([]byte(secret)) < 32 {
-		return errors.New("JWT_SECRET must contain at least 32 bytes in production")
+	if !isDevelopmentEnv(environment) && len([]byte(secret)) < 32 {
+		return errors.New("JWT_SECRET must contain at least 32 bytes unless ENVIRONMENT=development")
+	}
+	return nil
+}
+
+func validateRuntimeEnv(environment, storageDir, sandboxSockets string) error {
+	if isDevelopmentEnv(environment) {
+		return nil
+	}
+	if strings.TrimSpace(storageDir) == "" {
+		return errors.New("STORAGE_DIR is required unless ENVIRONMENT=development")
+	}
+	if strings.TrimSpace(sandboxSockets) == "" {
+		return errors.New("YREADER_SANDBOX_SOCKETS is required unless ENVIRONMENT=development")
 	}
 	return nil
 }

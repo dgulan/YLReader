@@ -74,7 +74,7 @@ func newTestServerWithPool(t *testing.T, ft service.Fetcher, mutate func(pool *p
 	}
 
 	deps := api.Deps{
-		Auth:         service.NewAuthService(pool, []byte("test-secret"), time.Minute, time.Hour),
+		Auth:         service.NewAuthService(pool, []byte("test-secret-0123456789abcdef0123"), time.Minute, time.Hour),
 		Sources:      service.NewSourceService(pool),
 		Debug:        service.NewDebugService(pool, ft, sb),
 		Search:       service.NewSearchService(pool, ft, sb),

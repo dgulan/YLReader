@@ -158,6 +158,11 @@ func (wp *WorkerPool) scanStaleOnce() {
 // worker 是单 Worker 主循环：排空队列 → 阻塞等待 Notify/ticker/退出。
 func (wp *WorkerPool) worker(ctx context.Context, id int) {
 	defer wp.wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			wp.log.Error("worker loop panicked", "worker", id, "panic", r)
+		}
+	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -175,7 +180,7 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 				wp.log.Warn("execute func not set; job stays running", "worker", id, "job_id", jobID)
 				break
 			}
-			if err := wp.execute(ctx, jobID); err != nil {
+			if err := wp.executeSafe(ctx, id, jobID); err != nil {
 				wp.log.Warn("execute job failed", "worker", id, "job_id", jobID, "err", err)
 			}
 		}
@@ -189,6 +194,16 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (wp *WorkerPool) executeSafe(ctx context.Context, workerID int, jobID uuid.UUID) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			wp.log.Error("worker execute panicked", "worker", workerID, "job_id", jobID, "panic", r)
+			err = fmt.Errorf("execute job panic: %v", r)
+		}
+	}()
+	return wp.execute(ctx, jobID)
 }
 
 // claimOne 原子租约一个 queued 任务并置为 running，同时登记当前 workerID（v1.3 租约）。

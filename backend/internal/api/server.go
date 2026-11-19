@@ -108,21 +108,14 @@ func NewServer(d Deps) *Server {
 	}
 }
 
-// Handler 组装中间件与路由：根路径探针 + /api/v1 OpenAPI 路由。
+// Handler 组装公开 HTTP 中间件与路由：受保护探针与 /api/v1 OpenAPI 路由。
+// /metrics 与 /debug/pprof 不再挂载到公开路由，由 OpsHandler 仅在回环/内网地址暴露。
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(securityHeaders)
 	r.Use(RequestID)
 	r.Use(Recover(s.log))
 	r.Use(Logging(s.log))
-
-	// S5-4：/metrics 与 /debug/pprof 注册在受保护路由组之前（不挂 AuthMiddleware），
-	// 免 JWT 鉴权。/metrics 由反代限制内网访问；pprof 由 PPROF_ENABLED 控制（默认关闭）。
-	// chi 要求所有中间件先于路由定义，故这里用 Group 分出「免鉴权」与「受保护」两组。
-	r.Get("/metrics", promhttp.Handler().ServeHTTP)
-	if os.Getenv("PPROF_ENABLED") == "true" {
-		r.Mount("/debug", middleware.Profiler())
-	}
 
 	r.Group(func(protected chi.Router) {
 		protected.Use(s.AuthMiddleware)
@@ -148,6 +141,19 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 
+	return r
+}
+
+// OpsHandler 返回仅用于内网/回环运维端口（OPS_ADDR，默认 127.0.0.1:9090）的路由，
+// 承载 /metrics 与按 PPROF_ENABLED=true 启用的 /debug/pprof。
+func (s *Server) OpsHandler() http.Handler {
+	r := chi.NewRouter()
+	r.Use(securityHeaders)
+	r.Use(Recover(s.log))
+	r.Get("/metrics", promhttp.Handler().ServeHTTP)
+	if os.Getenv("PPROF_ENABLED") == "true" {
+		r.Mount("/debug", middleware.Profiler())
+	}
 	return r
 }
 

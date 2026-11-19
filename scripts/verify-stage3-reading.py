@@ -42,7 +42,7 @@ try:
  env['LOCAL_IMPORT_TIMEOUT']='90s'
  with socket.socket() as reservation:
   reservation.bind(('127.0.0.1',0));api_port=reservation.getsockname()[1]
- env.update(DATABASE_URL=f'postgres://postgres:@127.0.0.1:{ports[0]}/yreader_test?sslmode=disable',REDIS_ADDR='127.0.0.1:'+ports[1],REDIS_URL='redis://127.0.0.1:'+ports[1]+'/0',ENVIRONMENT='production',PORT='55873',JWT_SECRET=secrets.token_hex(32),YREADER_HEADER_KEY_KID='primary',YREADER_HEADER_KEY_primary=base64.b64encode(secrets.token_bytes(32)).decode(),SEED_USERNAME='stage3-original',SEED_PASSWORD=password,STORAGE_DIR=str(out/'storage'))
+ env.update(DATABASE_URL=f'postgres://postgres:@127.0.0.1:{ports[0]}/yreader_test?sslmode=disable',REDIS_ADDR='127.0.0.1:'+ports[1],REDIS_URL='redis://127.0.0.1:'+ports[1]+'/0',ENVIRONMENT='development',PORT='55873',JWT_SECRET=secrets.token_hex(32),YREADER_HEADER_KEY_KID='primary',YREADER_HEADER_KEY_primary=base64.b64encode(secrets.token_bytes(32)).decode(),SEED_USERNAME='stage3-original',SEED_PASSWORD=password,STORAGE_DIR=str(out/'storage'))
  env['PORT']=str(api_port)
  (out/'tmp').mkdir()
  env['TMP']=str(out/'tmp');env['TEMP']=str(out/'tmp')

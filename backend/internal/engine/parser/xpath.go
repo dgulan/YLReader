@@ -1,9 +1,12 @@
 package parser
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/antchfx/htmlquery"
+
+	"yreader/backend/internal/engine/sandbox"
 )
 
 // evalXPath 用 htmlquery 求值 XPath 规则（@XPath: 或 `/` 前缀），支持
@@ -28,7 +31,10 @@ func evalXPath(rule, content string) ([]string, error) {
 		if seg == "" {
 			continue
 		}
-		nodes := htmlquery.Find(doc, seg)
+		nodes, err := htmlquery.QueryAll(doc, seg)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid xpath %q: %v", sandbox.ErrRuleExecution, seg, err)
+		}
 		temp := make([]string, 0, len(nodes))
 		for _, n := range nodes {
 			if s := htmlquery.InnerText(n); s != "" {

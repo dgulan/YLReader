@@ -257,8 +257,13 @@ func detectMode(rule string) (Mode, string) {
 	}
 }
 
-// makeUp 替换 `$n` 回填、{{...}} 模板与 @get:{key} 变量。
+const maxMakeUpOutputBytes = 16 << 20
+
+// makeUp 单遍替换 `$n` 回填、@get:{key} 变量与 {{...}} 模板，避免替换结果被重复扫描引发无限展开。
 func (e *Engine) makeUp(ctx context.Context, rule string, result []string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	out := dollarPattern.ReplaceAllStringFunc(rule, func(m string) string {
 		var n int
 		for _, c := range m[1:] {
@@ -270,33 +275,55 @@ func (e *Engine) makeUp(ctx context.Context, rule string, result []string) (stri
 		return m
 	})
 
-	for {
-		loc := getPattern.FindStringIndex(out)
-		if loc == nil {
-			break
-		}
-		key := getPattern.FindStringSubmatch(out)[1]
-		out = out[:loc[0]] + e.GetVariable(key) + out[loc[1]:]
+	var err error
+	out, err = replaceSubmatchOnce(ctx, out, getPattern, maxMakeUpOutputBytes, func(key string) (string, error) {
+		return e.GetVariable(key), nil
+	})
+	if err != nil {
+		return "", err
 	}
 
-	for {
-		loc := tmplPattern.FindStringIndex(out)
-		if loc == nil {
-			break
+	content := ""
+	if len(result) > 0 {
+		content = result[0]
+	}
+	out, err = replaceSubmatchOnce(ctx, out, tmplPattern, maxMakeUpOutputBytes, func(expr string) (string, error) {
+		return e.evalTemplate(ctx, expr, content)
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func replaceSubmatchOnce(ctx context.Context, input string, pat *regexp.Regexp, maxBytes int, eval func(sub string) (string, error)) (string, error) {
+	matches := pat.FindAllStringSubmatchIndex(input, -1)
+	if len(matches) == 0 {
+		return input, nil
+	}
+	var b strings.Builder
+	b.Grow(len(input))
+	last := 0
+	for _, m := range matches {
+		if err := ctx.Err(); err != nil {
+			return "", err
 		}
-		sub := tmplPattern.FindStringSubmatch(out)
-		expr := sub[1]
-		content := ""
-		if len(result) > 0 {
-			content = result[0]
-		}
-		val, err := e.evalTemplate(ctx, expr, content)
+		b.WriteString(input[last:m[0]])
+		val, err := eval(input[m[2]:m[3]])
 		if err != nil {
 			return "", err
 		}
-		out = out[:loc[0]] + val + out[loc[1]:]
+		if b.Len()+len(val) > maxBytes {
+			return "", fmt.Errorf("%w: template expansion exceeds %d bytes", sandbox.ErrRuleExecution, maxBytes)
+		}
+		b.WriteString(val)
+		last = m[1]
 	}
-	return strings.TrimSpace(out), nil
+	if b.Len()+(len(input)-last) > maxBytes {
+		return "", fmt.Errorf("%w: template expansion exceeds %d bytes", sandbox.ErrRuleExecution, maxBytes)
+	}
+	b.WriteString(input[last:])
+	return b.String(), nil
 }
 
 // evalTemplate 求值 {{...}} 内容：优先 Fast-Path，否则回落 sandbox。
