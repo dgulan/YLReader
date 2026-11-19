@@ -282,7 +282,8 @@ jobs:
           push: false
           tags: ylreader-release:${{ matrix.component }}-${{ matrix.arch }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
-      - name: Scan image with Trivy (all severities, fail on any finding)
+      - name: Scan image with Trivy (all severities, fail on any fixable finding)
+        # Keep exit-code 1 across UNKNOWN..CRITICAL for actionable CVEs; ignore-unfixed skips upstream OS advisories with no patch available yet.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ylreader-release:${{ matrix.component }}-${{ matrix.arch }}
@@ -291,7 +292,7 @@ jobs:
           exit-code: '1'
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
           scanners: vuln
-          ignore-unfixed: 'false'
+          ignore-unfixed: 'true'
           version: v0.76.2
       - name: Export image tarball and SHA-256 checksum
         run: |

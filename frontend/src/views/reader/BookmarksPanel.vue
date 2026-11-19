@@ -5,22 +5,48 @@ import VirtualList from '@/components/VirtualList.vue'
 import { useBookmarks } from './bookmarks'
 const props = defineProps<{ bookId: string; total: number }>()
 const emit = defineEmits<{ navigate: [bookmark: Model<'Bookmark'>] }>()
-const { items, busy, error, message, load, create, remove } = useBookmarks(toRef(props, 'bookId'))
+const { items, busy, error, message, load, create, remove, reset } = useBookmarks(toRef(props, 'bookId'))
 const dialog = ref<HTMLDialogElement>(), position = ref<Model<'BookmarkCreate'>>(), note = ref(''), selected = ref(''), deleting = ref(false)
 const active = computed(() => items.value.find(b => b.id === selected.value))
 const entries = computed(() => items.value.map(b => ({ id: b.id, label: `第 ${b.chapter_index + 1} 章 · ${b.chapter_title || '未命名章节'} · ${b.note || b.excerpt || `字符 ${b.char_offset}`}`, disabled: busy.value })))
 const invalid = computed(() => !!active.value && active.value.chapter_index >= props.total)
+let lastTrigger: HTMLElement | null = null
+function restoreFocus() {
+  const target = lastTrigger
+  lastTrigger = null
+  if (target && target.isConnected && !target.hasAttribute('disabled')) target.focus()
+}
+function clearState() {
+  reset()
+  position.value = undefined
+  note.value = ''
+  selected.value = ''
+  deleting.value = false
+}
+function onDialogClose() {
+  clearState()
+  restoreFocus()
+}
+function closeDialog() {
+  dialog.value?.close()
+}
 watch(selected, () => { deleting.value = false })
-watch(() => props.bookId, () => { dialog.value?.close(); position.value = undefined; note.value = ''; selected.value = ''; deleting.value = false })
-async function open(at?: Model<'BookmarkCreate'>) { position.value = at ? { ...at } : undefined; note.value = ''; selected.value = ''; deleting.value = false; dialog.value?.showModal(); await load() }
+watch(() => props.bookId, () => { lastTrigger = null; dialog.value?.close(); clearState() })
+async function open(at?: Model<'BookmarkCreate'>, trigger?: HTMLElement | null) {
+  const activeElement = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null
+  lastTrigger = trigger && trigger.isConnected ? trigger : activeElement
+  position.value = at ? { ...at } : undefined; note.value = ''; selected.value = ''; deleting.value = false
+  dialog.value?.showModal()
+  await load()
+}
 async function save() { if (position.value && Array.from(note.value).length <= 4096 && await create({ ...position.value, note: note.value })) { note.value = ''; selected.value = items.value.find(b => b.chapter_index === position.value!.chapter_index && b.char_offset === position.value!.char_offset)?.id ?? '' } }
 async function confirmDelete() { if (active.value && await remove(active.value.id)) { selected.value = ''; deleting.value = false } }
 function jump() { if (!active.value || invalid.value || busy.value) return; emit('navigate', active.value); dialog.value?.close() }
 defineExpose({ open })
 </script>
 <template>
-  <dialog ref="dialog" class="bookmarks-dialog" aria-labelledby="bookmarks-title" @cancel="busy && $event.preventDefault()">
-    <header><h2 id="bookmarks-title">阅读书签</h2><button autofocus :disabled="busy" @click="dialog?.close()">关闭</button></header>
+  <dialog ref="dialog" class="bookmarks-dialog" aria-labelledby="bookmarks-title" @close="onDialogClose">
+    <header><h2 id="bookmarks-title">阅读书签</h2><button type="button" autofocus @click="closeDialog">关闭</button></header>
     <p v-if="error" role="alert">{{ error }}</p><p v-if="message" role="status">{{ message }}</p><p v-if="busy" role="status">正在处理书签…</p>
     <form v-if="position" @submit.prevent="save"><p>当前位置：第 {{ position.chapter_index + 1 }} 章 · 字符 {{ position.char_offset ?? 0 }}</p><blockquote>{{ position.excerpt }}</blockquote><label for="bookmark-note">书签备注（可选）</label><textarea id="bookmark-note" v-model="note" maxlength="4096" rows="2" :disabled="busy" /><button type="submit" :disabled="busy">保存当前位置书签</button></form>
     <div class="list-heading"><h3>已保存书签（{{ items.length }}）</h3><button :disabled="busy" @click="selected = ''; load()">刷新书签</button></div>

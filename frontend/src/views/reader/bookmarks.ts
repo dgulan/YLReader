@@ -46,5 +46,5 @@ export function useBookmarks(bookId: Ref<string>) {
     } catch (e) { if (token === generation) error.value = bookmarkError(e); return false }
     finally { if (token === generation) busy.value = false }
   }
-  return { items, busy, error, message, load, create, remove }
+  return { items, busy, error, message, load, create, remove, reset }
 }

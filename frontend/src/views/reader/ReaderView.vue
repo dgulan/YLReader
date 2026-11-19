@@ -44,7 +44,18 @@ function onTouchEnd(event: TouchEvent) {
 }
 const uncertain = ref(false), reviewing = ref(false)
 const directory = ref<InstanceType<typeof VirtualList>>()
-function openDirectory() { drawer.value?.showModal(); directory.value?.revealSelected() }
+const bookmarkTrigger = ref<HTMLButtonElement>(), directoryTrigger = ref<HTMLButtonElement>()
+let lastDirectoryTrigger: HTMLElement | null = null
+function openDirectory() {
+  const active = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null
+  lastDirectoryTrigger = directoryTrigger.value ?? active
+  drawer.value?.showModal(); directory.value?.revealSelected()
+}
+function onDirectoryClose() {
+  const target = lastDirectoryTrigger
+  lastDirectoryTrigger = null
+  if (target && target.isConnected && !target.hasAttribute('disabled')) target.focus()
+}
 let generation = 0, revision = 0, saveEpoch = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, controller = new AbortController()
 let bookController = new AbortController()
 const switcher = ref<InstanceType<typeof SourceSwitcher>>()
@@ -53,7 +64,7 @@ const overrideDialog = ref<InstanceType<typeof ChapterOverrideDialog>>()
 async function openBookmarks() {
   clearTimeout(timer); capture(); void flush()
   const at = content.value && !error.value ? { chapter_index: index.value, char_offset: offset.value, chapter_title: title.value, excerpt: bookmarkExcerpt(content.value.content, offset.value) } : undefined
-  await bookmarks.value?.open(at)
+  await bookmarks.value?.open(at, bookmarkTrigger.value)
 }
 async function visitBookmark(mark: Model<'Bookmark'>) { await changeChapter(mark.chapter_index, mark.char_offset) }
 async function openOverride() { clearTimeout(timer); capture(); void flush(); await overrideDialog.value?.open() }
@@ -279,7 +290,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 </script>
 <template>
   <main class="reader" :data-theme="config.theme" :style="{ '--reader-size': config.fontSize + 'px' }">
-    <header v-show="!immersive" class="reader-header"><RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink><span>{{ book?.name ?? '阅读器' }}</span><button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button><button v-if="book?.book_type === 'online'" :disabled="loading || restoring || !content" @click="openOverride">{{ content?.is_overridden ? '单章覆盖中' : '单章换源' }}</button><button :disabled="loading || restoring || !book" @click="openBookmarks">书签</button><button aria-haspopup="dialog" aria-controls="reader-directory" @click="openDirectory" :disabled="!toc">目录</button><button type="button" :aria-pressed="immersive" @click="immersive = true">沉浸</button></header>
+    <header v-show="!immersive" class="reader-header"><RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink><span>{{ book?.name ?? '阅读器' }}</span><button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button><button v-if="book?.book_type === 'online'" :disabled="loading || restoring || !content" @click="openOverride">{{ content?.is_overridden ? '单章覆盖中' : '单章换源' }}</button><button ref="bookmarkTrigger" :disabled="loading || restoring || !book" @click="openBookmarks">书签</button><button ref="directoryTrigger" aria-haspopup="dialog" aria-controls="reader-directory" @click="openDirectory" :disabled="!toc">目录</button><button type="button" :aria-pressed="immersive" @click="immersive = true">沉浸</button></header>
     <div v-if="conflict" class="reader-conflict" role="alert"><p>服务器当前位于第 {{ conflict.chapter_index + 1 }} 章。请选择要保留的位置。</p><button :disabled="reviewing || saving || loading || restoring" @click="keepMine">保留本机位置</button><button :disabled="reviewing || saving || loading || restoring" @click="useRemote">使用另一端位置</button></div>
     <p v-if="uncertain && !conflict" class="reader-notice" role="status">保存结果待确认 <button :disabled="reviewing || saving || loading || restoring" @click="reviewProgress">{{ reviewing ? '正在核对…' : '核对服务器进度' }}</button></p>
     <p v-if="saveError" class="reader-notice" role="status">{{ saveError }}</p>
@@ -293,7 +304,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
     <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" @switched="switched" />
     <BookmarksPanel ref="bookmarks" :book-id="bookId" :total="book?.total_chapters ?? 0" @navigate="visitBookmark" />
     <ChapterOverrideDialog ref="overrideDialog" :book-id="bookId" :chapter-index="index" :chapter-title="title" :is-overridden="Boolean(content?.is_overridden)" @updated="overrideUpdated" />
-    <dialog id="reader-directory" ref="drawer" class="toc-dialog" aria-labelledby="toc-title"><div class="toc-heading"><h2 id="toc-title">章节目录</h2><button autofocus @click="drawer?.close()">关闭</button></div><VirtualList ref="directory" :items="entries" :selected="index" label="章节目录列表" @select="changeChapter" /></dialog>
+    <dialog id="reader-directory" ref="drawer" class="toc-dialog" aria-labelledby="toc-title" @close="onDirectoryClose"><div class="toc-heading"><h2 id="toc-title">章节目录</h2><button type="button" autofocus @click="drawer?.close()">关闭</button></div><VirtualList ref="directory" :items="entries" :selected="index" label="章节目录列表" @select="changeChapter" /></dialog>
   </main>
 </template>
 <style scoped>

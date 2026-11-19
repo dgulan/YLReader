@@ -1,7 +1,8 @@
-import { effectScope, ref } from 'vue'
+import { createApp, effectScope, h, nextTick, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/api/reader'
 import { ApiError, type Model } from '@/api/client'
+import BookmarksPanel from './BookmarksPanel.vue'
 import { bookmarkExcerpt, useBookmarks } from './bookmarks'
 const scopes: ReturnType<typeof effectScope>[] = []
 function setup() { const scope = effectScope(); scopes.push(scope); const book = ref('book-a'); return { book, state: scope.run(() => useBookmarks(book))! } }
@@ -46,5 +47,45 @@ describe('reader bookmarks', () => {
     const { state } = setup(); vi.spyOn(api, 'bookmarks').mockRejectedValueOnce(new TypeError('offline')).mockResolvedValueOnce([mark('synced')])
     await state.load(); expect(state.error.value).toContain('请联网后重试'); expect(state.items.value).toEqual([])
     await state.load(); expect(state.error.value).toBe(''); expect(state.items.value[0]?.id).toBe('synced')
+  })
+  it('restores focus to the trigger button when closed while loading', async () => {
+    let finish!: (value: Model<'Bookmark'>[]) => void
+    if (!HTMLDialogElement.prototype.showModal) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, writable: true, value() {} })
+    if (!HTMLDialogElement.prototype.close) Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, writable: true, value() {} })
+    vi.spyOn(api, 'bookmarks').mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
+      this.open = true
+      this.querySelector<HTMLElement>('[autofocus]')?.focus()
+    })
+    vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) {
+      this.open = false
+      this.dispatchEvent(new Event('close'))
+    })
+    const host = document.createElement('div')
+    document.body.append(host)
+    const trigger = document.createElement('button')
+    trigger.textContent = '书签'
+    document.body.append(trigger)
+    trigger.focus()
+    const panel = ref<InstanceType<typeof BookmarksPanel>>()
+    const app = createApp({ render: () => h(BookmarksPanel, { bookId: 'book-a', total: 3, ref: panel }) })
+    app.mount(host)
+    try {
+      const opening = panel.value!.open(undefined, trigger)
+      await nextTick()
+      const dialog = host.querySelector('dialog')!
+      const closeBtn = dialog.querySelector('button')!
+      expect(closeBtn.disabled).toBe(false)
+      expect(document.activeElement).toBe(closeBtn)
+      dialog.close()
+      expect(document.activeElement).toBe(trigger)
+      finish([mark('late')])
+      await opening
+      expect(host.textContent).not.toContain('late')
+    } finally {
+      app.unmount()
+      host.remove()
+      trigger.remove()
+    }
   })
 })
