@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,14 +94,15 @@ func TestParseSchemaUpArgs(t *testing.T) {
 }
 
 func TestParseImportSourcesArgsAndPayload(t *testing.T) {
-	opts, err := parseImportSourcesArgs([]string{"--user=alice", "--file=sources.json", "--overwrite=update", "--dry-run"})
-	if err != nil || opts.User != "alice" || opts.File != "sources.json" || opts.Overwrite != "update" || !opts.DryRun {
+	opts, err := parseImportSourcesArgs([]string{"--user=alice", "--file=sources.json", "--overwrite=update", "--dry-run", "--production-confirm-db=yreader_prod"})
+	if err != nil || opts.User != "alice" || opts.File != "sources.json" || opts.Overwrite != "update" || !opts.DryRun || opts.ConfirmDB != "yreader_prod" {
 		t.Fatalf("valid import args rejected: %+v %v", opts, err)
 	}
 	for _, bad := range [][]string{
 		{"--file=sources.json"},
 		{"--user=alice"},
 		{"--user=alice", "--file=sources.json", "--overwrite=delete"},
+		{"--user=alice", "--file=sources.json", "--production-confirm-db="},
 		{"--user=alice", "--file=sources.json", "extra"},
 	} {
 		if _, err := parseImportSourcesArgs(bad); err == nil {
@@ -130,8 +132,36 @@ func TestRunImportLegadoSourcesRequiresKeyring(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("DATABASE_URL", "postgres://u:p@127.0.0.1:5432/yreader_test")
-	// Ensure no keyring is loaded when YREADER_HEADER_KEY_* is absent.
-	if err := runImportLegadoSources([]string{"--user=alice", "--file=" + path, "--dry-run"}); err == nil {
-		t.Fatal("expected import without header keyring to fail closed")
+	// Ensure no keyring is loaded when YREADER_HEADER_KEY_* is absent; test DB requires no --production-confirm-db.
+	err := runImportLegadoSources([]string{"--user=alice", "--file=" + path, "--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), "load header keyring") {
+		t.Fatalf("expected keyring error on test DB without confirmation flag, got: %v", err)
+	}
+}
+
+func TestRunImportLegadoSourcesProductionConfirmGuard(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "sources.json")
+	if err := os.WriteFile(path, []byte(`[{"bookSourceUrl":"https://example.com","bookSourceName":"Demo"}]`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DATABASE_URL", "postgres://u:p@db.internal:5432/yreader_prod?sslmode=require")
+
+	// Missing confirmation on non-test DB must fail before keyring/DB access.
+	err := runImportLegadoSources([]string{"--user=alice", "--file=" + path, "--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), "--production-confirm-db") {
+		t.Fatalf("expected missing confirmation denial, got: %v", err)
+	}
+
+	// Mismatched confirmation must fail before keyring/DB access.
+	err = runImportLegadoSources([]string{"--user=alice", "--file=" + path, "--production-confirm-db=wrong_db"})
+	if err == nil || !strings.Contains(err.Error(), "production confirmation mismatch") {
+		t.Fatalf("expected mismatched confirmation denial, got: %v", err)
+	}
+
+	// Matching confirmation passes target authorization and proceeds to keyring validation.
+	err = runImportLegadoSources([]string{"--user=alice", "--file=" + path, "--production-confirm-db=yreader_prod", "--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), "load header keyring") {
+		t.Fatalf("expected target authorization to pass to keyring check, got: %v", err)
 	}
 }

@@ -277,7 +277,7 @@ func aesDecryptWithMode(cipherText, key, transform, iv string) string {
 }
 
 func aesEncrypt(plain, key string) string {
-	if plain == "" {
+	if plain == "" || len(plain) > maxAESInputBytes {
 		return ""
 	}
 	block, err := aes.NewCipher(aesKey(key))
@@ -293,7 +293,7 @@ func aesEncrypt(plain, key string) string {
 }
 
 func aesDecrypt(cipher, key string) string {
-	if cipher == "" {
+	if cipher == "" || len(cipher) > maxAESInputBytes {
 		return ""
 	}
 	data, err := base64.StdEncoding.DecodeString(cipher)

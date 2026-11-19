@@ -111,7 +111,7 @@ docker compose -f docker-compose.prod.yml up --build -d
 
 ## 5. 旧版 Reader / Legado 书源导入 CLI
 
-可通过 `cmd/migrator import-legado-sources` 将导出的 Legado / 旧版 Reader 书源 JSON 文件（单对象或对象数组，上限 32 MiB）导入指定账户；导入管线要求配置 `YREADER_HEADER_KEY_<KID>` 并自动为所有非空 `header` 执行 AES-256-GCM 信封加密：
+可通过 `cmd/migrator import-legado-sources` 将导出的 Legado / 旧版 Reader 书源 JSON 文件（单对象或对象数组，上限 32 MiB）导入指定账户；导入管线要求配置 `YREADER_HEADER_KEY_<KID>` 并自动为所有非空 `header` 执行 AES-256-GCM 信封加密。针对非测试库执行时，与 `schema up` 一致，必须显式传入与目标库名一致的 `--production-confirm-db=<dbname>`：
 
 ```bash
 # 先使用 --dry-run 演练（单事务执行完整校验与冲突统计后自动回滚，不写库）
@@ -122,6 +122,7 @@ YREADER_HEADER_KEY_primary="<BASE64_32B_KEY>" \
     --user=admin \
     --file=/path/to/sources.json \
     --overwrite=skip \
+    --production-confirm-db=yreader \
     --dry-run
 
 # 确认报告无误后移除 --dry-run 正式导入（可选 --overwrite=update 覆盖同 URL 书源）

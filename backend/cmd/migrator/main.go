@@ -44,6 +44,7 @@ type importCommandOptions struct {
 	File      string
 	Overwrite string
 	DryRun    bool
+	ConfirmDB string
 }
 
 type importCLIReport struct {
@@ -161,6 +162,18 @@ func authorizeSchemaUpTarget(raw, confirmDB string, lookup func(string) (string,
 	return cfg, nil
 }
 
+func validateConfirmDBFlag(args []string, confirm string) (string, error) {
+	trimmed := strings.TrimSpace(confirm)
+	for _, a := range args {
+		if a == "--production-confirm-db" || strings.HasPrefix(a, "--production-confirm-db=") || a == "-production-confirm-db" || strings.HasPrefix(a, "-production-confirm-db=") {
+			if trimmed == "" {
+				return "", fmt.Errorf("--production-confirm-db must be a non-empty database name")
+			}
+		}
+	}
+	return trimmed, nil
+}
+
 func parseSchemaUpArgs(args []string) (confirmDB string, err error) {
 	fs := flag.NewFlagSet("schema up", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -171,14 +184,7 @@ func parseSchemaUpArgs(args []string) (confirmDB string, err error) {
 	if fs.NArg() != 0 {
 		return "", fmt.Errorf("usage: migrator schema up [--production-confirm-db=<dbname>]")
 	}
-	for _, a := range args {
-		if a == "--production-confirm-db" || strings.HasPrefix(a, "--production-confirm-db=") || a == "-production-confirm-db" || strings.HasPrefix(a, "-production-confirm-db=") {
-			if strings.TrimSpace(*confirm) == "" {
-				return "", fmt.Errorf("--production-confirm-db must be a non-empty database name")
-			}
-		}
-	}
-	return strings.TrimSpace(*confirm), nil
+	return validateConfirmDBFlag(args, *confirm)
 }
 
 func parseImportSourcesArgs(args []string) (importCommandOptions, error) {
@@ -188,17 +194,23 @@ func parseImportSourcesArgs(args []string) (importCommandOptions, error) {
 	file := fs.String("file", "", "path to Legado source JSON file")
 	overwrite := fs.String("overwrite", "skip", "duplicate handling: skip or update")
 	dryRun := fs.Bool("dry-run", false, "validate and simulate import inside a rolled-back transaction")
+	confirm := fs.String("production-confirm-db", "", "exact database name confirmation for non-test targets")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
-		return importCommandOptions{}, fmt.Errorf("usage: migrator import-legado-sources --user=<username> --file=<path> [--overwrite=skip|update] [--dry-run]")
+		return importCommandOptions{}, fmt.Errorf("usage: migrator import-legado-sources --user=<username> --file=<path> [--overwrite=skip|update] [--dry-run] [--production-confirm-db=<dbname>]")
+	}
+	confirmDB, err := validateConfirmDBFlag(args, *confirm)
+	if err != nil {
+		return importCommandOptions{}, err
 	}
 	opts := importCommandOptions{
 		User:      strings.TrimSpace(*user),
 		File:      strings.TrimSpace(*file),
 		Overwrite: strings.TrimSpace(*overwrite),
 		DryRun:    *dryRun,
+		ConfirmDB: confirmDB,
 	}
 	if opts.User == "" || opts.File == "" {
-		return importCommandOptions{}, fmt.Errorf("usage: migrator import-legado-sources --user=<username> --file=<path> [--overwrite=skip|update] [--dry-run]")
+		return importCommandOptions{}, fmt.Errorf("usage: migrator import-legado-sources --user=<username> --file=<path> [--overwrite=skip|update] [--dry-run] [--production-confirm-db=<dbname>]")
 	}
 	if opts.Overwrite != "skip" && opts.Overwrite != "update" {
 		return importCommandOptions{}, fmt.Errorf("invalid --overwrite %q: must be skip or update", opts.Overwrite)
@@ -262,7 +274,7 @@ func readLegadoImportFile(path string) ([]json.RawMessage, error) {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: migrator <schema status|check|up [--production-confirm-db=<dbname>]> | <import-legado-sources --user=<username> --file=<path> [--dry-run]>")
+		return fmt.Errorf("usage: migrator <schema status|check|up [--production-confirm-db=<dbname>]> | <import-legado-sources --user=<username> --file=<path> [--dry-run] [--production-confirm-db=<dbname>]>")
 	}
 	switch args[0] {
 	case "schema":
@@ -270,7 +282,7 @@ func run(args []string) error {
 	case "import-legado-sources":
 		return runImportLegadoSources(args[1:])
 	default:
-		return fmt.Errorf("usage: migrator <schema status|check|up [--production-confirm-db=<dbname>]> | <import-legado-sources --user=<username> --file=<path> [--dry-run]>")
+		return fmt.Errorf("usage: migrator <schema status|check|up [--production-confirm-db=<dbname>]> | <import-legado-sources --user=<username> --file=<path> [--dry-run] [--production-confirm-db=<dbname>]>")
 	}
 }
 
@@ -350,22 +362,9 @@ func runImportLegadoSources(args []string) error {
 		return err
 	}
 
-	raw := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if raw == "" {
-		return fmt.Errorf("DATABASE_URL required")
-	}
-	if hasTargetOverrideEnv(os.LookupEnv) {
-		return fmt.Errorf("conflicting PG* environment variables are forbidden")
-	}
-	if !explicitTarget(raw) {
-		return fmt.Errorf("explicit unambiguous host, port and database required")
-	}
-	cfg, err := pgxpool.ParseConfig(raw)
+	cfg, err := authorizeSchemaUpTarget(os.Getenv("DATABASE_URL"), opts.ConfirmDB, os.LookupEnv)
 	if err != nil {
-		return fmt.Errorf("invalid DATABASE_URL")
-	}
-	if !sameTargetEndpoints(cfg) {
-		return fmt.Errorf("explicit unambiguous host, port and database required")
+		return err
 	}
 
 	ring, err := crypto.LoadKeyringFromEnv()

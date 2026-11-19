@@ -177,6 +177,26 @@ func TestSandbox_AESModes(t *testing.T) {
 	if out != "0123456789abcdef||" {
 		t.Fatalf("NoPadding/invalid AES mismatch: got %q", out)
 	}
+
+	// 4. Two-arg legacy aesEncode / aesDecode must enforce maxAESInputBytes (4 MiB)
+	oversized := strings.Repeat("a", maxAESInputBytes+1)
+	if enc := aesEncrypt(oversized, "secret-key"); enc != "" {
+		t.Fatalf("expected empty string for oversized 2-arg aesEncrypt, got len=%d", len(enc))
+	}
+	if dec := aesDecrypt(oversized, "secret-key"); dec != "" {
+		t.Fatalf("expected empty string for oversized 2-arg aesDecrypt, got len=%d", len(dec))
+	}
+	out, err = sb.Eval(context.Background(), `
+		var e = java.aesEncode(big, 'secret-key');
+		var d = java.aesDecode(big, 'secret-key');
+		result = e + '|' + d;
+	`, map[string]any{"big": oversized})
+	if err != nil {
+		t.Fatalf("2-arg AES oversized eval failed: %v", err)
+	}
+	if out != "|" {
+		t.Fatalf("2-arg AES oversized must return empty strings, got %q", out)
+	}
 }
 
 func TestSandbox_SourceVariables(t *testing.T) {
