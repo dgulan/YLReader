@@ -500,3 +500,16 @@ test('a review response arriving after the session disappears cannot expose a co
     expect((await cachedRows(page, 'positions'))[0]!.dirty).toBe(true)
   } finally { f.review.release() }
 })
+
+test('cached reading survives a 502 TOC failure on reload and renders cached chapter body', async ({ page }) => {
+  await fixture(page)
+  await readyReader(page)
+  await page.route(`**/api/v1/books/${a}/chapters?*`, route => route.fulfill({ status: 502, json: { error: { code: 'source_request_failed' } } }))
+  await page.route(`**/api/v1/books/${a}/content?*`, route => route.fulfill({ status: 502, json: { error: { code: 'source_request_failed' } } }))
+  const failedTOC = page.waitForResponse(r => r.url().includes(`/books/${a}/chapters?`) && r.status() === 502)
+  await page.reload()
+  await failedTOC
+  await expect(page.getByLabel('章节阅读区')).toHaveAttribute('aria-busy', 'false')
+  await expect(page.getByText('离线缓存 · 第 3 章')).toBeVisible()
+  await expect(page.locator('.chapter-body')).toContainText('原书A正文')
+})

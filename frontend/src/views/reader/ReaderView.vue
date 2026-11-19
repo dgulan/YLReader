@@ -14,9 +14,9 @@ import { bookmarkExcerpt } from './bookmarks'
 import { visibleOffset, utf16Offset, codePointLength, chapterFraction } from './position'
 import { reconcileProgress, remoteProgressState } from './progress'
 import { loadChapter, preloadChapters, type ChapterRequest } from './chapterLoading'
+import { loadBookBootstrap } from './bookBootstrap'
 import { singleFlight, watchPageCheckpoint } from './checkpoint'
 import { withDeadline, RequestDeadlineError } from './deadline'
-import { canReadOffline } from './offline'
 import { detectHorizontalSwipe, type TouchPoint } from './touchNavigation'
 const route = useRoute(), router = useRouter(), config = useReaderConfig()
 const owner = getSession()?.user.id ?? ''
@@ -185,7 +185,7 @@ function fetchChapter(request: ChapterRequest) {
     cacheError: () => { saveError.value = '章节缓存不可用，离线阅读暂不可用' },
   })
 }
-async function openChapter(i: number, at = 0) {
+async function openChapter(i: number, at = 0, onCommitted?: () => void) {
   if (!book.value) return false
   controller.abort(); controller = new AbortController(); const signal = controller.signal, serial = ++generation
   const request = { owner, bookId: bookId.value, context: chapterContext(book.value), index: i, signal }, total = book.value.total_chapters
@@ -195,6 +195,7 @@ async function openChapter(i: number, at = 0) {
     const loaded = await fetchChapter(request)
     if (!current()) return false
     content.value = loaded.result; index.value = i; offset.value = Math.min(Math.max(0, at), codePointLength(loaded.result.content)); offline.value = loaded.cached
+    onCommitted?.()
     loading.value = false; await restorePosition(current)
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
     if (!current()) return false
@@ -212,7 +213,7 @@ async function boot() {
   bookController.abort(); bookController = new AbortController(); controller.abort()
   const signal = bookController.signal, requestedBook = bookId.value
   function check() { signal.throwIfAborted(); if (!owner || getSession()?.user.id !== owner) throw new DOMException('Aborted', 'AbortError') }
-  loading.value = true; restoring.value = false; content.value = undefined; error.value = ''; conflict.value = undefined; dirty.value = false; saveError.value = ''
+  loading.value = true; restoring.value = false; offline.value = false; content.value = undefined; error.value = ''; conflict.value = undefined; dirty.value = false; saveError.value = ''
   book.value = undefined; toc.value = undefined; baseProgress.value = undefined
   try {
     check()
@@ -220,28 +221,30 @@ async function boot() {
     check()
     const local = await db.positions.get(bookKey(owner, requestedBook)).catch(() => undefined)
     check()
-    let current: Model<'Progress'>, liveBook: Model<'Book'> | undefined
-    try {
-      const b = await api.book(requestedBook, signal); check(); liveBook = b; book.value = b
-      const [t, p] = await Promise.all([api.chapters(requestedBook, false, undefined, signal), api.progress(requestedBook, signal)])
-      check()
-      b.total_chapters = t.total; book.value = b; toc.value = t; current = p
-      await db.books.put({ key: bookKey(owner, requestedBook), owner, book: b, toc: t }).catch(() => undefined)
-      check()
-    } catch (e) {
-      check()
-      if (!canReadOffline(e)) throw e
-      const cached = await db.books.get(bookKey(owner, requestedBook))
-      check()
-      if (!cached || !local) throw new Error('尚无离线记录，请联网打开这本书')
-      if (liveBook && chapterContext(liveBook) !== chapterContext(cached.book)) throw new Error('书源或书籍已变化，尚无新版本缓存，请联网重试')
-      book.value = cached.book; toc.value = cached.toc; current = local.base; offline.value = true
-    }
+    const bootstrap = await loadBookBootstrap(
+      { owner, bookId: requestedBook, local, signal },
+      {
+        fetchBook: (id, sig) => api.book(id, sig),
+        fetchChapters: (id, sig) => api.chapters(id, false, undefined, sig),
+        fetchProgress: (id, sig) => api.progress(id, sig),
+        readCachedBook: (userId, id) => db.books.get(bookKey(userId, id)),
+        writeCachedBook: entry => db.books.put(entry),
+        chapterContext,
+        bookKey,
+      },
+    )
+    check()
+    book.value = bootstrap.book; toc.value = bootstrap.toc; offline.value = bootstrap.offline
+    const current = bootstrap.progress
     if (!toc.value.total) throw new Error('目录中没有可读章节，请检查书源或导入内容')
     const restored = reconcileProgress(current, local)
     baseProgress.value = restored.base; dirty.value = restored.dirty; conflict.value = restored.conflict
-    if (!await openChapter(Math.min(restored.index, Math.max(0, book.value!.total_chapters - 1)), restored.offset)) return
+    let earlyPersist: Promise<void> | undefined
+    if (!await openChapter(Math.min(restored.index, Math.max(0, book.value!.total_chapters - 1)), restored.offset, () => {
+      earlyPersist = persistLocal().catch(() => undefined)
+    })) return
     check()
+    if (earlyPersist) await earlyPersist
     if (!restored.dirty && !offline.value && current.char_offset === 0 && current.chapter_ratio > 0) {
       const adjusted = await api.progress(requestedBook, signal)
       check()
