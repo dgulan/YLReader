@@ -1,8 +1,13 @@
 name: frontend
+
 on:
   push:
     branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
@@ -20,6 +25,9 @@ jobs:
       redis:
         image: redis:7-alpine
         ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
       REDIS_ADDR: 127.0.0.1:6379
@@ -31,6 +39,7 @@ jobs:
       E2E_USERNAME: reader-ci
       E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
       E2E_API_TARGET: http://127.0.0.1:8080
+      E2E_READING_PREVIEW: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,7 +53,7 @@ jobs:
           cache-dependency-path: backend/go.sum
       - name: Create temporary test credentials
         run: |
-          python - <<'PY'
+          python3 - <<'PY'
           import os, secrets, base64
           password = secrets.token_urlsafe(24)
           values = {'JWT_SECRET': secrets.token_hex(32), 'YREADER_HEADER_KEY_primary': base64.b64encode(secrets.token_bytes(32)).decode(), 'SEED_PASSWORD': password, 'E2E_PASSWORD': password}
@@ -55,7 +64,7 @@ jobs:
               f.write('STORAGE_DIR=' + os.path.join(os.environ['RUNNER_TEMP'], 'yreader-storage') + '\n')
           PY
       - name: Initialize isolated database
-        run: python scripts/check-db-target.py --mode migrate && psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f docs/schema.sql
+        run: python3 scripts/check-db-target.py --mode migrate && psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f docs/schema.sql
       - name: Check database version
         working-directory: backend
         run: go run ./cmd/migrator schema check
@@ -70,13 +79,17 @@ jobs:
         run: npm run type-check && npm test && npm run build
       - name: Start test backend
         run: |
+          mkdir -p "$STORAGE_DIR"
           cd backend
-          go build -o "$RUNNER_TEMP/yreader-ci" ./cmd/server
+          go build -mod=readonly -buildvcs=false -o "$RUNNER_TEMP/yreader-ci" ./cmd/server
           nohup "$RUNNER_TEMP/yreader-ci" > "$RUNNER_TEMP/yreader-ci.log" 2>&1 &
-          timeout 45 bash -c 'until curl --fail --silent http://127.0.0.1:8080/readyz; do sleep 1; done'
+          if ! timeout 45 bash -c 'until curl --fail --silent http://127.0.0.1:8080/readyz; do sleep 1; done'; then
+            cat "$RUNNER_TEMP/yreader-ci.log" || true
+            exit 1
+          fi
       - name: Install browser
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: npx --no-install playwright install --with-deps chromium
       - name: Browser main flows
         working-directory: frontend
         run: npm run test:e2e
@@ -85,3 +98,4 @@ jobs:
         with:
           name: frontend-failure-screenshots
           path: frontend/test-results
+          if-no-files-found: ignore

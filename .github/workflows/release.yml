@@ -25,7 +25,13 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Verify 16 frozen contract hashes and backup contract
-        run: python3 scripts/verify-backup-contract.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .toolchain
+          python3 -m venv .toolchain/contract-venv
+          .toolchain/contract-venv/bin/pip install --no-cache-dir --quiet jsonschema
+          .toolchain/contract-venv/bin/python scripts/verify-backup-contract.py
       - name: Verify 43 OpenAPI operationIds and DB target guard
         run: |
           python3 scripts/test-db-guard.py
@@ -41,28 +47,34 @@ jobs:
           docker compose -f docker-compose.yml --env-file scripts/compose-check.env config --quiet
           docker compose -f docker-compose.prod.yml --env-file scripts/compose-check.env config --quiet
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+        shell: bash
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Scan Go targets for linux/amd64 and linux/arm64
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p security-reports
           cd backend
+          status=0
           for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/server -scan module 2>&1 | tee "../security-reports/go-server-$arch.txt"
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/migrator -scan module 2>&1 | tee "../security-reports/go-migrator-$arch.txt"
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -show verbose ./... 2>&1 | tee "../security-reports/go-all-$arch.txt"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/server -scan module 2>&1 | tee "../security-reports/go-server-$arch.txt" || status=1
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/migrator -scan module 2>&1 | tee "../security-reports/go-migrator-$arch.txt" || status=1
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -show verbose ./... 2>&1 | tee "../security-reports/go-all-$arch.txt" || status=1
           done
+          exit "$status"
       - name: Audit frontend dependencies
+        if: "!cancelled()"
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p security-reports
           cd frontend
-          npm audit --package-lock-only --json > ../security-reports/npm-audit.json
+          npm audit --package-lock-only --json > ../security-reports/npm-audit.json || true
           npm audit --package-lock-only --audit-level=moderate
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: "!cancelled()"
         with:
           name: release-security-reports
           path: security-reports
@@ -191,20 +203,25 @@ jobs:
           npm run build
       - name: Start isolated test backend
         run: |
+          mkdir -p "$STORAGE_DIR"
           cd backend
           go build -mod=readonly -buildvcs=false -o "$RUNNER_TEMP/yreader-ci" ./cmd/server
           nohup "$RUNNER_TEMP/yreader-ci" > "$RUNNER_TEMP/yreader-ci.log" 2>&1 &
-          timeout 45 bash -c 'until curl --fail --silent http://127.0.0.1:8080/readyz; do sleep 1; done'
+          if ! timeout 45 bash -c 'until curl --fail --silent http://127.0.0.1:8080/readyz; do sleep 1; done'; then
+            cat "$RUNNER_TEMP/yreader-ci.log" || true
+            exit 1
+          fi
       - name: Install Playwright browser and run E2E suite
         working-directory: frontend
         run: |
-          npx playwright install --with-deps chromium
+          npx --no-install playwright install --with-deps chromium
           npm run test:e2e
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
           name: release-e2e-failure-artifacts
           path: frontend/test-results
+          if-no-files-found: ignore
 
   cli-binaries:
     runs-on: ubuntu-latest
@@ -320,7 +337,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release-assets/ylreader-linux-*.tar.gz release-assets/SHA256SUMS release-assets/IMAGES_SHA256SUMS \
-            --title "YLReader ${GITHUB_REF_NAME}" \
-            --generate-notes
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" \
+              release-assets/ylreader-linux-*.tar.gz release-assets/SHA256SUMS release-assets/IMAGES_SHA256SUMS \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              release-assets/ylreader-linux-*.tar.gz release-assets/SHA256SUMS release-assets/IMAGES_SHA256SUMS \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "YLReader ${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
