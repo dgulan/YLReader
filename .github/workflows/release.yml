@@ -319,6 +319,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: release-*
       - name: Assemble SHA256SUMS and verify CLI release bundles
         shell: bash
         run: |
