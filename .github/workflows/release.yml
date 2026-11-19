@@ -1,0 +1,326 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts-and-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify 16 frozen contract hashes and backup contract
+        run: python3 scripts/verify-backup-contract.py
+      - name: Verify 43 OpenAPI operationIds and DB target guard
+        run: |
+          python3 scripts/test-db-guard.py
+          python3 - <<'PY'
+          import pathlib, re
+          text = pathlib.Path('docs/openapi.yaml').read_text(encoding='utf-8')
+          ops = re.findall(r'^\s+operationId:\s*([A-Za-z0-9_]+)\s*$', text, re.M)
+          assert len(ops) == 43 and len(set(ops)) == 43, f'unexpected operationId count: {len(ops)}'
+          print('43 unique OpenAPI operationIds verified')
+          PY
+      - name: Validate Compose definitions (dev and prod)
+        run: |
+          docker compose -f docker-compose.yml --env-file scripts/compose-check.env config --quiet
+          docker compose -f docker-compose.prod.yml --env-file scripts/compose-check.env config --quiet
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: Scan Go targets for linux/amd64 and linux/arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          cd backend
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/server -scan module 2>&1 | tee "../security-reports/go-server-$arch.txt"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -C cmd/migrator -scan module 2>&1 | tee "../security-reports/go-migrator-$arch.txt"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" govulncheck -show verbose ./... 2>&1 | tee "../security-reports/go-all-$arch.txt"
+          done
+      - name: Audit frontend dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          cd frontend
+          npm audit --package-lock-only --json > ../security-reports/npm-audit.json
+          npm audit --package-lock-only --audit-level=moderate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-security-reports
+          path: security-reports
+
+  backend-race-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: yreader_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CGO_ENABLED: '1'
+      TEST_DATABASE_URL: 'host=127.0.0.1 port=5432 user=postgres password=postgres dbname=yreader_test sslmode=disable'
+      REDIS_ADDR: '127.0.0.1:6379'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Apply schema and verify migration baseline
+        run: |
+          psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -q -f docs/schema.sql
+          cd backend
+          DATABASE_URL="postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable" go run ./cmd/migrator schema check
+      - name: Check formatting and go vet
+        working-directory: backend
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet -mod=readonly -buildvcs=false -tags=integration ./...
+      - name: Run full backend test suite with -race
+        working-directory: backend
+        run: go test -mod=readonly -buildvcs=false -race -tags=integration -p 1 -parallel 1 -timeout 300s -count=1 ./...
+      - name: Run 100-concurrency benchmark with -race and goleak verification
+        working-directory: backend
+        run: |
+          go test -mod=readonly -buildvcs=false -race -tags=integration -timeout 120s -v -run TestConcurrencyReadAndRelocate_NoGoroutineLeak ./internal/api
+          go test -mod=readonly -buildvcs=false -tags=integration -timeout 120s -bench=BenchmarkConcurrencyContentRead100 -benchtime=3x -run='^$' ./internal/api
+
+  frontend-and-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: yreader_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
+      REDIS_ADDR: 127.0.0.1:6379
+      REDIS_URL: redis://127.0.0.1:6379/0
+      ENVIRONMENT: production
+      PORT: '8080'
+      YREADER_HEADER_KEY_KID: primary
+      SEED_USERNAME: reader-ci
+      E2E_USERNAME: reader-ci
+      E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/yreader_test?sslmode=disable
+      E2E_API_TARGET: http://127.0.0.1:8080
+      E2E_READING_PREVIEW: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Generate temporary E2E credentials
+        run: |
+          python3 - <<'PY'
+          import os, secrets, base64
+          pw = secrets.token_urlsafe(24)
+          vals = {
+              'JWT_SECRET': secrets.token_hex(32),
+              'YREADER_HEADER_KEY_primary': base64.b64encode(secrets.token_bytes(32)).decode(),
+              'SEED_PASSWORD': pw,
+              'E2E_PASSWORD': pw,
+          }
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              for k, v in vals.items():
+                  print('::add-mask::' + v)
+                  f.write(f'{k}={v}\n')
+              f.write(f"STORAGE_DIR={os.path.join(os.environ['RUNNER_TEMP'], 'yreader-storage')}\n")
+          PY
+      - name: Initialize isolated database
+        run: python3 scripts/check-db-target.py --mode migrate && psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f docs/schema.sql
+      - name: Install and verify frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run generate:api
+          git diff --exit-code -- src/api/schema.d.ts
+          npm run type-check
+          npm test
+          npm run build
+      - name: Start isolated test backend
+        run: |
+          cd backend
+          go build -mod=readonly -buildvcs=false -o "$RUNNER_TEMP/yreader-ci" ./cmd/server
+          nohup "$RUNNER_TEMP/yreader-ci" > "$RUNNER_TEMP/yreader-ci.log" 2>&1 &
+          timeout 45 bash -c 'until curl --fail --silent http://127.0.0.1:8080/readyz; do sleep 1; done'
+      - name: Install Playwright browser and run E2E suite
+        working-directory: frontend
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: release-e2e-failure-artifacts
+          path: frontend/test-results
+
+  cli-binaries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+      - name: Build static Linux binaries (${{ matrix.arch }})
+        working-directory: backend
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          out="../dist-cli/ylreader-linux-${GOARCH}"
+          mkdir -p "$out"
+          go build -mod=readonly -buildvcs=false -trimpath -ldflags="-s -w" -o "$out/ylreader-server" ./cmd/server
+          go build -mod=readonly -buildvcs=false -trimpath -ldflags="-s -w" -o "$out/ylreader-migrator" ./cmd/migrator
+          go build -mod=readonly -buildvcs=false -trimpath -ldflags="-s -w" -o "$out/ylreader-sandboxworker" ./cmd/sandboxworker
+          go build -mod=readonly -buildvcs=false -trimpath -ldflags="-s -w" -o "$out/ylreader-backup" ./cmd/backup
+          tar -C ../dist-cli -czf "../dist-cli/ylreader-linux-${GOARCH}.tar.gz" "ylreader-linux-${GOARCH}"
+          cd ../dist-cli
+          sha256sum "ylreader-linux-${GOARCH}.tar.gz" > "ylreader-linux-${GOARCH}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-cli-linux-${{ matrix.arch }}
+          path: |
+            dist-cli/ylreader-linux-${{ matrix.arch }}.tar.gz
+            dist-cli/ylreader-linux-${{ matrix.arch }}.tar.gz.sha256
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend, worker]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build production image (${{ matrix.component }} / linux/${{ matrix.arch }})
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.component == 'worker' && 'backend' || matrix.component }}
+          file: ./${{ matrix.component == 'worker' && 'backend/Dockerfile.sandboxworker' || format('{0}/Dockerfile', matrix.component) }}
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          push: false
+          tags: ylreader-release:${{ matrix.component }}-${{ matrix.arch }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+      - name: Scan image with Trivy (all severities, fail on any finding)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          image-ref: ylreader-release:${{ matrix.component }}-${{ matrix.arch }}
+          format: json
+          output: trivy-${{ matrix.component }}-${{ matrix.arch }}.json
+          exit-code: '1'
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: 'false'
+          version: v0.76.2
+      - name: Export image tarball and SHA-256 checksum
+        run: |
+          set -euo pipefail
+          mkdir -p dist-images
+          tar_name="ylreader-image-${{ matrix.component }}-linux-${{ matrix.arch }}.tar.gz"
+          docker save "ylreader-release:${{ matrix.component }}-${{ matrix.arch }}" | gzip > "dist-images/${tar_name}"
+          (cd dist-images && sha256sum "${tar_name}" > "${tar_name}.sha256")
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-image-${{ matrix.component }}-${{ matrix.arch }}
+          path: |
+            trivy-${{ matrix.component }}-${{ matrix.arch }}.json
+            dist-images/ylreader-image-${{ matrix.component }}-linux-${{ matrix.arch }}.tar.gz.sha256
+
+  release-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [contracts-and-security, backend-race-integration, frontend-and-e2e, cli-binaries, images]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble SHA256SUMS and verify CLI release bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find artifacts -type f -name 'ylreader-linux-*.tar.gz*' -exec cp {} release-assets/ \;
+          find artifacts -type f -name 'ylreader-image-*.sha256' -exec cat {} + | sort -u > release-assets/IMAGES_SHA256SUMS
+          cd release-assets
+          cat ylreader-linux-*.tar.gz.sha256 | sort -u > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ylreader-release-assets
+          path: release-assets
+      - name: Publish GitHub Release for v* tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            release-assets/ylreader-linux-*.tar.gz release-assets/SHA256SUMS release-assets/IMAGES_SHA256SUMS \
+            --title "YLReader ${GITHUB_REF_NAME}" \
+            --generate-notes

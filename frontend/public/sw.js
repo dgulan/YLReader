@@ -83,7 +83,11 @@ self.addEventListener('fetch', event => {
         })
         .catch(async () => {
           const cache = await caches.open(CACHE_NAME)
-          return (await cache.match('/index.html')) || (await cache.match('/')) || Response.error()
+          return (
+            (await cache.match('/index.html', { ignoreVary: true })) ||
+            (await cache.match('/', { ignoreVary: true })) ||
+            Response.error()
+          )
         }),
     )
     return
@@ -91,7 +95,7 @@ self.addEventListener('fetch', event => {
 
   event.respondWith(
     caches.open(CACHE_NAME).then(async cache => {
-      const hit = await cache.match(request)
+      const hit = await cache.match(request, { ignoreVary: true })
       if (hit) return hit
       const response = await fetch(request)
       if (isCacheableResponse(response)) {
