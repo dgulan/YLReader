@@ -26,6 +26,9 @@ frontend/test-results/
 frontend/playwright-report/
 frontend/.test-artifacts/
 
+# Synology Drive local sync metadata
+.SynologyWorkingDirectory/
+
 __pycache__/
 data/
 .env
