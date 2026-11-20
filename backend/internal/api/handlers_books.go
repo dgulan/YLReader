@@ -78,6 +78,7 @@ func (s *Server) AddBook(w http.ResponseWriter, r *http.Request, _ AddBookParams
 		Author:   author,
 		SourceID: req.SourceId,
 		BookURL:  req.BookUrl,
+		CoverURL: req.CoverUrl,
 	})
 	if err != nil {
 		writeError(w, r, err)

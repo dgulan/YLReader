@@ -32,15 +32,15 @@ jobs:
           python3 -m venv .toolchain/contract-venv
           .toolchain/contract-venv/bin/pip install --no-cache-dir --quiet jsonschema
           .toolchain/contract-venv/bin/python scripts/verify-backup-contract.py
-      - name: Verify 43 OpenAPI operationIds and DB target guard
+      - name: Verify 44 OpenAPI operationIds and DB target guard
         run: |
           python3 scripts/test-db-guard.py
           python3 - <<'PY'
           import pathlib, re
           text = pathlib.Path('docs/openapi.yaml').read_text(encoding='utf-8')
           ops = re.findall(r'^\s+operationId:\s*([A-Za-z0-9_]+)\s*$', text, re.M)
-          assert len(ops) == 43 and len(set(ops)) == 43, f'unexpected operationId count: {len(ops)}'
-          print('43 unique OpenAPI operationIds verified')
+          assert len(ops) == 44 and len(set(ops)) == 44, f'unexpected operationId count: {len(ops)}'
+          print('44 unique OpenAPI operationIds verified')
           PY
       - name: Validate Compose definitions (dev and prod)
         run: |

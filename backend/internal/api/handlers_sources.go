@@ -14,6 +14,7 @@ import (
 
 	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/repository"
+	"yreader/backend/internal/service"
 )
 
 // ListSources 处理 GET /sources。
@@ -211,6 +212,69 @@ func (s *Server) ImportSources(w http.ResponseWriter, r *http.Request, _ ImportS
 		item := ImportFailure{Index: f.Index, Reason: f.Message}
 		if url != "" {
 			item.BookSourceUrl = &url
+		}
+		failed = append(failed, item)
+	}
+	writeJSON(w, http.StatusOK, ImportResult{
+		DryRun:   dryRun,
+		Imported: rep.Success,
+		Skipped:  rep.Skipped,
+		Updated:  rep.Updated,
+		Failed:   failed,
+	})
+}
+
+// ImportSourcesFromUrl 处理 POST /sources/import-url（受 SSRF 防护抓取远程 JSON，复用导入与预检管线）。
+func (s *Server) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, _ ImportSourcesFromUrlParams) {
+	uid := userIDFrom(r.Context())
+
+	var req ImportURLRequest
+	if err := decodeJSON(w, r, &req, "url"); err != nil {
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+		return
+	}
+	if err := validateSourceURL(req.Url); err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	rawData, err := s.Sources.FetchSourcesFromURL(r.Context(), req.Url)
+	if err != nil {
+		if errors.Is(err, service.ErrImportPayloadTooLarge) {
+			writeErrorCode(w, r, http.StatusRequestEntityTooLarge, "payload_too_large")
+			return
+		}
+		writeError(w, r, err)
+		return
+	}
+
+	sources, err := parseImportPayload(rawData)
+	if err != nil || len(sources) > 5000 {
+		writeErrorCode(w, r, http.StatusUnprocessableEntity, "validation_error")
+		return
+	}
+
+	overwrite := "skip"
+	if req.Overwrite != nil {
+		overwrite = string(*req.Overwrite)
+	}
+	dryRun := req.DryRun != nil && *req.DryRun
+
+	rep, err := s.Sources.Import(r.Context(), uid, sources, repository.ImportOptions{
+		Overwrite: overwrite,
+		DryRun:    dryRun,
+	})
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+
+	failed := make([]ImportFailure, 0, len(rep.Failures))
+	for _, f := range rep.Failures {
+		u := f.URL
+		item := ImportFailure{Index: f.Index, Reason: f.Message}
+		if u != "" {
+			item.BookSourceUrl = &u
 		}
 		failed = append(failed, item)
 	}

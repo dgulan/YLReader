@@ -4,12 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/repository"
 )
+
+const (
+	maxRemoteSourceURLBytes     = 2048
+	maxRemoteSourcePayloadBytes = 32 << 20
+)
+
+// ErrImportPayloadTooLarge 表示远程书源响应体超出 32 MiB 上限。
+var ErrImportPayloadTooLarge = errors.New("service: remote source payload too large")
 
 // 搜索/调试用例的合成错误：用于把「书源不存在」「书源被禁用」变成
 // failures[] 里的独立条目，而不是整体失败。
@@ -23,6 +34,7 @@ type SourceService struct {
 	pool    *pgxpool.Pool
 	sources *repository.SourceRepository
 	ie      *repository.ImportExportRepository
+	ft      Fetcher
 }
 
 // NewSourceService 构造书源服务。
@@ -32,6 +44,41 @@ func NewSourceService(pool *pgxpool.Pool) *SourceService {
 		sources: repository.NewSourceRepository(),
 		ie:      repository.NewImportExportRepository(),
 	}
+}
+
+// WithFetcher 注入受 SSRF 防护的 HTTP 客户端，用于远程 URL 导入书源。
+func (s *SourceService) WithFetcher(ft Fetcher) *SourceService {
+	s.ft = ft
+	return s
+}
+
+// FetchSourcesFromURL 通过受 SSRF 防护的 Fetcher 抓取远程书源 JSON 文本。
+func (s *SourceService) FetchSourcesFromURL(ctx context.Context, rawURL string) (string, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" || len(trimmed) > maxRemoteSourceURLBytes {
+		return "", fmt.Errorf("%w: invalid source import url", repository.ErrInvalidArgument)
+	}
+	if err := validateHTTPURL(trimmed); err != nil {
+		return "", err
+	}
+	if s.ft == nil {
+		return "", fmt.Errorf("%w: remote fetcher unavailable", fetcher.ErrUpstreamError)
+	}
+	resp, err := s.ft.Get(ctx, trimmed, nil)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil || resp.StatusCode >= 400 {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		return "", fmt.Errorf("%w: upstream status %d", fetcher.ErrUpstreamError, status)
+	}
+	if len(resp.Body) > maxRemoteSourcePayloadBytes {
+		return "", ErrImportPayloadTooLarge
+	}
+	return string(resp.Body), nil
 }
 
 // List 分页检索书源。

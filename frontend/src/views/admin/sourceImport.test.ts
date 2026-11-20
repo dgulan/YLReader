@@ -34,3 +34,16 @@ it('does not let an old preview authorize edited input', async () => {
   const old = state.importText(true); state.text.value = '[{}]'; finish(report); await old
   expect(state.dryRun.value).toBeUndefined(); await state.importText(false); expect(send).toHaveBeenCalledTimes(1)
 })
+it('previews and imports online book sources from URL via importSourcesFromUrl', async () => {
+  const state = setup()
+  const sendUrl = vi.spyOn(api, 'importSourcesFromUrl').mockResolvedValue(report)
+  state.sourceUrl.value = 'https://example.com/sources.json'
+  expect(state.canPreviewUrl.value).toBe(true)
+  await state.importUrl(true)
+  expect(state.canCommitUrl.value).toBe(true)
+  await state.importUrl(false)
+  expect(sendUrl.mock.calls).toEqual([
+    ['https://example.com/sources.json', true],
+    ['https://example.com/sources.json', false],
+  ])
+})

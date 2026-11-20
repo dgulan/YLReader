@@ -103,9 +103,9 @@ def run_step(
 def check_openapi_operation_ids() -> int:
     text = (ROOT / "docs" / "openapi.yaml").read_text(encoding="utf-8")
     ops = re.findall(r"^\s+operationId:\s*([A-Za-z0-9_]+)\s*$", text, re.MULTILINE)
-    if len(ops) != 43 or len(set(ops)) != 43:
-        raise RuntimeError(f"Expected 43 unique OpenAPI operationIds, got {len(ops)} ({len(set(ops))} unique)")
-    print(f"[PASS] openapi-operation-ids (43 unique operationIds verified)", flush=True)
+    if len(ops) != 44 or len(set(ops)) != 44:
+        raise RuntimeError(f"Expected 44 unique OpenAPI operationIds, got {len(ops)} ({len(set(ops))} unique)")
+    print(f"[PASS] openapi-operation-ids (44 unique operationIds verified)", flush=True)
     return len(ops)
 
 

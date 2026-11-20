@@ -128,6 +128,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sources/import-url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 从远程 URL 抓取并导入 Legado 书源 JSON（受 SSRF 保护，不执行任何规则）
+         * @description 由服务端经受 SSRF 保护的 HTTP 客户端拉取远程书源 JSON，解析并导入 Legado 书源数组，按 dry_run 参数决定是否落库。
+         */
+        post: operations["importSourcesFromUrl"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sources/export": {
         parameters: {
             query?: never;
@@ -916,6 +936,20 @@ export interface components {
              */
             overwrite: "skip" | "update";
         };
+        ImportURLRequest: {
+            /**
+             * Format: uri
+             * @description 远程书源 JSON 地址（仅允许公开 http/https）
+             */
+            url: string;
+            /** @default false */
+            dry_run: boolean;
+            /**
+             * @default skip
+             * @enum {string}
+             */
+            overwrite: "skip" | "update";
+        };
         ImportFailure: {
             index: number;
             book_source_url?: string;
@@ -1043,6 +1077,7 @@ export interface components {
             /** @description MVP 必填；使用搜索结果名称或用户输入名称 */
             name: string;
             author?: string;
+            cover_url?: string | null;
         };
         BookUpdate: {
             version: number;
@@ -1640,6 +1675,38 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             413: components["responses"]["PayloadTooLarge"];
             422: components["responses"]["UnprocessableEntity"];
+        };
+    };
+    importSourcesFromUrl: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description 可选请求幂等键。服务端校验格式（8-128 字符）并在日志中记录以供链路追踪；当前批次不进行强幂等去重，防重依赖单书在途任务拦截（同书同类型 queued/running 响应 409）。 */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImportURLRequest"];
+            };
+        };
+        responses: {
+            /** @description 导入结果（dry_run 时仅报告） */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImportResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
+            413: components["responses"]["PayloadTooLarge"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["ServerError"];
         };
     };
     exportSources: {

@@ -77,3 +77,32 @@ it('cancels pending GETs on early document teardown without preventing navigatio
   await nextTick(); await nextTick()
   expect(host.querySelector('[title="synthetic-cancel"]')).toBeNull()
 })
+it('renders book cover image when cover_url is present and falls back on error', async () => {
+  vi.spyOn(api, 'books').mockResolvedValue({
+    items: [{
+      id: 'b1',
+      book_type: 'online',
+      name: '带封面书',
+      author: '作者甲',
+      cover_url: 'https://img.example/cover1.jpg',
+      status: 'serializing',
+      total_chapters: 12,
+      needs_source: false,
+      override_count: 0,
+      version: 1,
+      created_at: '',
+      updated_at: '',
+    }],
+    total: 1,
+    page: 1,
+    page_size: 20,
+  } as Model<'BookPage'>)
+  await mount()
+  await vi.waitFor(() => expect(host.querySelector('img.book-cover-img')).not.toBeNull())
+  const img = host.querySelector<HTMLImageElement>('img.book-cover-img')!
+  expect(img.getAttribute('src')).toBe('https://img.example/cover1.jpg')
+  img.dispatchEvent(new Event('error'))
+  await nextTick()
+  expect(host.querySelector('img.book-cover-img')).toBeNull()
+  expect(host.querySelector('.book-cover')?.textContent).toContain('带封面书')
+})

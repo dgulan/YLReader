@@ -129,8 +129,14 @@ const (
 
 // Defines values for ImportRequestOverwrite.
 const (
-	Skip   ImportRequestOverwrite = "skip"
-	Update ImportRequestOverwrite = "update"
+	ImportRequestOverwriteSkip   ImportRequestOverwrite = "skip"
+	ImportRequestOverwriteUpdate ImportRequestOverwrite = "update"
+)
+
+// Defines values for ImportURLRequestOverwrite.
+const (
+	ImportURLRequestOverwriteSkip   ImportURLRequestOverwrite = "skip"
+	ImportURLRequestOverwriteUpdate ImportURLRequestOverwrite = "update"
 )
 
 // Defines values for JobStatus.
@@ -285,8 +291,9 @@ type BookStatus string
 
 // BookCreate defines model for BookCreate.
 type BookCreate struct {
-	Author  *string `json:"author,omitempty"`
-	BookUrl string  `json:"book_url"`
+	Author   *string `json:"author,omitempty"`
+	BookUrl  string  `json:"book_url"`
+	CoverUrl *string `json:"cover_url"`
 
 	// Name MVP 必填；使用搜索结果名称或用户输入名称
 	Name     string             `json:"name"`
@@ -548,6 +555,18 @@ type ImportResult struct {
 	Skipped  int             `json:"skipped"`
 	Updated  int             `json:"updated"`
 }
+
+// ImportURLRequest defines model for ImportURLRequest.
+type ImportURLRequest struct {
+	DryRun    *bool                      `json:"dry_run,omitempty"`
+	Overwrite *ImportURLRequestOverwrite `json:"overwrite,omitempty"`
+
+	// Url 远程书源 JSON 地址（仅允许公开 http/https）
+	Url string `json:"url"`
+}
+
+// ImportURLRequestOverwrite defines model for ImportURLRequest.Overwrite.
+type ImportURLRequestOverwrite string
 
 // Job defines model for Job.
 type Job struct {
@@ -1110,6 +1129,12 @@ type ImportSourcesParams struct {
 	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
 }
 
+// ImportSourcesFromUrlParams defines parameters for ImportSourcesFromUrl.
+type ImportSourcesFromUrlParams struct {
+	// IdempotencyKey 可选请求幂等键。服务端校验格式（8-128 字符）并在日志中记录以供链路追踪；当前批次不进行强幂等去重，防重依赖单书在途任务拦截（同书同类型 queued/running 响应 409）。
+	IdempotencyKey *IdempotencyKey `json:"Idempotency-Key,omitempty"`
+}
+
 // LoginJSONRequestBody defines body for Login for application/json ContentType.
 type LoginJSONRequestBody = LoginRequest
 
@@ -1157,6 +1182,9 @@ type CreateSourceJSONRequestBody = SourceCreate
 
 // ImportSourcesJSONRequestBody defines body for ImportSources for application/json ContentType.
 type ImportSourcesJSONRequestBody = ImportRequest
+
+// ImportSourcesFromUrlJSONRequestBody defines body for ImportSourcesFromUrl for application/json ContentType.
+type ImportSourcesFromUrlJSONRequestBody = ImportURLRequest
 
 // UpdateSourceJSONRequestBody defines body for UpdateSource for application/json ContentType.
 type UpdateSourceJSONRequestBody = SourceUpdate
@@ -2148,6 +2176,9 @@ type ServerInterface interface {
 	// 导入 Legado 书源 JSON（不执行任何规则）
 	// (POST /sources/import)
 	ImportSources(w http.ResponseWriter, r *http.Request, params ImportSourcesParams)
+	// 从远程 URL 抓取并导入 Legado 书源 JSON（受 SSRF 保护，不执行任何规则）
+	// (POST /sources/import-url)
+	ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, params ImportSourcesFromUrlParams)
 	// 删除书源（关联书进入「待换源」状态）
 	// (DELETE /sources/{sourceId})
 	DeleteSource(w http.ResponseWriter, r *http.Request, sourceId SourceId)
@@ -2397,6 +2428,12 @@ func (_ Unimplemented) ExportSources(w http.ResponseWriter, r *http.Request, par
 // 导入 Legado 书源 JSON（不执行任何规则）
 // (POST /sources/import)
 func (_ Unimplemented) ImportSources(w http.ResponseWriter, r *http.Request, params ImportSourcesParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// 从远程 URL 抓取并导入 Legado 书源 JSON（受 SSRF 保护，不执行任何规则）
+// (POST /sources/import-url)
+func (_ Unimplemented) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, params ImportSourcesFromUrlParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -3854,6 +3891,52 @@ func (siw *ServerInterfaceWrapper) ImportSources(w http.ResponseWriter, r *http.
 	handler.ServeHTTP(w, r)
 }
 
+// ImportSourcesFromUrl operation middleware
+func (siw *ServerInterfaceWrapper) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, BearerAuthScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ImportSourcesFromUrlParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ImportSourcesFromUrl(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DeleteSource operation middleware
 func (siw *ServerInterfaceWrapper) DeleteSource(w http.ResponseWriter, r *http.Request) {
 
@@ -4207,6 +4290,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/sources/import", wrapper.ImportSources)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/sources/import-url", wrapper.ImportSourcesFromUrl)
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/sources/{sourceId}", wrapper.DeleteSource)

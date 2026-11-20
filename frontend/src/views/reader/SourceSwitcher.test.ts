@@ -50,3 +50,37 @@ it('does not reuse the opened account after session loss', async () => {
   expect(progress).toHaveBeenCalledTimes(1)
   expect(host.querySelector('dialog')!.open).toBe(false)
 })
+
+it('discovers standby sources via search refresh and binds mapping before preview', async () => {
+  app.unmount()
+  app = createApp({ render: () => h(SourceSwitcher, { bookId: book.value, bookName: '测试小说', ref: child }) })
+  app.mount(host)
+
+  vi.spyOn(api, 'mappings').mockResolvedValue([])
+  vi.spyOn(api, 'progress').mockResolvedValue({ version: 1 } as Model<'Progress'>)
+  vi.spyOn(api, 'search').mockResolvedValue({
+    keyword: '测试小说',
+    total: 1,
+    failures: [],
+    groups: [{
+      source_id: 'src-new',
+      source_name: '发现源A',
+      elapsed_ms: 120,
+      items: [{ source_id: 'src-new', book_url: 'https://a.example/1', name: '测试小说', latest_chapter: '第10章' }],
+    }],
+  } as Model<'SearchResponse'>)
+  const addMapping = vi.spyOn(api, 'addMapping').mockResolvedValue({
+    id: 'm1', source_id: 'src-new', source_name: '发现源A', book_url: 'https://a.example/1', sync_status: 'pending',
+  } as Model<'BookSourceMapping'>)
+  vi.spyOn(api, 'chapters').mockResolvedValue({} as Model<'ChapterList'>)
+  vi.spyOn(api, 'switchSource').mockResolvedValue({ source_id: 'src-new', chapter_index: 2, confidence: 0.9 } as Model<'SwitchSourceResult'>)
+
+  await child.value!.open(); await nextTick()
+  const button = (label: string) => [...host.querySelectorAll('button')].find(b => b.textContent?.includes(label))!
+  button('刷新书源').click()
+  await vi.waitFor(() => expect(host.textContent).toContain('发现源A'))
+  host.querySelector<HTMLElement>('[data-row="0"]')!.click()
+  await nextTick()
+  button('预览切换').click()
+  await vi.waitFor(() => expect(addMapping).toHaveBeenCalledWith('first', { source_id: 'src-new', book_url: 'https://a.example/1' }))
+})

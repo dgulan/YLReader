@@ -27,7 +27,7 @@
 |---|---|
 | docs/architecture.md | 037448ac1c9b82e7cf333e942783d725b2b38f63ca116ba91f5b583c9adf52a8 |
 | docs/schema.sql | fa26a8e596a4f2c89bd2ef9713ff1028aeb42925377c25ae26f957a165ba07b0 |
-| docs/openapi.yaml | a904704a38f3787cc1156965e041e8ea7a11aedf0db46cde2fe75468c720daf8 |
+| docs/openapi.yaml | a59d077adee7c5693b54ed233b25eca7cc54ddb8c256aa6025a5b1a95c7be0bc |
 | docs/research/1432433gg_reader-next.md | f47d1e87516b6980d86ed7a4b84f3db526770f422c4786b7aa1df5a2c65cb678 |
 | docs/research/changshengyu_openreader.md | 909606b90fe636aeac64ac0cd2e745d960915bba534a5bcae0c2e248778bcde8 |
 | docs/research/changshengyu_reader-dev.md | eaf8a857590c548a3a835c45309f5615f0c6d711afc8bb1649ef8caa8256d9fa |

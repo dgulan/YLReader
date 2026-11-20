@@ -209,7 +209,7 @@ func run() error {
 
 	srv := api.NewServer(api.Deps{
 		Auth:          authSvc,
-		Sources:       service.NewSourceService(pool),
+		Sources:       service.NewSourceService(pool).WithFetcher(ft),
 		Debug:         service.NewDebugService(pool, ft, sb),
 		Search:        service.NewSearchService(pool, ft, sb),
 		Books:         service.NewBookService(pool, storageProvider, log),

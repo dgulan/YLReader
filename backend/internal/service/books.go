@@ -23,6 +23,21 @@ type CreateBookInput struct {
 	Author   string
 	SourceID uuid.UUID
 	BookURL  string
+	CoverURL *string
+}
+
+func sanitizeCoverURL(raw *string) *string {
+	if raw == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*raw)
+	if trimmed == "" || len(trimmed) > 2048 {
+		return nil
+	}
+	if err := validateHTTPURL(trimmed); err != nil {
+		return nil
+	}
+	return &trimmed
 }
 
 // BookService 编排书架读写：v_bookshelf 分页、CRUD 与多源合并。
@@ -131,6 +146,7 @@ func (s *BookService) Create(ctx context.Context, userID uuid.UUID, in CreateBoo
 			NormalizedAuthor: normAuthor,
 			Name:             name,
 			Author:           author,
+			CoverURL:         sanitizeCoverURL(in.CoverURL),
 			Status:           repository.BookStatusUnknown,
 			ActiveSourceID:   &in.SourceID,
 			ActiveBookURL:    &bookURL,
