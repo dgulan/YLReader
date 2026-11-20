@@ -14,7 +14,9 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags=
 
 # ---- 运行阶段（alpine 自带 busybox wget，供 compose healthcheck 使用）----
 FROM alpine:3.24.4
-RUN apk add --no-cache 'zlib>=1.4-r0' ca-certificates tzdata && adduser -D -u 10001 yreader
+RUN apk upgrade --no-cache \
+    && apk add --no-cache 'zlib>=1.4-r0' ca-certificates tzdata \
+    && adduser -D -u 10001 yreader
 RUN mkdir -p /var/lib/yreader/storage && chown -R yreader:yreader /var/lib/yreader
 COPY --from=build /out/server /server
 COPY --from=build /out/migrator /migrator
