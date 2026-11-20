@@ -21,9 +21,10 @@
 ### 生产环境部署（`docker-compose.prod.yml`）
 
 ```bash
-# 下载源码归档（也可直接使用 git clone）
-curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.0.2.tar.gz | tar -xz
-cd YLReader-1.0.2
+# 下载并解压到固定目录 YLReader（后续升级覆盖同一目录即可，避免数据目录分散）
+mkdir -p YLReader
+curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.0.2.tar.gz | tar -xz --strip-components=1 -C YLReader
+cd YLReader
 
 # 1. 首次运行：自动生成 .env 并填充随机 JWT_SECRET（32B hex）和 YREADER_HEADER_KEY_primary（32B base64）
 chmod +x scripts/deploy.sh
@@ -36,6 +37,13 @@ chmod +x scripts/deploy.sh
 ./scripts/deploy.sh
 ```
 
+**常用 `.env` 可选配置：**
+
+```dotenv
+YLREADER_BIND_IP=127.0.0.1   # 局域网直连请改为 0.0.0.0
+YLREADER_HTTP_PORT=8080      # 按需修改访问端口
+```
+
 **访问方式说明：**
 
 - **默认安全绑定（`YLREADER_BIND_IP=127.0.0.1`）**：服务默认仅监听宿主机回环 `127.0.0.1:8080`，建议通过 TLS 反向代理对外提供 HTTPS，或在本地通过 SSH 隧道安全转发访问：
@@ -43,7 +51,7 @@ chmod +x scripts/deploy.sh
   ssh -N -L 8080:127.0.0.1:8080 <user>@<server-ip>
   # 随后在本地浏览器访问 http://127.0.0.1:8080
   ```
-- **局域网直连**：如需在家庭/内网直接通过服务器 IP 访问，将 `.env` 中的 `YLREADER_BIND_IP=127.0.0.1` 修改为 `YLREADER_BIND_IP=0.0.0.0`（并按需放行防火墙端口 `8080`），再执行 `./scripts/deploy.sh` 重建生效。
+- **局域网直连**：将 `.env` 中 `YLREADER_BIND_IP` 设为 `0.0.0.0`（并按需放行防火墙端口），再执行 `./scripts/deploy.sh` 重建生效。
 
 完整架构与受控升级、灾备恢复说明见 [docs/deployment.md](docs/deployment.md)。
 
