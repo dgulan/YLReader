@@ -23,7 +23,7 @@
 ```bash
 # 下载并解压到固定目录 YLReader（后续升级覆盖同一目录即可，避免数据目录分散）
 mkdir -p YLReader
-curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.0.2.tar.gz | tar -xz --strip-components=1 -C YLReader
+curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.1.0.tar.gz | tar -xz --strip-components=1 -C YLReader
 cd YLReader
 
 # 1. 首次运行：自动生成 .env 并填充随机 JWT_SECRET（32B hex）和 YREADER_HEADER_KEY_primary（32B base64）
