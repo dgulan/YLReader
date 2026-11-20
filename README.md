@@ -18,16 +18,34 @@
 
 ## 快速开始
 
-### 生产推荐（隔离沙箱 + 内网数据库）
+### 生产环境部署（`docker-compose.prod.yml`）
 
 ```bash
-cp .env.example .env
-# 编辑 .env，填写独立生成的 JWT_SECRET、YREADER_HEADER_KEY_primary、POSTGRES_PASSWORD、REDIS_PASSWORD 等密钥
-docker compose -f docker-compose.prod.yml config --quiet
-docker compose -f docker-compose.prod.yml up --build -d
+# 下载源码归档（也可直接使用 git clone）
+curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.0.2.tar.gz | tar -xz
+cd YLReader-1.0.2
+
+# 1. 首次运行：自动生成 .env 并填充随机 JWT_SECRET（32B hex）和 YREADER_HEADER_KEY_primary（32B base64）
+chmod +x scripts/deploy.sh
+./scripts/deploy.sh
+
+# 2. 按提示编辑 .env：填写 POSTGRES_PASSWORD、REDIS_PASSWORD、SEED_USERNAME、SEED_PASSWORD
+#    （国内构建可取消 .env 中 GOPROXY / NPM_REGISTRY 注释以加速依赖拉取）
+
+# 3. 再次运行：创建数据目录、启动 postgres/redis、执行 /migrator 迁移并后台拉起全部容器
+./scripts/deploy.sh
 ```
 
-> 请在 `frontend` 暴露的回环端口（默认 `127.0.0.1:8080`）前端配置 TLS 反向代理并启用 HSTS，详见 [docs/deployment.md](docs/deployment.md)。
+**访问方式说明：**
+
+- **默认安全绑定（`YLREADER_BIND_IP=127.0.0.1`）**：服务默认仅监听宿主机回环 `127.0.0.1:8080`，建议通过 TLS 反向代理对外提供 HTTPS，或在本地通过 SSH 隧道安全转发访问：
+  ```bash
+  ssh -N -L 8080:127.0.0.1:8080 <user>@<server-ip>
+  # 随后在本地浏览器访问 http://127.0.0.1:8080
+  ```
+- **局域网直连**：如需在家庭/内网直接通过服务器 IP 访问，将 `.env` 中的 `YLREADER_BIND_IP=127.0.0.1` 修改为 `YLREADER_BIND_IP=0.0.0.0`（并按需放行防火墙端口 `8080`），再执行 `./scripts/deploy.sh` 重建生效。
+
+完整架构与受控升级、灾备恢复说明见 [docs/deployment.md](docs/deployment.md)。
 
 ### 本地开发（`docker-compose.yml`）
 

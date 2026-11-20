@@ -1,12 +1,12 @@
 # YLReader 生产加固编排配方：
 # - 隔离的 sandboxworker-1 / sandboxworker-2 容器（network_mode: none, read_only, cap_drop: ALL, no-new-privileges, 256m/64 pids, 0700 IPC 卷）
 # - Postgres 与 Redis 仅接入 internal: true 私有网络，不暴露宿主端口且强制 .env 注入非默认口令
-# - frontend 仅绑定宿主回环端口，供外部 TLS 反向代理终止 HTTPS 并转发请求
+# - frontend 默认仅绑定宿主回环端口（可通过 YLREADER_BIND_IP / YLREADER_HTTP_PORT 调整）
 name: yreader
 
 services:
   sandboxworker-init:
-    image: alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+    image: alpine:3.24.4
     restart: "no"
     network_mode: "none"
     read_only: true
@@ -30,6 +30,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.sandboxworker
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       sandboxworker-init:
         condition: service_completed_successfully
@@ -57,6 +59,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.sandboxworker
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       sandboxworker-init:
         condition: service_completed_successfully
@@ -81,7 +85,10 @@ services:
     restart: unless-stopped
 
   app:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     read_only: true
     user: "10001:10001"
     cap_drop:
@@ -95,7 +102,7 @@ services:
       TZ: ${TZ:-UTC}
       ENVIRONMENT: production
       LOCAL_IMPORT_TIMEOUT: ${LOCAL_IMPORT_TIMEOUT:-90s}
-      YREADER_SANDBOX_SOCKETS: /run/worker-1/worker.sock,/run/worker-2/worker.sock
+      YREADER_SANDBOX_SOCKETS: ${YREADER_SANDBOX_SOCKETS:-/run/worker-1/worker.sock,/run/worker-2/worker.sock}
       YREADER_SANDBOX_INPUT_LIMIT_MB: ${YREADER_SANDBOX_INPUT_LIMIT_MB:-32}
       YREADER_SANDBOX_INFLIGHT_MB: ${YREADER_SANDBOX_INFLIGHT_MB:-64}
       YREADER_SANDBOX_MAX_CONCURRENT: ${YREADER_SANDBOX_MAX_CONCURRENT:-2}
@@ -132,7 +139,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     read_only: true
     cap_drop:
       - ALL
@@ -147,7 +157,7 @@ services:
       - /var/cache/nginx:rw,noexec,nosuid,size=32m
       - /var/run:rw,noexec,nosuid,size=8m
     ports:
-      - "127.0.0.1:${YLREADER_HTTP_PORT:-8080}:80"
+      - "${YLREADER_BIND_IP:-127.0.0.1}:${YLREADER_HTTP_PORT:-8080}:80"
     networks:
       - app_egress
     depends_on:

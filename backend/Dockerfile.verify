@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 # Linux race verification image, never used as a production runtime.
-FROM golang:1.26.11-alpine3.24@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb
+FROM golang:1.26.11-alpine3.24
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
 RUN apk add --no-cache build-base
 WORKDIR /src
 COPY go.mod go.sum ./
