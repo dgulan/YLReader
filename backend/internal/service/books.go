@@ -313,7 +313,7 @@ var (
 	metaCoverFirst   = regexp.MustCompile(`(?is)<meta\b[^>]*\bproperty\s*=\s*["'](?:og:image(?::url)?|twitter:image)["'][^>]*\bcontent\s*=\s*["']([^"']+)["']`)
 	metaContentFirst = regexp.MustCompile(`(?is)<meta\b[^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*\bproperty\s*=\s*["'](?:og:image(?::url)?|twitter:image)["']`)
 	// 常见书封 <img>：class/id 含 cover/bookimg/book-img/pic，src 可在前或在后。
-	imgCoverFirst   = regexp.MustCompile(`(?is)<img\b[^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["'][^>]*\bsrc\s*=\s*["']([^"']+)["']`)
+	imgCoverFirst    = regexp.MustCompile(`(?is)<img\b[^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["'][^>]*\bsrc\s*=\s*["']([^"']+)["']`)
 	imgSrcCoverFirst = regexp.MustCompile(`(?is)<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["']`)
 )
 
