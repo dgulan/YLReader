@@ -83,6 +83,11 @@ func (s *DebugService) resolveInput(ctx context.Context, src *repository.BookSou
 	if rawURL != nil && strings.TrimSpace(*rawURL) != "" {
 		target = strings.TrimSpace(*rawURL)
 	}
+	// 与导入书源共用同一套入参层预检：拒绝非 http(s)、userinfo、非法端口与
+	// 内网/环回 IP 字面量；域名仍由 fetcher 在连接阶段按真实 IP 兜底。
+	if err := ValidateSourceURL(target); err != nil {
+		return "", err
+	}
 	resp, err := s.ft.Get(ctx, target, scopeHeadersForTarget(src.BookSourceURL, target, parseSourceHeaders(src.Header)))
 	if err != nil {
 		return "", err

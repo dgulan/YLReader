@@ -212,7 +212,7 @@ func run() error {
 		Sources:       service.NewSourceService(pool).WithFetcher(ft),
 		Debug:         service.NewDebugService(pool, ft, sb),
 		Search:        service.NewSearchService(pool, ft, sb),
-		Books:         service.NewBookService(pool, storageProvider, log),
+		Books:         service.NewBookService(pool, storageProvider, log).WithFetcher(ft, sb),
 		Progress:      service.NewProgressService(pool),
 		Mapping:       service.NewMappingService(pool),
 		Overrides:     service.NewOverrideService(pool).WithContent(contentSvc),

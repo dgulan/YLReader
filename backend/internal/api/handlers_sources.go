@@ -5,14 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/netip"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
 
-	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/repository"
 	"yreader/backend/internal/service"
 )
@@ -317,27 +313,8 @@ func (s *Server) ExportSources(w http.ResponseWriter, r *http.Request, params Ex
 }
 
 func validateSourceURL(raw string) error {
-	raw = strings.TrimSpace(raw)
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || u.Hostname() == "" {
-		return fmt.Errorf("%w: invalid book_source_url", repository.ErrInvalidArgument)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%w: book_source_url must be http(s)", repository.ErrInvalidArgument)
-	}
-	if port := u.Port(); port != "" {
-		n, e := strconv.Atoi(port)
-		if e != nil || n < 1 || n > 65535 {
-			return repository.ErrInvalidArgument
-		}
-	} else if strings.HasSuffix(u.Host, ":") {
-		return repository.ErrInvalidArgument
-	}
-	// 入参层仅对 IP 字面量做 SSRF 预检；域名留给 fetcher.DialContext 抓取期兜底。
-	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && fetcher.IsBlockedIP(ip) {
-		return fetcher.ErrSSRFBlocked
-	}
-	return nil
+	// 与调试接口 resolveInput 共用同一套预检，避免两条入口规则漂移。
+	return service.ValidateSourceURL(raw)
 }
 
 func applySourceCreate(dst *repository.BookSource, req SourceCreate) {

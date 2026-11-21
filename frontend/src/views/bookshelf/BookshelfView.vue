@@ -37,7 +37,14 @@ function isBookInShelf(item: Model<'SearchBook'>): boolean {
 }
 function coverSrc(book: Model<'Book'>): string {
   if (brokenCovers.value[book.id]) return ''
-  return (book.custom_cover_url || book.cover_url || '').trim()
+  let raw = (book.custom_cover_url || book.cover_url || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  // 过滤无效占位与内联数据，避免把 data:/about:blank 当成图片地址。
+  if (lower === 'about:blank' || lower.startsWith('data:')) return ''
+  // 协议相对地址（//host/x.jpg）补全 scheme，确保 <img> 能正常加载。
+  if (raw.startsWith('//')) raw = `https:${raw}`
+  return raw
 }
 let loadSerial = 0
 let loadController: AbortController | undefined

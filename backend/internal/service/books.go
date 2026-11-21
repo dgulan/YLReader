@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"yreader/backend/internal/engine/parser"
+	"yreader/backend/internal/engine/sandbox"
 	"yreader/backend/internal/pkg/storage"
 	"yreader/backend/internal/pkg/textnorm"
 	"yreader/backend/internal/repository"
@@ -50,6 +53,8 @@ type BookService struct {
 	sources  *repository.SourceRepository
 	storage  storage.Provider
 	log      *slog.Logger
+	ft       Fetcher
+	sb       *sandbox.Sandbox
 }
 
 // NewBookService 构造书架服务；storage 为 nil 时删除本地书不会清理文件。
@@ -67,6 +72,14 @@ func NewBookService(pool *pgxpool.Pool, st storage.Provider, log *slog.Logger) *
 		storage:  st,
 		log:      log,
 	}
+}
+
+// WithFetcher 注入 SSRF 安全的抓取器与规则沙箱，用于加入书架时补全详情封面。
+// 保持与 NewSearchService/NewDebugService 相同的依赖形态；未注入时自动补全静默跳过。
+func (s *BookService) WithFetcher(ft Fetcher, sb *sandbox.Sandbox) *BookService {
+	s.ft = ft
+	s.sb = sb
+	return s
 }
 
 // ShelfList 单查询 v_bookshelf 分页（返回当前页 + total）。
@@ -111,6 +124,13 @@ func (s *BookService) Create(ctx context.Context, userID uuid.UUID, in CreateBoo
 		return nil, 0, fmt.Errorf("%w: source disabled", repository.ErrInvalidArgument)
 	}
 
+	// 入参未带封面时回源到书源详情页抓取真实封面；抓取失败不阻断加书，
+	// 前端会回退显示文字书封。抓取放在事务之前，避免网络请求长时间占用连接。
+	cover := sanitizeCoverURL(in.CoverURL)
+	if cover == nil {
+		cover = s.fetchBookCover(ctx, src, bookURL)
+	}
+
 	author := strings.TrimSpace(in.Author)
 	normName := textnorm.NormalizeBook(name)
 	normAuthor := textnorm.NormalizeAuthor(author)
@@ -124,6 +144,13 @@ func (s *BookService) Create(ctx context.Context, userID uuid.UUID, in CreateBoo
 	existing, err := s.books.FindByNormalized(ctx, tx, userID, normName, normAuthor)
 	switch {
 	case err == nil:
+		// 已存在的书若一直没有封面，用本次抓到的详情封面补全（不覆盖自定义封面）。
+		if existing.CoverURL == nil && cover != nil {
+			if uerr := s.books.UpdateCover(ctx, tx, userID, existing.ID, *cover); uerr != nil {
+				return nil, 0, uerr
+			}
+			existing.CoverURL = cover
+		}
 		m := &repository.BookSourceMapping{
 			BookID:     existing.ID,
 			SourceID:   in.SourceID,
@@ -146,7 +173,7 @@ func (s *BookService) Create(ctx context.Context, userID uuid.UUID, in CreateBoo
 			NormalizedAuthor: normAuthor,
 			Name:             name,
 			Author:           author,
-			CoverURL:         sanitizeCoverURL(in.CoverURL),
+			CoverURL:         cover,
 			Status:           repository.BookStatusUnknown,
 			ActiveSourceID:   &in.SourceID,
 			ActiveBookURL:    &bookURL,
@@ -223,4 +250,82 @@ func validateHTTPURL(raw string) error {
 		return fmt.Errorf("%w: invalid http(s) url", repository.ErrInvalidArgument)
 	}
 	return nil
+}
+
+// parseBookInfoCoverRule 读取书源详情页的封面规则：
+// 优先结构化 bookInfo.coverUrl，其次扁平 ruleBookInfoCoverUrl 与 ruleBookInfo.coverUrl。
+func parseBookInfoCoverRule(raw json.RawMessage) string {
+	var obj map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	return firstNonEmpty(
+		nestedText(obj, "bookInfo", "coverUrl"),
+		nestedText(obj, "bookInfo", "coverURL"),
+		rawText(obj, "ruleBookInfoCoverUrl"),
+		rawText(obj, "ruleBookInfoCoverURL"),
+		nestedText(obj, "ruleBookInfo", "coverUrl"),
+		nestedText(obj, "ruleBookInfo", "coverURL"),
+	)
+}
+
+// fetchBookCover 在加入书架时抓取书源详情页并解析封面规则；任何失败都返回 nil，
+// 由前端回退到文字书封，绝不让封面补全阻断加书主流程。
+func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSource, bookURL string) *string {
+	if s.ft == nil || s.sb == nil {
+		return nil
+	}
+	rule := parseBookInfoCoverRule(src.Rules)
+	if strings.TrimSpace(rule) == "" {
+		return nil
+	}
+	detailURL := resolveURL(src.BookSourceURL, bookURL)
+	if validateHTTPURL(detailURL) != nil {
+		return nil
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	fetchCtx = sourceFetchContext(fetchCtx, src)
+	headers := scopeHeadersForTarget(src.BookSourceURL, detailURL, parseSourceHeaders(src.Header))
+	resp, err := s.ft.Get(fetchCtx, detailURL, headers)
+	if err != nil || resp == nil || resp.StatusCode >= 400 {
+		return nil
+	}
+	base := strings.TrimSpace(resp.FinalURL)
+	if base == "" {
+		base = detailURL
+	}
+	engine := parser.New(s.sb)
+	engine.SetVariable("baseUrl", src.BookSourceURL)
+	raw, err := engine.Eval(fetchCtx, rule, string(resp.Body))
+	if err != nil {
+		return nil
+	}
+	return normalizeCoverURL(raw, base)
+}
+
+// normalizeCoverURL 规范化详情页封面：过滤占位/内联值，把相对路径与协议相对
+// URL（//host/x.jpg）按详情页真实地址补全为 http(s) 绝对地址。
+func normalizeCoverURL(raw, base string) *string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 2048 {
+		return nil
+	}
+	switch strings.ToLower(raw) {
+	case "null", "undefined", "none", "about:blank":
+		return nil
+	}
+	if strings.HasPrefix(strings.ToLower(raw), "data:") {
+		return nil
+	}
+	if strings.HasPrefix(raw, "//") {
+		if u, err := url.Parse(base); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
+			raw = u.Scheme + ":" + raw
+		}
+	}
+	resolved := resolveURL(base, raw)
+	if validateHTTPURL(resolved) != nil {
+		return nil
+	}
+	return &resolved
 }

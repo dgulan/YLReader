@@ -102,6 +102,9 @@ func New(cfg Config) *Fetcher {
 			},
 			TLSHandshakeTimeout:   cfg.TLSHandshakeTimeout,
 			ResponseHeaderTimeout: cfg.ResponseHeaderTimeout,
+			// 响应头上限：恶意书源可发送超大 header 迫使客户端分配无界内存。
+			// 与 browserassist 控制通道保持一致，限制为 64 KiB。
+			MaxResponseHeaderBytes: 64 << 10,
 			// 不使用代理，确保 DialContext 的 SSRF 判定始终作用于目标地址。
 			Proxy: nil,
 		},

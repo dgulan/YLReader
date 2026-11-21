@@ -146,6 +146,14 @@ func (r *BookRepository) UpdateActiveSource(ctx context.Context, q Querier, user
 	return nil
 }
 
+// UpdateCover 仅在 cover_url 仍为空时补全详情页抓取到的封面，绝不覆盖用户自定义封面
+// （custom_cover_url 在视图层优先）。
+func (r *BookRepository) UpdateCover(ctx context.Context, q Querier, userID, bookID uuid.UUID, coverURL string) error {
+	_, err := q.Exec(ctx, `UPDATE books SET cover_url = $1
+		WHERE user_id = $2 AND id = $3 AND cover_url IS NULL`, coverURL, userID, bookID)
+	return err
+}
+
 // BookPatch 是 PATCH /books/{id} 的可选字段集合。字段为 nil 表示保留旧值，
 // 为 &"" 表示清空。
 type BookPatch struct {

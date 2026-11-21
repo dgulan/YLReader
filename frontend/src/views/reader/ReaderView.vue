@@ -19,14 +19,14 @@ import { singleFlight, watchPageCheckpoint } from './checkpoint'
 import { withDeadline, RequestDeadlineError } from './deadline'
 import { detectHorizontalSwipe, type TouchPoint } from './touchNavigation'
 import { cacheRange, chapterPercent, clampLineHeight, loadLineHeight, saveLineHeight } from './lineHeight'
-const lineHeight = ref(loadLineHeight()), cacheNotice = ref(''), cacheChoice = ref('')
+const lineHeight = ref(loadLineHeight()), cacheNotice = ref(''), settingsOpen = ref(false)
+const themeOptions = [{ value: 'day', label: '日间' }, { value: 'night', label: '夜间' }, { value: 'paper', label: '羊皮纸' }, { value: 'green', label: '护眼' }]
 function changeLineHeight(delta: number) { void changeAppearance(() => { lineHeight.value = clampLineHeight(lineHeight.value + delta); saveLineHeight(lineHeight.value) }) }
-async function startCache(event: Event) {
-  const select = event.target as HTMLSelectElement, value = select.value; select.value = ''
-  if (!value || !book.value) return
-  const range = cacheRange(index.value, book.value.total_chapters, value === 'all' ? 'all' : Number(value))
+async function cacheChapters(count: number | 'all') {
+  if (!book.value) return
+  const range = cacheRange(index.value, book.value.total_chapters, count)
   cacheNotice.value = '正在提交缓存任务…'
-  try { await api.cacheBook(bookId.value, range); cacheNotice.value = `已提交缓存任务：第 ${range.from_chapter + 1}–${range.to_chapter + 1} 章` }
+  try { await api.cacheBook(bookId.value, range); cacheNotice.value = `已提交缓存任务：第 ${range.from_chapter + 1}–${range.to_chapter + 1} 章`; settingsOpen.value = false }
   catch (e) { cacheNotice.value = errorText(e) }
 }
 function toggleToolbar(event: MouseEvent) {
@@ -42,6 +42,8 @@ const index = ref(0), offset = ref(0), dirty = ref(false), loading = ref(true), 
 const viewport = ref<HTMLElement>(), body = ref<HTMLElement>(), drawer = ref<HTMLDialogElement>()
 const restoring = ref(false)
 const immersive = ref(false)
+// 当前章内的阅读进度（0–100），用于底部进度条；整书进度由 chapterPercent 计算。
+const chapterReadPercent = computed(() => content.value ? Math.round(chapterFraction(content.value.content, offset.value) * 100) : 0)
 const localFault = ref(false)
 let touchStart: TouchPoint | null = null
 function onTouchStart(event: TouchEvent) {
@@ -309,7 +311,16 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 </script>
 <template>
   <main class="reader" :data-theme="config.theme" :style="{ '--reader-size': config.fontSize + 'px', '--reader-line-height': lineHeight }">
-    <header v-show="!immersive" class="reader-header"><RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink><span>{{ book?.name ?? '阅读器' }}</span><button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button><button v-if="book?.book_type === 'online'" :disabled="loading || restoring || !content" @click="openOverride">{{ content?.is_overridden ? '单章覆盖中' : '单章换源' }}</button><button ref="bookmarkTrigger" :disabled="loading || restoring || !book" @click="openBookmarks">书签</button><label v-if="book?.book_type === 'online'" class="cache-picker">缓存<select aria-label="缓存章节" :value="cacheChoice" :disabled="loading || restoring || !book" @change="startCache"><option value="">选择…</option><option value="15">后 15 章</option><option value="50">后 50 章</option><option value="100">后 100 章</option><option value="all">后续全部</option></select></label><button ref="directoryTrigger" aria-haspopup="dialog" aria-controls="reader-directory" @click="openDirectory" :disabled="!toc">目录</button><button type="button" :aria-pressed="immersive" @click="immersive = true">沉浸</button></header>
+    <header v-show="!immersive" class="reader-header">
+      <RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink>
+      <span class="reader-book-title">{{ book?.name ?? '阅读器' }}</span>
+      <div class="reader-header-actions">
+        <button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button>
+        <button v-if="book?.book_type === 'online'" :disabled="loading || restoring || !content" @click="openOverride">{{ content?.is_overridden ? '单章覆盖中' : '单章换源' }}</button>
+        <button ref="directoryTrigger" aria-haspopup="dialog" aria-controls="reader-directory" :disabled="!toc" @click="openDirectory">目录</button>
+        <button type="button" class="reader-settings-toggle" :aria-expanded="settingsOpen" aria-controls="reader-settings" :disabled="loading || restoring" @click="settingsOpen = !settingsOpen">设置</button>
+      </div>
+    </header>
     <div v-if="conflict" class="reader-conflict" role="alert"><p>服务器当前位于第 {{ conflict.chapter_index + 1 }} 章。请选择要保留的位置。</p><button :disabled="reviewing || saving || loading || restoring" @click="keepMine">保留本机位置</button><button :disabled="reviewing || saving || loading || restoring" @click="useRemote">使用另一端位置</button></div>
     <p v-if="uncertain && !conflict" class="reader-notice" role="status">保存结果待确认 <button :disabled="reviewing || saving || loading || restoring" @click="reviewProgress">{{ reviewing ? '正在核对…' : '核对服务器进度' }}</button></p>
     <p v-if="cacheNotice" class="reader-notice" role="status">{{ cacheNotice }} <button type="button" @click="cacheNotice = ''">知道了</button></p>
@@ -319,7 +330,56 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
       <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="boot">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
       <article v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><p ref="body" class="chapter-body">{{ content?.content }}</p><p class="chapter-end">本章完</p></article>
     </section>
-    <footer v-show="!immersive" class="reader-footer"><div class="reader-options"><label>主题<select :value="config.theme" :disabled="config.loading || loading || restoring" aria-label="阅读主题" @change="changeAppearance(() => config.setTheme(($event.target as HTMLSelectElement).value))"><option value="day">日间</option><option value="night">夜间</option><option value="paper">羊皮纸</option><option value="green">护眼</option></select></label><button aria-label="缩小字号" :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button><button aria-label="放大字号" :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button><button aria-label="缩小行距" :disabled="loading || restoring || lineHeight <= 1.4" @click="changeLineHeight(-0.1)">行距−</button><button aria-label="放大行距" :disabled="loading || restoring || lineHeight >= 2.4" @click="changeLineHeight(0.1)">行距＋</button></div><div class="reader-nav"><button :disabled="loading || restoring || !content || content.prev_chapter_index == null" @click="changeChapter(content!.prev_chapter_index!)">上一章</button><span class="reader-progress">阅读进度 {{ chapterPercent(index, book?.total_chapters ?? 0) }}%</span><button :disabled="loading || restoring || !content || content.next_chapter_index == null" @click="changeChapter(content!.next_chapter_index!)">下一章</button><button :disabled="loading || restoring || saving || reviewing" @click="capture(); flush(true)">保存进度</button></div><span class="reader-status" role="status">{{ status }}</span></footer>
+    <p v-if="immersive" class="reader-chapter-mark" aria-hidden="true">{{ title }}</p>
+    <section v-if="settingsOpen && !immersive" id="reader-settings" class="reader-settings" aria-label="阅读设置">
+      <div class="reader-settings-head"><h2>阅读设置</h2><button type="button" @click="settingsOpen = false">完成</button></div>
+      <div class="reader-settings-grid">
+        <div class="reader-setting-group">
+          <span class="reader-setting-label">字号 {{ config.fontSize }}px</span>
+          <div class="reader-setting-actions">
+            <button :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button>
+            <button :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button>
+          </div>
+        </div>
+        <div class="reader-setting-group">
+          <span class="reader-setting-label">行距 {{ lineHeight.toFixed(1) }}</span>
+          <div class="reader-setting-actions">
+            <button :disabled="loading || restoring || lineHeight <= 1.4" @click="changeLineHeight(-0.1)">行距−</button>
+            <button :disabled="loading || restoring || lineHeight >= 2.4" @click="changeLineHeight(0.1)">行距＋</button>
+          </div>
+        </div>
+        <div class="reader-setting-group reader-setting-theme">
+          <span class="reader-setting-label">主题</span>
+          <div class="reader-setting-actions">
+            <button v-for="option in themeOptions" :key="option.value" type="button" :class="{ active: config.theme === option.value }" :aria-pressed="config.theme === option.value" :disabled="config.loading || loading || restoring" @click="changeAppearance(() => config.setTheme(option.value))">{{ option.label }}</button>
+          </div>
+        </div>
+        <div class="reader-setting-group">
+          <span class="reader-setting-label">缓存章节</span>
+          <div class="reader-setting-actions">
+            <button :disabled="!book || loading || restoring" @click="cacheChapters(15)">15 章</button>
+            <button :disabled="!book || loading || restoring" @click="cacheChapters(50)">50 章</button>
+            <button :disabled="!book || loading || restoring" @click="cacheChapters(100)">100 章</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <footer v-show="!immersive" class="reader-footer">
+      <div class="reader-chapter-track" role="progressbar" aria-label="本章阅读进度" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="chapterReadPercent"><span :style="{ width: chapterReadPercent + '%' }" /></div>
+      <div class="reader-nav">
+        <button class="reader-nav-button" :disabled="loading || restoring || !content || content.prev_chapter_index == null" @click="changeChapter(content!.prev_chapter_index!)">上一章</button>
+        <span class="reader-progress">阅读进度 {{ chapterPercent(index, book?.total_chapters ?? 0) }}%</span>
+        <button class="reader-nav-button" :disabled="loading || restoring || !content || content.next_chapter_index == null" @click="changeChapter(content!.next_chapter_index!)">下一章</button>
+      </div>
+      <div class="reader-utility">
+        <label class="reader-theme-picker">主题<select :value="config.theme" :disabled="config.loading || loading || restoring" aria-label="阅读主题" @change="changeAppearance(() => config.setTheme(($event.target as HTMLSelectElement).value))"><option value="day">日间</option><option value="night">夜间</option><option value="paper">羊皮纸</option><option value="green">护眼</option></select></label>
+        <button aria-label="缩小字号" :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button>
+        <button aria-label="放大字号" :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button>
+        <button ref="bookmarkTrigger" :disabled="loading || restoring || !book" @click="openBookmarks">书签</button>
+        <button :disabled="loading || restoring || saving || reviewing" @click="capture(); flush(true)">保存进度</button>
+        <span class="reader-status" role="status">{{ status }}</span>
+      </div>
+    </footer>
     <button v-if="immersive" type="button" class="immersive-restore" @click="immersive = false">显示工具栏</button>
     <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" :book-name="book?.name" :book-author="book?.author" @switched="switched" />
     <BookmarksPanel ref="bookmarks" :book-id="bookId" :total="book?.total_chapters ?? 0" @navigate="visitBookmark" />
@@ -349,4 +409,25 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
   .reader-header a { display: inline-flex; align-items: center; }
 }
 @media (max-width: 360px) { .reader-header span { display: none; } }
+.reader-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.reader-book-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reader-footer { flex-direction: column; align-items: stretch; gap: 10px; }
+.reader-chapter-track { position: relative; width: 100%; height: 3px; border-radius: 999px; background: #8883; overflow: hidden; }
+.reader-chapter-track > span { display: block; height: 100%; background: var(--reader-ink); opacity: .55; transition: width .15s linear; }
+.reader-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin: 0; }
+.reader-nav-button { flex: 0 0 auto; white-space: nowrap; }
+.reader-progress { flex: 1 1 auto; text-align: center; }
+.reader-utility { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; }
+.reader-theme-picker { display: inline-flex; align-items: center; gap: 6px; }
+.reader-status { margin-left: auto; }
+.reader-chapter-mark { position: fixed; top: max(10px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left)); z-index: 15; max-width: 55vw; margin: 0; padding: 2px 0; font-size: 12px; letter-spacing: 1px; color: var(--reader-ink); opacity: .38; pointer-events: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reader-settings { display: flex; flex-direction: column; gap: 10px; padding: 12px max(16px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #8882; background: var(--reader-bg); font-size: 12px; }
+.reader-settings-head { display: flex; align-items: center; justify-content: space-between; }
+.reader-settings-head h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px; }
+.reader-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px 18px; }
+.reader-setting-group { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.reader-setting-label { color: var(--reader-muted); white-space: nowrap; }
+.reader-setting-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.reader-setting-actions button.active { border-color: var(--reader-ink); color: var(--reader-ink); }
+@media (max-width: 650px) { .reader-utility { justify-content: center; } .reader-nav { gap: 8px; } .reader-setting-group { justify-content: space-between; } }
 </style>
