@@ -8,10 +8,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// SearchBooks 处理 GET /search（10s 预算 + 多源并发 + 部分失败隔离）。
+// SearchBooks 处理 GET /search（25s 预算 + 多源并发 + 部分失败隔离）。
+// 预算需覆盖 100+ 书源：并发 16、单源 8s 硬超时，超时源只计入 failures。
 func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params SearchBooksParams) {
 	uid := userIDFrom(r.Context())
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 
 	var ids []uuid.UUID

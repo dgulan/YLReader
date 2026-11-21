@@ -228,8 +228,9 @@ func (r *SourceRepository) List(ctx context.Context, q Querier, userID uuid.UUID
 	if limit <= 0 {
 		limit = 20
 	}
-	if limit > 100 {
-		limit = 100
+	// 搜索场景需要一次取回全部启用源（可达 200）；列表接口仍由调用方传小 limit。
+	if limit > 300 {
+		limit = 300
 	}
 	offset := f.Offset
 	if offset < 0 {

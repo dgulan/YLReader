@@ -47,4 +47,5 @@ onBeforeUnmount(() => { generation++; directoryGeneration++; tracker.stop() })
 </template>
 <style scoped>
 .el-select-v2 { width: min(100%,480px); }h2 { font-size: 18px; font-weight: 500; }.job-id { overflow-wrap: anywhere; font-size: 13px; }.el-form { margin-bottom: 16px; }.error-note { overflow-wrap: anywhere; }
+:deep(.el-alert) { margin-bottom: 16px; }
 </style>

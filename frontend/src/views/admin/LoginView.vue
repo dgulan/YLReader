@@ -27,3 +27,8 @@ async function submit() {
     </section>
   </main>
 </template>
+<style scoped>
+.login-panel :deep(.el-input) { min-width: 0; }
+@media (max-width: 650px) { .login-panel :deep(.el-input__inner) { font-size: 16px !important; } }
+:deep(.el-alert) { margin-bottom: 16px; }
+</style>

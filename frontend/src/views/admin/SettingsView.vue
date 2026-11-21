@@ -39,4 +39,5 @@ async function reset() { try { await ElMessageBox.confirm('恢复默认主题和
 </template>
 <style scoped>
 .el-select { width: min(100%,320px); }.appearance-preview { border: 1px solid #8884; border-radius: 8px; padding: 28px; background: #f2ead7; color: #423c30; line-height: 2; font-family: 'Noto Serif SC',SimSun,serif; }.appearance-preview[data-theme=day] { background: #fbfbf7; color: #303930; }.appearance-preview[data-theme=night] { background: #1d2422; color: #c6cfc7; }.appearance-preview[data-theme=green] { background: #dce8d8; color: #334831; }.appearance-preview h2 { font-size: 26px; font-weight: 500; }
+:deep(.el-alert) { margin-bottom: 16px; }
 </style>

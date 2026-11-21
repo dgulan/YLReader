@@ -96,4 +96,7 @@ onBeforeUnmount(() => { disposed = true; cancelLoad(); window.removeEventListene
   </main>
 </template>
 <style scoped>.cache-button { width: 100%; margin: 8px 0 0; }
-@media (max-width: 650px) { .search-row :deep(.el-input__inner) { font-size: 16px !important; } }</style>
+.search-row :deep(.el-input) { flex: 1 1 auto; min-width: 0; width: 100%; max-width: 430px; }
+.search-row :deep(.el-button), .search-result :deep(.el-button) { flex-shrink: 0; }
+@media (max-width: 650px) { .search-row :deep(.el-input) { flex: 1 1 0%; min-width: 0; max-width: 100%; } .search-row :deep(.el-input__inner) { font-size: 16px !important; } .search-row :deep(.el-button), .search-result :deep(.el-button) { white-space: nowrap; } }:deep(.el-alert) { margin-bottom: 16px; }
+</style>

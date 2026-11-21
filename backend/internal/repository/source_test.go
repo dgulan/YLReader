@@ -227,7 +227,7 @@ func TestSourceListFilter(t *testing.T) {
 	if len(got) != 3 || got[0].ID != s2.ID {
 		t.Fatalf("bogus 排序未兜底 weight_desc: %+v", got)
 	}
-	// limit 钳制：>100 截断为 100（此处仅 3 行，验证无报错且返回全部）
+	// limit 钳制：>300 截断为 300（此处仅 3 行，验证无报错且返回全部）
 	got, total, err = repo.List(ctx, tx, userID, SourceListFilter{Limit: 1000})
 	if err != nil || total != 3 || len(got) != 3 {
 		t.Fatalf("limit clamp: total=%d len=%d err=%v", total, len(got), err)

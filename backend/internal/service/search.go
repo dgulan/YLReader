@@ -22,6 +22,15 @@ import (
 	"yreader/backend/internal/repository"
 )
 
+// 搜索编排的安全边界：单次参与书源数、全局并发度、单源硬超时。
+// 100+ 书源的场景下不再只取权重最高的前 20 个，而是全量（上限 200）参与，
+// 由并发池与单源超时保证整体时延可控；失败的源照旧隔离进 Failures。
+const (
+	searchSourceLimit   = 200
+	searchConcurrency   = 16
+	searchSourceTimeout = 8 * time.Second
+)
+
 // Fetcher 是 /search 依赖的窄接口。生产注入 *fetcher.Fetcher；测试注入 mock，
 // 避免 httptest.Server 监听 127.0.0.1 被真实 SSRF 拦截。
 type Fetcher interface {
@@ -109,8 +118,8 @@ func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword st
 	}
 	out.Failures = append(out.Failures, early...)
 
-	// 全局并发度 ≤ 10；严禁 errgroup 在单源失败时 cancel 整个 context。
-	sem := semaphore.NewWeighted(10)
+	// 全局并发度 ≤ searchConcurrency；严禁 errgroup 在单源失败时 cancel 整个 context。
+	sem := semaphore.NewWeighted(searchConcurrency)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -163,7 +172,7 @@ func (s *SearchService) pickSources(ctx context.Context, userID uuid.UUID, sourc
 	if len(sourceIDs) == 0 {
 		enabled := true
 		list, _, err := s.sources.List(ctx, s.pool, userID, repository.SourceListFilter{
-			Enabled: &enabled, Sort: "weight_desc", Limit: 20, ExcludeLocal: true,
+			Enabled: &enabled, Sort: "weight_desc", Limit: searchSourceLimit, ExcludeLocal: true,
 		})
 		return list, nil, err
 	}
@@ -177,8 +186,8 @@ func (s *SearchService) pickSources(ctx context.Context, userID uuid.UUID, sourc
 		seen[id] = struct{}{}
 		dedup = append(dedup, id)
 	}
-	if len(dedup) > 20 {
-		return nil, nil, fmt.Errorf("%w: at most 20 source_ids", repository.ErrInvalidArgument)
+	if len(dedup) > searchSourceLimit {
+		return nil, nil, fmt.Errorf("%w: at most %d source_ids", repository.ErrInvalidArgument, searchSourceLimit)
 	}
 
 	// 一次 SQL 查出全部匹配项（不过滤 enabled，留给内存分流）。
@@ -210,6 +219,9 @@ func (s *SearchService) pickSources(ctx context.Context, userID uuid.UUID, sourc
 // searchOne 抓取并解析单个书源的搜索结果。
 func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSource, keyword string, page, pageSize int) ([]BookItem, error) {
 	start := time.Now()
+	// 单源硬超时：慢源不得拖垮整体搜索预算（部分失败隔离）。
+	ctx, cancel := context.WithTimeout(ctx, searchSourceTimeout)
+	defer cancel()
 	ctx = sourceFetchContext(ctx, src)
 	rules := parseSearchRules(src.Rules)
 	if rules.SearchURL == "" || rules.BookList == "" {

@@ -67,3 +67,4 @@ onMounted(load)
     <section class="surface"><div class="section-heading"><h2>书源列表 <small class="muted">{{ sources?.total ?? 0 }} 个</small></h2><div class="button-row"><ElButton :loading="exporting" @click="exportAll">导出 JSON</ElButton><ElButton @click="load">刷新</ElButton></div></div><div style="height: 400px"><ElAutoResizer><template #default="{ height, width }"><ElTableV2 :columns="columns" :data="sources?.items ?? []" :width="width" :height="height" row-key="id" /></template></ElAutoResizer></div><ElPagination v-if="sources && sources.total > 100" v-model:current-page="page" :page-size="100" :total="sources.total" layout="prev, pager, next" @current-change="load" /></section>
   </main>
 </template>
+<style scoped>:deep(.el-alert) { margin-bottom: 16px; }</style>

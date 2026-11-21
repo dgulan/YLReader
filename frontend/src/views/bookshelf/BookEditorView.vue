@@ -46,4 +46,5 @@ onBeforeRouteLeave(async () => !getSession() || deleted.value ? true : busy.valu
     </section>
   </main>
 </template>
-<style scoped>h2 { font-size: 18px; font-weight: 500; }.el-select { width: min(320px,100%); }.section-heading { flex-wrap: wrap; }.mapping-list { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }.mapping-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid #8882; padding-bottom: 10px; }.mapping-row p { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }</style>
+<style scoped>h2 { font-size: 18px; font-weight: 500; }.el-select { width: min(320px,100%); }.section-heading { flex-wrap: wrap; }.mapping-list { display: flex; flex-direction: column; gap: 12px; margin-bottom: 16px; }.mapping-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid #8882; padding-bottom: 10px; }.mapping-row p { margin: 4px 0 0; font-size: 12px; overflow-wrap: anywhere; }:deep(.el-alert) { margin-bottom: 16px; }
+</style>
