@@ -57,6 +57,8 @@ test('continuous original TXT reading preserves progress, cache and session rene
     await a.getByRole('link', { name: '返回书架', exact: true }).click()
     await b.bringToFront(); await b.goto(readerUrl)
     await expect(b.getByLabel('章节阅读区')).toContainText('原创编号001')
+    // 主题、字号、书签、保存进度都在「设置」面板内，保持面板常开。
+    await b.getByRole('button', { name: '设置', exact: true }).click(); await expect(b.locator('#reader-settings')).toBeVisible()
     if (probe) {
       // Only the short fixture probe damages access credentials; the long run waits for real expiry.
       await a.evaluate(() => {

@@ -395,6 +395,7 @@ test('a server acknowledgement remains successful when the local acknowledgement
   await expect(page.getByText('进度已同步，但本机记录更新失败，请保持页面打开并重试保存', { exact: true })).toBeVisible()
   expect(f.progress.get(a)?.version).toBe(8); expect(f.saves).toHaveLength(1)
   await page.evaluate(() => { (window as unknown as { checkpointStorageFault: { enabled: boolean } }).checkpointStorageFault.enabled = false })
+  await page.getByRole('button', { name: '设置', exact: true }).click(); await expect(page.locator('#reader-settings')).toBeVisible()
   await page.getByRole('button', { name: '保存进度', exact: true }).click()
   await expect.poll(async () => (await cachedRows(page, 'positions'))[0]?.base?.version).toBe(8)
   expect((await cachedRows(page, 'positions'))[0]!.dirty).toBe(false)

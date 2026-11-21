@@ -27,6 +27,7 @@ test('local import, explicit conflict resolution, exact restore, offline chapter
   await page.reload(); await expect(page.locator('.reader-conflict')).toBeVisible(); expect((await progress(page, bookId)).char_offset).toBe(10)
   await page.getByRole('button', { name: '保留本机位置' }).click(); await expect(page.locator('.reader-conflict')).toBeHidden()
   await expect.poll(async () => (await progress(page, bookId)).char_offset).toBeGreaterThan(10); expect((await progress(page, bookId)).chapter_ratio).toBeGreaterThan(0)
+  await page.getByRole('button', { name: '设置', exact: true }).click(); await expect(page.locator('#reader-settings')).toBeVisible()
   await page.getByLabel('阅读主题').selectOption('night'); await page.screenshot({ path: '.test-artifacts/reader-desktop.png', fullPage: true })
   await page.getByRole('link', { name: '返回书架' }).click(); await expect(card).toBeVisible(); await card.getByRole('button', { name: '继续阅读' }).click()
   await expect.poll(() => page.getByLabel('章节阅读区').evaluate(el => el.scrollTop)).toBeGreaterThan(100)

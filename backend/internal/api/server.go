@@ -139,6 +139,10 @@ func (s *Server) Handler() http.Handler {
 				writeErrorCode(w, req, http.StatusBadRequest, "validation_error")
 			},
 		})
+
+		// 封面同源代理不在冻结的 OpenAPI 操作集内：作为受保护资源路由直接挂载，
+		// 避免为防盗链改动 docs/openapi.yaml 与生成代码。
+		protected.Get("/api/v1/books/{bookId}/cover", s.BookCover)
 	})
 
 	return r

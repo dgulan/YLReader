@@ -18,9 +18,8 @@ import { loadBookBootstrap } from './bookBootstrap'
 import { singleFlight, watchPageCheckpoint } from './checkpoint'
 import { withDeadline, RequestDeadlineError } from './deadline'
 import { detectHorizontalSwipe, type TouchPoint } from './touchNavigation'
-import { cacheRange, chapterPercent, clampLineHeight, loadLineHeight, saveLineHeight } from './lineHeight'
+import { cacheRange, clampLineHeight, loadLineHeight, saveLineHeight } from './lineHeight'
 const lineHeight = ref(loadLineHeight()), cacheNotice = ref(''), settingsOpen = ref(false)
-const themeOptions = [{ value: 'day', label: '日间' }, { value: 'night', label: '夜间' }, { value: 'paper', label: '羊皮纸' }, { value: 'green', label: '护眼' }]
 function changeLineHeight(delta: number) { void changeAppearance(() => { lineHeight.value = clampLineHeight(lineHeight.value + delta); saveLineHeight(lineHeight.value) }) }
 async function cacheChapters(count: number | 'all') {
   if (!book.value) return
@@ -42,8 +41,28 @@ const index = ref(0), offset = ref(0), dirty = ref(false), loading = ref(true), 
 const viewport = ref<HTMLElement>(), body = ref<HTMLElement>(), drawer = ref<HTMLDialogElement>()
 const restoring = ref(false)
 const immersive = ref(false)
-// 当前章内的阅读进度（0–100），用于底部进度条；整书进度由 chapterPercent 计算。
-const chapterReadPercent = computed(() => content.value ? Math.round(chapterFraction(content.value.content, offset.value) * 100) : 0)
+// 本章阅读进度（0–100）：按正文容器的实际滚动位置实时计算，内容不足一屏视为 100%。
+const scrollPercent = ref(0)
+function updateScrollPercent() {
+  const el = viewport.value
+  if (!el || loading.value) return
+  const max = el.scrollHeight - el.clientHeight
+  scrollPercent.value = max <= 0 ? 100 : Math.min(100, Math.max(0, Math.round((el.scrollTop / max) * 100)))
+}
+// 正文按行拆分为独立段落；start 记录该段首个可见字符在全文中的码点偏移，供位置持久化。
+const paragraphs = computed(() => {
+  const text = content.value?.content ?? ''
+  const out: { text: string; start: number }[] = []
+  let cursor = 0
+  for (const part of text.split(/(\r?\n)/)) {
+    if (part === '\n' || part === '\r\n') { cursor += codePointLength(part); continue }
+    const trimmed = part.trim()
+    if (trimmed) out.push({ text: trimmed, start: cursor + codePointLength(part.slice(0, part.length - part.trimStart().length)) })
+    cursor += codePointLength(part)
+  }
+  return out
+})
+watch([settingsOpen, immersive], () => { void nextTick(updateScrollPercent) })
 const localFault = ref(false)
 let touchStart: TouchPoint | null = null
 function onTouchStart(event: TouchEvent) {
@@ -105,14 +124,31 @@ async function persistLocal() {
     if (current()) localFault.value = false
   } catch (e) { if (current()) localFault.value = true; throw e }
 }
+function readingOffset() {
+  if (!body.value || !viewport.value) return offset.value
+  const nodes = body.value.querySelectorAll<HTMLElement>('.chapter-paragraph')
+  if (!nodes.length) return offset.value
+  const threshold = viewport.value.getBoundingClientRect().top + 24
+  let target = nodes[0]!
+  for (const node of nodes) {
+    if (node.getBoundingClientRect().bottom > threshold) { target = node; break }
+    target = node
+  }
+  const start = Number(target.dataset.start ?? '0') || 0
+  const text = target.firstChild
+  if (!(text instanceof Text)) return start
+  return Math.min(start + visibleOffset(text, viewport.value), codePointLength(content.value?.content ?? ''))
+}
 function capture() {
   if (error.value || loading.value || restoring.value || !body.value || !viewport.value) return
-  const node = body.value.firstChild
-  if (!(node instanceof Text)) return
-  const next = visibleOffset(node, viewport.value)
+  const next = readingOffset()
   if (offset.value !== next) { offset.value = next; dirty.value = true; revision++ }
 }
-function scroll() { if (restoring.value || loading.value) return; clearTimeout(timer); timer = setTimeout(() => { capture(); void flush() }, 600) }
+function scroll() {
+  updateScrollPercent()
+  if (restoring.value || loading.value) return
+  clearTimeout(timer); timer = setTimeout(() => { capture(); void flush() }, 600)
+}
 function conflictProgress(e: ApiError) {
   const data = e.data as { error?: { details?: { current?: Model<'Progress'> } } } | null
   const current = data?.error?.details?.current
@@ -184,12 +220,23 @@ async function reviewProgress() {
 }
 async function restorePosition(current: () => boolean = () => true) {
   await nextTick()
-  if (!current()) return
-  const node = body.value?.firstChild
-  if (!(node instanceof Text) || !viewport.value) return
-  const range = document.createRange(); range.setStart(node, utf16Offset(node.data, offset.value)); range.collapse(true)
+  if (!current() || !viewport.value) return
   viewport.value.scrollTop = 0
-  if (offset.value) viewport.value.scrollTop += range.getBoundingClientRect().top - viewport.value.getBoundingClientRect().top - 24
+  const nodes = body.value ? Array.from(body.value.querySelectorAll<HTMLElement>('.chapter-paragraph')) : []
+  if (offset.value > 0 && nodes.length) {
+    let target = nodes[0]!
+    for (const node of nodes) { if ((Number(node.dataset.start ?? '0') || 0) <= offset.value) target = node; else break }
+    const start = Number(target.dataset.start ?? '0') || 0
+    const text = target.firstChild
+    if (text instanceof Text) {
+      const within = Math.max(0, offset.value - start)
+      const range = document.createRange(); range.setStart(text, utf16Offset(text.data, within)); range.collapse(true)
+      viewport.value.scrollTop += range.getBoundingClientRect().top - viewport.value.getBoundingClientRect().top - 24
+    } else {
+      viewport.value.scrollTop = Math.max(0, target.getBoundingClientRect().top - viewport.value.getBoundingClientRect().top - 24)
+    }
+  }
+  updateScrollPercent()
 }
 async function changeAppearance(action: () => void) {
   if (loading.value || restoring.value || config.loading) return
@@ -328,7 +375,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
     <p v-if="config.error" class="reader-notice" role="status">{{ config.error }} <button :disabled="config.loading || config.saving" @click="config.retry">重试设置同步</button></p>
     <section ref="viewport" class="reader-viewport" :aria-busy="loading || restoring" aria-label="章节阅读区" tabindex="0" @scroll="scroll" @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" @click="toggleToolbar">
       <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="boot">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
-      <article v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><p ref="body" class="chapter-body">{{ content?.content }}</p><p class="chapter-end">本章完</p></article>
+      <article v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><div ref="body" class="chapter-body"><p v-for="(para, i) in paragraphs" :key="i + ':' + para.start" class="chapter-paragraph" :data-start="para.start">{{ para.text }}</p></div><p class="chapter-end">本章完</p></article>
     </section>
     <p v-if="immersive" class="reader-chapter-mark" aria-hidden="true">{{ title }}</p>
     <section v-if="settingsOpen && !immersive" id="reader-settings" class="reader-settings" aria-label="阅读设置">
@@ -337,8 +384,8 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
         <div class="reader-setting-group">
           <span class="reader-setting-label">字号 {{ config.fontSize }}px</span>
           <div class="reader-setting-actions">
-            <button :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button>
-            <button :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button>
+            <button aria-label="缩小字号" :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button>
+            <button aria-label="放大字号" :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button>
           </div>
         </div>
         <div class="reader-setting-group">
@@ -348,10 +395,17 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
             <button :disabled="loading || restoring || lineHeight >= 2.4" @click="changeLineHeight(0.1)">行距＋</button>
           </div>
         </div>
-        <div class="reader-setting-group reader-setting-theme">
+        <div class="reader-setting-group">
           <span class="reader-setting-label">主题</span>
           <div class="reader-setting-actions">
-            <button v-for="option in themeOptions" :key="option.value" type="button" :class="{ active: config.theme === option.value }" :aria-pressed="config.theme === option.value" :disabled="config.loading || loading || restoring" @click="changeAppearance(() => config.setTheme(option.value))">{{ option.label }}</button>
+            <select :value="config.theme" :disabled="config.loading || loading || restoring" aria-label="阅读主题" @change="changeAppearance(() => config.setTheme(($event.target as HTMLSelectElement).value))"><option value="day">日间</option><option value="night">夜间</option><option value="paper">羊皮纸</option><option value="green">护眼</option></select>
+          </div>
+        </div>
+        <div class="reader-setting-group">
+          <span class="reader-setting-label">书签与进度</span>
+          <div class="reader-setting-actions">
+            <button ref="bookmarkTrigger" :disabled="loading || restoring || !book" @click="openBookmarks">书签</button>
+            <button :disabled="loading || restoring || saving || reviewing" @click="capture(); flush(true)">保存进度</button>
           </div>
         </div>
         <div class="reader-setting-group">
@@ -365,22 +419,14 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
       </div>
     </section>
     <footer v-show="!immersive" class="reader-footer">
-      <div class="reader-chapter-track" role="progressbar" aria-label="本章阅读进度" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="chapterReadPercent"><span :style="{ width: chapterReadPercent + '%' }" /></div>
+      <div class="reader-chapter-track" role="progressbar" aria-label="本章阅读进度" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="scrollPercent"><span :style="{ width: scrollPercent + '%' }" /></div>
       <div class="reader-nav">
         <button class="reader-nav-button" :disabled="loading || restoring || !content || content.prev_chapter_index == null" @click="changeChapter(content!.prev_chapter_index!)">上一章</button>
-        <span class="reader-progress">阅读进度 {{ chapterPercent(index, book?.total_chapters ?? 0) }}%</span>
+        <span class="reader-progress">阅读进度 {{ scrollPercent }}%</span>
         <button class="reader-nav-button" :disabled="loading || restoring || !content || content.next_chapter_index == null" @click="changeChapter(content!.next_chapter_index!)">下一章</button>
       </div>
-      <div class="reader-utility">
-        <label class="reader-theme-picker">主题<select :value="config.theme" :disabled="config.loading || loading || restoring" aria-label="阅读主题" @change="changeAppearance(() => config.setTheme(($event.target as HTMLSelectElement).value))"><option value="day">日间</option><option value="night">夜间</option><option value="paper">羊皮纸</option><option value="green">护眼</option></select></label>
-        <button aria-label="缩小字号" :disabled="config.loading || loading || restoring || config.fontSize <= 14" @click="changeAppearance(() => config.changeFont(-1))">A−</button>
-        <button aria-label="放大字号" :disabled="config.loading || loading || restoring || config.fontSize >= 32" @click="changeAppearance(() => config.changeFont(1))">A＋</button>
-        <button ref="bookmarkTrigger" :disabled="loading || restoring || !book" @click="openBookmarks">书签</button>
-        <button :disabled="loading || restoring || saving || reviewing" @click="capture(); flush(true)">保存进度</button>
-        <span class="reader-status" role="status">{{ status }}</span>
-      </div>
+      <span class="reader-status" role="status">{{ status }}</span>
     </footer>
-    <button v-if="immersive" type="button" class="immersive-restore" @click="immersive = false">显示工具栏</button>
     <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" :book-name="book?.name" :book-author="book?.author" @switched="switched" />
     <BookmarksPanel ref="bookmarks" :book-id="bookId" :total="book?.total_chapters ?? 0" @navigate="visitBookmark" />
     <ChapterOverrideDialog ref="overrideDialog" :book-id="bookId" :chapter-index="index" :chapter-title="title" :is-overridden="Boolean(content?.is_overridden)" @updated="overrideUpdated" />
@@ -392,8 +438,8 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 .reader[data-theme=day] { --reader-bg: #fbfbf7; --reader-ink: #303930; --reader-muted: #7c897c; }.reader[data-theme=night] { --reader-bg: #1d2422; --reader-ink: #c6cfc7; --reader-muted: #849187; }.reader[data-theme=green] { --reader-bg: #dce8d8; --reader-ink: #334831; --reader-muted: #778d72; }
 .reader button,.reader select { background: transparent; color: inherit; border: 1px solid #8884; border-radius: 5px; padding: 7px 12px; cursor: pointer; font-size: 12px; }.reader button:disabled { opacity: .35; cursor: default; }.reader-header { display: flex; justify-content: space-between; align-items: center; gap: 20px; height: 64px; flex-shrink: 0; padding: 0 32px; border-bottom: 1px solid #8882; font-size: 13px; }.reader-header button,.reader-header a { flex-shrink: 0; white-space: nowrap; }.reader-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.reader-viewport { overflow-y: auto; flex: 1; min-height: 0; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; touch-action: pan-y; scroll-behavior: auto; }
 .reader { overscroll-behavior-y: contain; }
-.immersive-restore { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 20; background: var(--reader-bg); opacity: .9; }.cache-picker { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; font-size: 12px; }.reader-progress { color: var(--reader-muted); font-size: 12px; white-space: nowrap; }.reader-article { width: min(100%, 800px); padding: 54px 42px 70px; margin: auto; }.reader-kicker { color: var(--reader-muted); font-size: 11px; letter-spacing: 2px; }.reader h1 { font-size: 29px; line-height: 1.5; margin: 20px 0 42px; }.chapter-body { font-family: 'Noto Serif SC','Songti SC',SimSun,serif; font-size: var(--reader-size); line-height: var(--reader-line-height, 1.7); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; margin: 0; }.chapter-end { text-align: center; font-size: 12px; color: var(--reader-muted); padding: 40px; }.reader-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 14px 28px; border-top: 1px solid #8882; flex-shrink: 0; font-size: 10px; }.reader-options,.reader-nav { display: flex; align-items: center; gap: 8px; }.reader-options label { display: flex; align-items: center; gap: 8px; }.reader-nav { margin: auto; }.reader-status { color: var(--reader-muted); }.reader-state { text-align: center; padding: 90px 24px; }.reader-state a { display: block; margin: 20px; }.reader-notice,.reader-conflict { padding: 12px 24px; margin: 0; font-size: 12px; background: #b9842720; }.reader-conflict p { margin: 0 0 8px; }.reader-conflict button { margin-right: 12px; }.toc-dialog { width: min(520px,95vw); border: 1px solid #8884; border-radius: 10px; color: var(--reader-ink); background: var(--reader-bg); padding: 18px; }.toc-dialog::backdrop { background: #10282077; }.toc-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }.toc-heading h2 { font-size: 18px; font-weight: 500; }
-@media(max-width:650px) { .reader-header { height: 54px; padding: 0 18px; }.reader-article { padding: 32px 22px 50px; }.reader-footer { padding: 10px 14px max(10px,env(safe-area-inset-bottom)); gap: 10px; }.reader-options { margin: auto; }.reader-nav { margin: auto; }.reader-status { width: 100%; text-align: center; }.reader h1 { font-size: 25px; margin-bottom: 28px; } }
+.immersive-restore { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom)); z-index: 20; background: var(--reader-bg); opacity: .9; }.cache-picker { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; white-space: nowrap; font-size: 12px; }.reader-progress { color: var(--reader-muted); font-size: 12px; white-space: nowrap; }.reader-article { width: min(100%, 800px); padding: 54px 42px 70px; margin: auto; }.reader-kicker { color: var(--reader-muted); font-size: 11px; letter-spacing: 2px; }.reader h1 { font-size: 29px; line-height: 1.5; margin: 20px 0 42px; }.chapter-body { font-family: 'Noto Serif SC','Songti SC',SimSun,serif; font-size: var(--reader-size); line-height: var(--reader-line-height, 1.7); overflow-wrap: anywhere; word-break: normal; margin: 0; }.chapter-paragraph { text-indent: 2em; margin: 0 0 0.9em; }.chapter-paragraph:last-child { margin-bottom: 0; }.chapter-end { text-align: center; font-size: 12px; color: var(--reader-muted); padding: 40px; }.reader-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 14px 28px; border-top: 1px solid #8882; flex-shrink: 0; font-size: 10px; }.reader-options,.reader-nav { display: flex; align-items: center; gap: 8px; }.reader-options label { display: flex; align-items: center; gap: 8px; }.reader-nav { margin: auto; }.reader-status { color: var(--reader-muted); }.reader-state { text-align: center; padding: 90px 24px; }.reader-state a { display: block; margin: 20px; }.reader-notice,.reader-conflict { padding: 12px 24px; margin: 0; font-size: 12px; background: #b9842720; }.reader-conflict p { margin: 0 0 8px; }.reader-conflict button { margin-right: 12px; }.toc-dialog { width: min(520px,95vw); border: 1px solid #8884; border-radius: 10px; color: var(--reader-ink); background: var(--reader-bg); padding: 18px; }.toc-dialog::backdrop { background: #10282077; }.toc-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }.toc-heading h2 { font-size: 18px; font-weight: 500; }
+@media(max-width:650px) { .reader-header { height: 54px; padding: 0 18px; }.reader-article { padding: 32px 22px 50px; }.reader-footer { padding: 10px 14px max(10px,env(safe-area-inset-bottom)); gap: 10px; }.reader-nav { margin: auto; }.reader-status { width: 1px; height: 1px; text-align: left; }.reader h1 { font-size: 25px; margin-bottom: 28px; } }
 .reader { color-scheme: light; }
 .reader[data-theme=night] { color-scheme: dark; }
 .reader :is(button, a, select):focus-visible { outline: 2px solid var(--reader-ink); outline-offset: 3px; }
@@ -417,11 +463,11 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 .reader-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin: 0; }
 .reader-nav-button { flex: 0 0 auto; white-space: nowrap; }
 .reader-progress { flex: 1 1 auto; text-align: center; }
-.reader-utility { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 11px; }
+.reader-utility { display: none; }
 .reader-theme-picker { display: inline-flex; align-items: center; gap: 6px; }
-.reader-status { margin-left: auto; }
+.reader-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .reader-chapter-mark { position: fixed; top: max(10px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left)); z-index: 15; max-width: 55vw; margin: 0; padding: 2px 0; font-size: 12px; letter-spacing: 1px; color: var(--reader-ink); opacity: .38; pointer-events: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reader-settings { display: flex; flex-direction: column; gap: 10px; padding: 12px max(16px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #8882; background: var(--reader-bg); font-size: 12px; }
+.reader-settings { display: flex; flex-direction: column; gap: 10px; flex-shrink: 0; max-height: 45dvh; overflow-y: auto; overscroll-behavior: contain; padding: 12px max(16px, env(safe-area-inset-left)) max(12px, env(safe-area-inset-bottom)); border-top: 1px solid #8882; background: var(--reader-bg); font-size: 12px; }
 .reader-settings-head { display: flex; align-items: center; justify-content: space-between; }
 .reader-settings-head h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 1px; }
 .reader-settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px 18px; }
@@ -429,5 +475,5 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 .reader-setting-label { color: var(--reader-muted); white-space: nowrap; }
 .reader-setting-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .reader-setting-actions button.active { border-color: var(--reader-ink); color: var(--reader-ink); }
-@media (max-width: 650px) { .reader-utility { justify-content: center; } .reader-nav { gap: 8px; } .reader-setting-group { justify-content: space-between; } }
+@media (max-width: 650px) { .reader-utility { justify-content: center; } .reader-nav { gap: 8px; } .reader-setting-group { justify-content: space-between; } .reader select, .reader input { font-size: 16px; } }
 </style>

@@ -100,8 +100,13 @@ it('renders book cover image when cover_url is present and falls back on error',
   await mount()
   await vi.waitFor(() => expect(host.querySelector('img.book-cover-img')).not.toBeNull())
   const img = host.querySelector<HTMLImageElement>('img.book-cover-img')!
-  expect(img.getAttribute('src')).toBe('https://img.example/cover1.jpg')
+  // Prefer the same-origin proxy to bypass third-party hotlink checks.
+  expect(img.getAttribute('src')).toBe('/api/v1/books/b1/cover')
   img.dispatchEvent(new Event('error'))
+  await nextTick()
+  // First failure falls back to the original absolute URL.
+  expect(host.querySelector<HTMLImageElement>('img.book-cover-img')!.getAttribute('src')).toBe('https://img.example/cover1.jpg')
+  host.querySelector<HTMLImageElement>('img.book-cover-img')!.dispatchEvent(new Event('error'))
   await nextTick()
   expect(host.querySelector('img.book-cover-img')).toBeNull()
   expect(host.querySelector('.book-cover')?.textContent).toContain('带封面书')

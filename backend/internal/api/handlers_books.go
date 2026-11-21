@@ -2,7 +2,11 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"yreader/backend/internal/repository"
 	"yreader/backend/internal/service"
@@ -214,6 +218,27 @@ func toAPIBookFromShelf(e *repository.BookshelfEntry) Book {
 		out.Progress = &prog
 	}
 	return out
+}
+
+// BookCover 处理 GET /books/{bookId}/cover：同源代理第三方封面，规避图片防盗链。
+// 不在冻结的 OpenAPI 操作集内，作为受保护资源路由直接挂载。
+func (s *Server) BookCover(w http.ResponseWriter, r *http.Request) {
+	bookID, err := uuid.Parse(chi.URLParam(r, "bookId"))
+	if err != nil {
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+		return
+	}
+	body, contentType, err := s.Books.FetchCover(r.Context(), userIDFrom(r.Context()), bookID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // toAPIProgress 把 repository.ReadingProgress 映射为 OpenAPI Progress。

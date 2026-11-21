@@ -80,6 +80,9 @@ test('thousand chapter directory supports keyboard navigation and native modal f
 test('small screens keep native controls and modal actions inside the viewport', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 640 })
   await readerFixture(page)
+  // 主题、字号、书签、保存进度都收纳进了「设置」面板。
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  await expect(page.locator('#reader-settings')).toBeVisible()
   const theme = page.getByLabel('阅读主题')
   expect(await theme.evaluate(el => getComputedStyle(el).colorScheme)).toBe('dark')
   await page.screenshot({ path: '.test-artifacts/modern-web-mobile-night.png' })

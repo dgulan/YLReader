@@ -77,6 +77,7 @@ test('original Chinese EPUB imports and reads across desktop and mobile sessions
     await b.goto(a.url())
     await expect(b.getByLabel('章节阅读区')).toContainText('河岸的午后')
     expect(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy()
+    await b.getByRole('button', { name: '设置', exact: true }).click()
     const themeSaved = b.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/settings' && response.request().method() === 'PATCH')
     await b.getByLabel('阅读主题').selectOption('night')
     const saved = await themeSaved
@@ -84,6 +85,7 @@ test('original Chinese EPUB imports and reads across desktop and mobile sessions
     expect((await saved.json())['reader.theme']).toBe('night')
     await b.reload()
     record('phase', 'mobile reader reload')
+    await b.getByRole('button', { name: '设置', exact: true }).click()
     await expect(b.getByLabel('阅读主题')).toHaveValue('night')
     // A bounded navigation/connectivity check, not a physical-device or long-reading soak.
     let cycles = 0

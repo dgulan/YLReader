@@ -5,8 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
+	"mime"
+	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -269,14 +273,10 @@ func parseBookInfoCoverRule(raw json.RawMessage) string {
 	)
 }
 
-// fetchBookCover 在加入书架时抓取书源详情页并解析封面规则；任何失败都返回 nil，
-// 由前端回退到文字书封，绝不让封面补全阻断加书主流程。
+// fetchBookCover 在加入书架时抓取书源详情页并解析封面规则；规则缺失或未命中时
+// 回退到 og:image / 常见封面节点的通用提取。任何失败都返回 nil，由前端回退到文字书封。
 func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSource, bookURL string) *string {
-	if s.ft == nil || s.sb == nil {
-		return nil
-	}
-	rule := parseBookInfoCoverRule(src.Rules)
-	if strings.TrimSpace(rule) == "" {
+	if s.ft == nil {
 		return nil
 	}
 	detailURL := resolveURL(src.BookSourceURL, bookURL)
@@ -295,13 +295,106 @@ func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSo
 	if base == "" {
 		base = detailURL
 	}
-	engine := parser.New(s.sb)
-	engine.SetVariable("baseUrl", src.BookSourceURL)
-	raw, err := engine.Eval(fetchCtx, rule, string(resp.Body))
-	if err != nil {
-		return nil
+	if rule := strings.TrimSpace(parseBookInfoCoverRule(src.Rules)); rule != "" && s.sb != nil {
+		engine := parser.New(s.sb)
+		engine.SetVariable("baseUrl", src.BookSourceURL)
+		if raw, eerr := engine.Eval(fetchCtx, rule, string(resp.Body)); eerr == nil {
+			if cover := normalizeCoverURL(raw, base); cover != nil {
+				return cover
+			}
+		}
 	}
-	return normalizeCoverURL(raw, base)
+	// 书源未配置详情封面规则或规则未命中时，兜底抓 og:image / 常见封面节点。
+	return normalizeCoverURL(extractCoverFromHTML(resp.Body), base)
+}
+
+var (
+	// 覆盖 <meta property="og:image" content="..."> 的两种属性顺序。
+	metaCoverFirst   = regexp.MustCompile(`(?is)<meta\b[^>]*\bproperty\s*=\s*["'](?:og:image(?::url)?|twitter:image)["'][^>]*\bcontent\s*=\s*["']([^"']+)["']`)
+	metaContentFirst = regexp.MustCompile(`(?is)<meta\b[^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*\bproperty\s*=\s*["'](?:og:image(?::url)?|twitter:image)["']`)
+	// 常见书封 <img>：class/id 含 cover/bookimg/book-img/pic，src 可在前或在后。
+	imgCoverFirst   = regexp.MustCompile(`(?is)<img\b[^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["'][^>]*\bsrc\s*=\s*["']([^"']+)["']`)
+	imgSrcCoverFirst = regexp.MustCompile(`(?is)<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["']`)
+)
+
+// extractCoverFromHTML 从详情页 HTML 中按优先级提取封面候选，返回解码后的原始值。
+func extractCoverFromHTML(body []byte) string {
+	rawHTML := string(body)
+	for _, re := range []*regexp.Regexp{metaCoverFirst, metaContentFirst, imgCoverFirst, imgSrcCoverFirst} {
+		if match := re.FindStringSubmatch(rawHTML); len(match) > 1 {
+			if value := strings.TrimSpace(match[1]); value != "" {
+				return html.UnescapeString(value)
+			}
+		}
+	}
+	return ""
+}
+
+// maxCoverProxyBytes 限制封面代理返回的字节数，避免恶意图床耗尽内存。
+const maxCoverProxyBytes = 8 << 20
+
+// coverContentTypes 仅允许栅格图片；拒绝 image/svg+xml 等可在同源执行脚本的类型。
+var coverContentTypes = map[string]bool{
+	"image/jpeg": true, "image/jpg": true, "image/png": true, "image/gif": true,
+	"image/webp": true, "image/avif": true, "image/bmp": true,
+	"image/x-icon": true, "image/vnd.microsoft.icon": true,
+}
+
+// FetchCover 以服务端身份代理抓取书籍封面，供同源 <img> 加载以规避第三方图床防盗链。
+// 只读取当前用户自己的书；外链必须通过 URL/私网预检，抓取走 SSRF 安全的 fetcher。
+func (s *BookService) FetchCover(ctx context.Context, userID, bookID uuid.UUID) ([]byte, string, error) {
+	if s.ft == nil {
+		return nil, "", repository.ErrNotFound
+	}
+	b, err := s.books.Get(ctx, s.pool, userID, bookID)
+	if err != nil {
+		return nil, "", err
+	}
+	raw := ""
+	if b.CustomCoverURL != nil {
+		raw = strings.TrimSpace(*b.CustomCoverURL)
+	}
+	if raw == "" && b.CoverURL != nil {
+		raw = strings.TrimSpace(*b.CoverURL)
+	}
+	if raw == "" || ValidateSourceURL(raw) != nil {
+		return nil, "", repository.ErrNotFound
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	headers := make(http.Header)
+	origin := ""
+	if b.ActiveSourceID != nil {
+		if src, serr := s.sources.Get(ctx, s.pool, userID, *b.ActiveSourceID); serr == nil {
+			origin = strings.TrimSpace(src.BookSourceURL)
+			if parsed := parseSourceHeaders(src.Header); parsed != nil {
+				headers = parsed
+			}
+			fetchCtx = sourceFetchContext(fetchCtx, src)
+			headers = scopeHeadersForTarget(origin, raw, headers)
+		}
+	}
+	// 图床通常校验 Referer；跨域时 scopeHeadersForTarget 会剥掉，服务端代理需要补回书源站点。
+	if origin != "" && headers.Get("Referer") == "" {
+		headers.Set("Referer", origin)
+	}
+	if headers.Get("User-Agent") == "" {
+		headers.Set("User-Agent", "Mozilla/5.0 (compatible; YLReader/1.0)")
+	}
+	resp, err := s.ft.Get(fetchCtx, raw, headers)
+	if err != nil || resp == nil || resp.StatusCode >= 400 || len(resp.Body) == 0 || len(resp.Body) > maxCoverProxyBytes {
+		return nil, "", repository.ErrNotFound
+	}
+	contentType := resp.Header.Get("Content-Type")
+	if parsed, _, perr := mime.ParseMediaType(contentType); perr == nil {
+		contentType = strings.ToLower(parsed)
+	} else if contentType == "" {
+		contentType = http.DetectContentType(resp.Body)
+	}
+	if !coverContentTypes[contentType] {
+		return nil, "", repository.ErrNotFound
+	}
+	return resp.Body, contentType, nil
 }
 
 // normalizeCoverURL 规范化详情页封面：过滤占位/内联值，把相对路径与协议相对

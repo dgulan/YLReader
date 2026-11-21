@@ -23,6 +23,7 @@ test('account reading settings persist across login, preserve other keys and ret
   const title = `阅读设置验证${Date.now()}`, text = `第一章 设置预览\n${Array.from({ length: 150 }, (_, i) => `第${i}段：调整字号后仍应读到同一处。😀 ${title}`).join('\n\n')}`
   const imported = await page.request.post(`/api/v1/books/import?filename=${encodeURIComponent(title + '.txt')}`, { headers: { ...await headers(), 'Content-Type': 'application/octet-stream' }, data: Buffer.from(text) }); expect(imported.ok()).toBeTruthy(); const book = (await imported.json()).book
   await page.goto(`/reader/${book.id}`); await expect(page.getByLabel('章节阅读区')).toHaveAttribute('aria-busy', 'false'); await expect(page.locator('.reader')).toHaveAttribute('data-theme', 'night'); await expect(page.locator('.reader')).toHaveAttribute('style', /28px/)
+  await page.getByRole('button', { name: '设置', exact: true }).click(); await expect(page.locator('#reader-settings')).toBeVisible()
   await page.getByLabel('章节阅读区').evaluate(el => { el.scrollTop = 900 }); await page.getByRole('button', { name: '保存进度', exact: true }).click(); await expect(page.locator('.reader-status')).toHaveText('进度已同步')
   const progress = async () => { const r = await page.request.get(`/api/v1/books/${book.id}/progress`, { headers: await headers() }); return r.json() }
   const before = (await progress()).char_offset; expect(before).toBeGreaterThan(0)

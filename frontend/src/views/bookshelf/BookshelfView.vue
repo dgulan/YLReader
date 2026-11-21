@@ -8,7 +8,7 @@ import { errorText, type Model } from '@/api/client'
 import { detectHorizontalSwipe, type TouchPoint } from '@/views/reader/touchNavigation'
 const router = useRouter(), books = ref<Model<'BookPage'>>(), search = ref<Model<'SearchResponse'>>()
 const page = ref(1), query = ref(''), keyword = ref(''), tab = ref('shelf'), busy = ref(false), searching = ref(false), importing = ref(false), adding = ref(''), error = ref(''), notice = ref('')
-const addedUrls = ref<Record<string, boolean>>({}), brokenCovers = ref<Record<string, boolean>>({})
+const addedUrls = ref<Record<string, boolean>>({}), brokenCovers = ref<Record<string, boolean>>({}), coverRetried = ref<Record<string, boolean>>({})
 let touchStart: TouchPoint | null = null
 function onTouchStart(event: TouchEvent) {
   if (event.touches.length !== 1) { touchStart = null; return }
@@ -35,8 +35,7 @@ function isBookInShelf(item: Model<'SearchBook'>): boolean {
   const list = books.value?.items ?? []
   return list.some(b => b.active_book_url === item.book_url || (b.name.trim() === item.name.trim() && (b.author || '').trim() === (item.author || '').trim()))
 }
-function coverSrc(book: Model<'Book'>): string {
-  if (brokenCovers.value[book.id]) return ''
+function rawCover(book: Model<'Book'>): string {
   let raw = (book.custom_cover_url || book.cover_url || '').trim()
   if (!raw) return ''
   const lower = raw.toLowerCase()
@@ -45,6 +44,16 @@ function coverSrc(book: Model<'Book'>): string {
   // 协议相对地址（//host/x.jpg）补全 scheme，确保 <img> 能正常加载。
   if (raw.startsWith('//')) raw = `https:${raw}`
   return raw
+}
+function coverSrc(book: Model<'Book'>): string {
+  if (brokenCovers.value[book.id] || !rawCover(book)) return ''
+  // 优先走同源代理：由后端携带书源 Referer 抓取，绕开第三方图床防盗链。
+  return `/api/v1/books/${book.id}/cover`
+}
+function coverFailed(book: Model<'Book'>) {
+  // 代理失败时回退到原始外链，二者都失败才显示文字书封。
+  if (coverRetried.value[book.id]) brokenCovers.value[book.id] = true
+  else coverRetried.value[book.id] = true
 }
 let loadSerial = 0
 let loadController: AbortController | undefined
@@ -81,7 +90,7 @@ onBeforeUnmount(() => { disposed = true; cancelLoad(); window.removeEventListene
     <ElTabs v-model="tab"><ElTabPane label="我的书架" name="shelf"><form class="search-row" @submit.prevent="page = 1; load()"><ElInput v-model="query" aria-label="筛选书架" placeholder="按书名或作者筛选" clearable @clear="page = 1; load()" /><ElButton native-type="submit" :loading="busy">筛选</ElButton><span class="muted count">{{ books?.total ?? 0 }} 本藏书</span></form>
       <ElSkeleton v-if="busy && !books" :rows="6" animated />
       <ElEmpty v-else-if="!books?.items.length" description="书架还很安静。导入一本书，或去找书吧。" />
-      <section v-else class="book-grid" aria-label="书架"><article v-for="book in books.items" :key="book.id" class="book-card"><button class="book-open" @click="read(book)"><span class="book-cover" :class="{ local: book.book_type === 'local', 'has-image': Boolean(coverSrc(book)) }"><img v-if="coverSrc(book)" class="book-cover-img" :src="coverSrc(book)" :alt="book.name" referrerpolicy="no-referrer" loading="lazy" @error="brokenCovers[book.id] = true" /><template v-else><span>{{ book.name.slice(0, 6) }}</span><small>{{ book.book_type === 'local' ? '私人藏书' : '在线阅读' }}</small></template></span><h2>{{ book.name }}</h2><p>{{ book.author || '佚名' }}</p></button><div class="book-meta"><span v-if="book.needs_source">需要重新选源</span><span v-else-if="book.progress">读至第 {{ book.progress.chapter_index + 1 }} 章</span><span v-else>尚未开始</span><span>{{ book.total_chapters }} 章</span></div><ElButton class="read-button" @click="read(book)">{{ book.progress ? '继续阅读' : '开始阅读' }}</ElButton><ElButton class="cache-button" @click="router.push(`/books/${book.id}/edit`)">管理书籍</ElButton><ElButton v-if="book.book_type === 'online'" class="cache-button" @click="router.push(`/books/${book.id}/cache`)">后台缓存</ElButton></article></section>
+      <section v-else class="book-grid" aria-label="书架"><article v-for="book in books.items" :key="book.id" class="book-card"><button class="book-open" @click="read(book)"><span class="book-cover" :class="{ local: book.book_type === 'local', 'has-image': Boolean(coverSrc(book)) }"><img v-if="coverSrc(book)" class="book-cover-img" :src="coverRetried[book.id] ? rawCover(book) : coverSrc(book)" :alt="book.name" referrerpolicy="no-referrer" loading="lazy" @error="coverFailed(book)" /><template v-else><span>{{ book.name.slice(0, 6) }}</span><small>{{ book.book_type === 'local' ? '私人藏书' : '在线阅读' }}</small></template></span><h2>{{ book.name }}</h2><p>{{ book.author || '佚名' }}</p></button><div class="book-meta"><span v-if="book.needs_source">需要重新选源</span><span v-else-if="book.progress">读至第 {{ book.progress.chapter_index + 1 }} 章</span><span v-else>尚未开始</span><span>{{ book.total_chapters }} 章</span></div><ElButton class="read-button" @click="read(book)">{{ book.progress ? '继续阅读' : '开始阅读' }}</ElButton><ElButton class="cache-button" @click="router.push(`/books/${book.id}/edit`)">管理书籍</ElButton><ElButton v-if="book.book_type === 'online'" class="cache-button" @click="router.push(`/books/${book.id}/cache`)">后台缓存</ElButton></article></section>
       <ElPagination v-if="books && books.total > 20" v-model:current-page="page" :page-size="20" :total="books.total" layout="prev, pager, next" @current-change="load" />
     </ElTabPane><ElTabPane label="发现新书" name="search"><form class="search-row" @submit.prevent="findBooks"><ElInput v-model="keyword" aria-label="搜索书籍" placeholder="输入书名或作者，搜索启用的书源" clearable /><ElButton type="primary" native-type="submit" :loading="searching">搜索</ElButton></form><p class="muted">先在书源页面导入 Legado 书源，再开始搜索。</p><details v-if="search?.failures?.length" class="failure-details" :open="search.failures.length <= 2"><summary class="error-note">{{ search.failures.length }} 个书源未返回结果（点击展开详情）</summary><p v-for="failure in search.failures" :key="failure.source_id" class="error-note">部分书源搜索失败：{{ failure.message }}</p></details><ElEmpty v-if="search && !search.total" description="没有找到结果，试试其他关键词或书源" /><section v-for="group in search?.groups" :key="group.source_id" class="search-group"><h2>{{ group.source_name }}</h2><article v-for="book in group.items" :key="book.book_url" class="search-result"><div><h3>{{ book.name }}</h3><p class="muted">{{ book.author || '佚名' }} · {{ book.latest_chapter || '暂无更新信息' }}</p><p class="intro">{{ book.intro }}</p></div><ElButton :loading="adding === book.book_url" :disabled="!!adding || isBookInShelf(book)" @click="add(book)">{{ isBookInShelf(book) ? '已放入书架' : '加入书架' }}</ElButton></article></section></ElTabPane></ElTabs>
   </main>
