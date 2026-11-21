@@ -7,6 +7,29 @@ cd "$ROOT_DIR"
 COMPOSE_FILE="docker-compose.prod.yml"
 ENV_FILE=".env"
 ENV_EXAMPLE=".env.example"
+BUILD_MODE=0
+
+usage() {
+  cat <<'EOF'
+用法: ./scripts/deploy.sh [--build]
+
+  （无参数）  拉取 GitHub Actions 预构建镜像并启动，无需 Go/Node 编译器。
+  --build     使用本地源码构建镜像后启动（可配合 .env 中的 ALPINE_MIRROR /
+              GOPROXY / NPM_REGISTRY 使用国内镜像加速）。
+EOF
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --build) BUILD_MODE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      echo "错误: 未知参数 $arg" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 
 set_env_var() {
   local key="$1"
@@ -52,13 +75,14 @@ if [ ! -f "$ENV_FILE" ]; then
 
   cat <<'EOF'
 已从 .env.example 初始化 .env，并已通过 openssl 自动生成随机 JWT_SECRET 与 YREADER_HEADER_KEY_primary。
-请先编辑 .env 修改至少以下密码与账户配置后，再次执行 ./scripts/deploy.sh：
+请先编辑 .env（例如执行 nano .env）修改至少以下密码与账户配置后，再次执行 ./scripts/deploy.sh：
   - POSTGRES_PASSWORD
   - REDIS_PASSWORD
   - SEED_USERNAME / SEED_PASSWORD（首次初始化管理员账号）
 可选配置：
   - YLREADER_BIND_IP（默认 127.0.0.1；局域网直连请改为 0.0.0.0）
-  - GOPROXY / NPM_REGISTRY（国内网络建议取消对应镜像源注释）
+  - YLREADER_IMAGE_TAG（预构建镜像版本，默认 v1.1.0）
+  - ALPINE_MIRROR / GOPROXY / NPM_REGISTRY（仅 --build 源码构建时生效，国内网络建议取消注释）
 EOF
   exit 0
 fi
@@ -83,16 +107,37 @@ done
 mkdir -p data/backups
 
 docker compose -f "$COMPOSE_FILE" config --quiet
-docker compose -f "$COMPOSE_FILE" build
+
+image_tag="${YLREADER_IMAGE_TAG:-v1.1.0}"
+
+if [ "$BUILD_MODE" -eq 1 ]; then
+  echo "==> 源码构建模式：开始构建本地镜像（首次构建较慢，可在 .env 中配置 ALPINE_MIRROR / GOPROXY / NPM_REGISTRY 加速）..."
+  docker compose -f "$COMPOSE_FILE" build
+else
+  echo "==> 预构建镜像模式：拉取 ghcr.io/dgulan/ylreader-{backend,frontend,worker}:${image_tag} ..."
+  if ! docker compose -f "$COMPOSE_FILE" pull; then
+    echo "错误: 预构建镜像拉取失败，请确认网络可达 ghcr.io 且镜像标签 ${image_tag} 已发布。" >&2
+    echo "      若提示 denied，请先 docker login ghcr.io，或将镜像包可见性调整为 public。" >&2
+    echo "      也可改用源码构建：./scripts/deploy.sh --build" >&2
+    exit 1
+  fi
+fi
+
 docker compose -f "$COMPOSE_FILE" up -d --wait postgres redis
 
 db_name="${POSTGRES_DB:-yreader}"
 docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint /migrator app \
   schema up --production-confirm-db="$db_name"
 
-docker compose -f "$COMPOSE_FILE" up -d
+if [ "$BUILD_MODE" -eq 1 ]; then
+  docker compose -f "$COMPOSE_FILE" up -d --build
+  mode_desc="源码构建 (--build)"
+else
+  docker compose -f "$COMPOSE_FILE" up -d
+  mode_desc="预构建镜像 (${image_tag})"
+fi
 
 bind_ip="${YLREADER_BIND_IP:-127.0.0.1}"
 http_port="${YLREADER_HTTP_PORT:-8080}"
-echo "YLReader 已在后台启动，当前监听地址: http://${bind_ip}:${http_port}"
+echo "YLReader 已在后台启动（${mode_desc}），当前监听地址: http://${bind_ip}:${http_port}"
 docker compose -f "$COMPOSE_FILE" ps

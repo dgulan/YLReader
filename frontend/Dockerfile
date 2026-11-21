@@ -9,6 +9,8 @@ RUN npm run build
 
 # ---- 运行阶段（最小化 Alpine 3.24.4 + 核心 Nginx，去除多余模块与 curl/libxslt 等 50+ 额外包）----
 FROM alpine:3.24.4
+ARG ALPINE_MIRROR=
+RUN [ -z "$ALPINE_MIRROR" ] || sed -i "s|dl-cdn.alpinelinux.org|${ALPINE_MIRROR}|g" /etc/apk/repositories
 RUN apk upgrade --no-cache \
     && apk add --no-cache nginx 'zlib>=1.4-r0' \
     && rm -rf /etc/nginx/http.d/default.conf \

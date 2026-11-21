@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 # Linux race verification image, never used as a production runtime.
 FROM golang:1.26.11-alpine3.24
+ARG ALPINE_MIRROR=
+RUN [ -z "$ALPINE_MIRROR" ] || sed -i "s|dl-cdn.alpinelinux.org|${ALPINE_MIRROR}|g" /etc/apk/repositories
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 RUN apk add --no-cache build-base

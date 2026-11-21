@@ -27,10 +27,12 @@ services:
       - chown 10001:10001 /run/worker-1 /run/worker-2 && chmod 0700 /run/worker-1 /run/worker-2
 
   sandboxworker-1:
+    image: ghcr.io/dgulan/ylreader-worker:${YLREADER_IMAGE_TAG:-v1.1.0}
     build:
       context: ./backend
       dockerfile: Dockerfile.sandboxworker
       args:
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       sandboxworker-init:
@@ -56,10 +58,12 @@ services:
     restart: unless-stopped
 
   sandboxworker-2:
+    image: ghcr.io/dgulan/ylreader-worker:${YLREADER_IMAGE_TAG:-v1.1.0}
     build:
       context: ./backend
       dockerfile: Dockerfile.sandboxworker
       args:
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     depends_on:
       sandboxworker-init:
@@ -85,9 +89,11 @@ services:
     restart: unless-stopped
 
   app:
+    image: ghcr.io/dgulan/ylreader-backend:${YLREADER_IMAGE_TAG:-v1.1.0}
     build:
       context: ./backend
       args:
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-}
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     read_only: true
     user: "10001:10001"
@@ -139,9 +145,11 @@ services:
     restart: unless-stopped
 
   frontend:
+    image: ghcr.io/dgulan/ylreader-frontend:${YLREADER_IMAGE_TAG:-v1.1.0}
     build:
       context: ./frontend
       args:
+        ALPINE_MIRROR: ${ALPINE_MIRROR:-}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     read_only: true
     cap_drop:

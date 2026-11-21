@@ -1,5 +1,7 @@
 # Independent offline worker. Runtime isolation flags and private IPC mount are mandatory.
 FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine3.24 AS build
+ARG ALPINE_MIRROR=
+RUN [ -z "$ALPINE_MIRROR" ] || sed -i "s|dl-cdn.alpinelinux.org|${ALPINE_MIRROR}|g" /etc/apk/repositories
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 WORKDIR /src

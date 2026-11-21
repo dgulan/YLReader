@@ -309,6 +309,41 @@ jobs:
             trivy-${{ matrix.component }}-${{ matrix.arch }}.json
             dist-images/ylreader-image-${{ matrix.component }}-linux-${{ matrix.arch }}.tar.gz.sha256
 
+  publish-ghcr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [contracts-and-security, backend-race-integration, frontend-and-e2e, images]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend, worker]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch GHCR image (${{ matrix.component }})
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.component == 'worker' && 'backend' || matrix.component }}
+          file: ./${{ matrix.component == 'worker' && 'backend/Dockerfile.sandboxworker' || format('{0}/Dockerfile', matrix.component) }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/dgulan/ylreader-${{ matrix.component }}:${{ github.ref_name }}
+            ghcr.io/dgulan/ylreader-${{ matrix.component }}:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/dgulan/YLReader
+            org.opencontainers.image.revision=${{ github.sha }}
+
   release-bundle:
     runs-on: ubuntu-latest
     timeout-minutes: 15
