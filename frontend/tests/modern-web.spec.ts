@@ -133,3 +133,28 @@ test('production reader avoids management CSS until navigating to the bookshelf'
   expect(css.length).toBeGreaterThan(before)
   expect(await hasElementStyles()).toBe(true)
 })
+
+test('floating bars preserve the text position and reappear at the chapter end', async ({ page }) => {
+  await readerFixture(page)
+  const viewport = page.getByLabel('章节阅读区')
+  const header = page.locator('.reader-header')
+  const footer = page.locator('.reader-footer')
+  const text = page.locator('.chapter-paragraph').first()
+  const geometry = () => viewport.evaluate(el => ({
+    scroll: el.scrollTop, height: el.clientHeight,
+    textTop: el.querySelector('.chapter-paragraph')!.getBoundingClientRect().top,
+  }))
+  await viewport.evaluate(el => { el.scrollTop = 240 })
+  const before = await geometry()
+  await viewport.click({ position: { x: 200, y: 300 } })
+  await expect(header).toBeHidden()
+  await expect(footer).toBeHidden()
+  expect(await geometry()).toEqual(before)
+  await viewport.evaluate(el => { el.scrollTop = el.scrollHeight })
+  await expect(footer).toBeVisible()
+  await expect(header).toBeHidden()
+  await expect(page.getByRole('button', { name: '下一章' })).toBeEnabled()
+  await viewport.evaluate(el => { el.scrollTop = 0 })
+  await expect(footer).toBeHidden()
+  await expect(text).toBeVisible()
+})

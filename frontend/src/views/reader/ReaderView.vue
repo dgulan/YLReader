@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import '@/reader-overlays.css'
-import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { api } from '@/api/reader'
 import { getSession, errorText, ApiError, type Model } from '@/api/client'
@@ -42,11 +42,14 @@ const viewport = ref<HTMLElement>(), body = ref<HTMLElement>(), drawer = ref<HTM
 const restoring = ref(false)
 const immersive = ref(false)
 // 本章阅读进度（0–100）：按正文容器的实际滚动位置实时计算，内容不足一屏视为 100%。
-const scrollPercent = ref(0)
+const scrollPercent = ref(0), atChapterBottom = ref(false)
+const article = ref<HTMLElement>()
+let scrollObserver: ResizeObserver | undefined
 function updateScrollPercent() {
   const el = viewport.value
-  if (!el || loading.value) return
+  if (!el || !content.value || loading.value || restoring.value || error.value) { atChapterBottom.value = false; return }
   const max = el.scrollHeight - el.clientHeight
+  atChapterBottom.value = el.scrollTop + el.clientHeight >= el.scrollHeight - 24
   scrollPercent.value = max <= 0 ? 100 : Math.min(100, Math.max(0, Math.round((el.scrollTop / max) * 100)))
 }
 // 正文按行拆分为独立段落；start 记录该段首个可见字符在全文中的码点偏移，供位置持久化。
@@ -62,7 +65,14 @@ const paragraphs = computed(() => {
   }
   return out
 })
-watch([settingsOpen, immersive], () => { void nextTick(updateScrollPercent) })
+watch([loading, restoring, content, error], updateScrollPercent, { flush: 'post' })
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined') return
+  scrollObserver = new ResizeObserver(updateScrollPercent)
+  if (viewport.value) scrollObserver.observe(viewport.value)
+  if (article.value) scrollObserver.observe(article.value)
+})
+onBeforeUnmount(() => scrollObserver?.disconnect())
 const localFault = ref(false)
 let touchStart: TouchPoint | null = null
 function onTouchStart(event: TouchEvent) {
@@ -368,14 +378,16 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
         <button type="button" class="reader-settings-toggle" :aria-expanded="settingsOpen" aria-controls="reader-settings" :disabled="loading || restoring" @click="settingsOpen = !settingsOpen">设置</button>
       </div>
     </header>
+    <div class="reader-messages" :class="{ 'without-header': immersive }">
     <div v-if="conflict" class="reader-conflict" role="alert"><p>服务器当前位于第 {{ conflict.chapter_index + 1 }} 章。请选择要保留的位置。</p><button :disabled="reviewing || saving || loading || restoring" @click="keepMine">保留本机位置</button><button :disabled="reviewing || saving || loading || restoring" @click="useRemote">使用另一端位置</button></div>
     <p v-if="uncertain && !conflict" class="reader-notice" role="status">保存结果待确认 <button :disabled="reviewing || saving || loading || restoring" @click="reviewProgress">{{ reviewing ? '正在核对…' : '核对服务器进度' }}</button></p>
     <p v-if="cacheNotice" class="reader-notice" role="status">{{ cacheNotice }} <button type="button" @click="cacheNotice = ''">知道了</button></p>
     <p v-if="saveError" class="reader-notice" role="status">{{ saveError }}</p>
     <p v-if="config.error" class="reader-notice" role="status">{{ config.error }} <button :disabled="config.loading || config.saving" @click="config.retry">重试设置同步</button></p>
+    </div>
     <section ref="viewport" class="reader-viewport" :aria-busy="loading || restoring" aria-label="章节阅读区" tabindex="0" @scroll="scroll" @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" @click="toggleToolbar">
       <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="boot">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
-      <article v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><div ref="body" class="chapter-body"><p v-for="(para, i) in paragraphs" :key="i + ':' + para.start" class="chapter-paragraph" :data-start="para.start">{{ para.text }}</p></div><p class="chapter-end">本章完</p></article>
+      <article ref="article" v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><div ref="body" class="chapter-body"><p v-for="(para, i) in paragraphs" :key="i + ':' + para.start" class="chapter-paragraph" :data-start="para.start">{{ para.text }}</p></div><p class="chapter-end">本章完</p></article>
     </section>
     <p v-if="immersive" class="reader-chapter-mark" aria-hidden="true">{{ title }}</p>
     <section v-if="settingsOpen && !immersive" id="reader-settings" class="reader-settings" aria-label="阅读设置">
@@ -418,7 +430,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
         </div>
       </div>
     </section>
-    <footer v-show="!immersive" class="reader-footer">
+    <footer v-show="!immersive || atChapterBottom" class="reader-footer">
       <div class="reader-chapter-track" role="progressbar" aria-label="本章阅读进度" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="scrollPercent"><span :style="{ width: scrollPercent + '%' }" /></div>
       <div class="reader-nav">
         <button class="reader-nav-button" :disabled="loading || restoring || !content || content.prev_chapter_index == null" @click="changeChapter(content!.prev_chapter_index!)">上一章</button>
@@ -476,4 +488,28 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 .reader-setting-actions { display: inline-flex; flex-wrap: wrap; gap: 6px; }
 .reader-setting-actions button.active { border-color: var(--reader-ink); color: var(--reader-ink); }
 @media (max-width: 650px) { .reader-utility { justify-content: center; } .reader-nav { gap: 8px; } .reader-setting-group { justify-content: space-between; } .reader select, .reader input { font-size: 16px; } }
+
+.reader-header, .reader-footer, .reader-settings, .reader-messages {
+  position: fixed;
+  inset-inline: 0;
+  background: var(--reader-bg);
+  z-index: 20;
+}
+.reader-header { top: 0; }
+.reader-footer { bottom: 0; padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+.reader-settings { bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 21; }
+.reader-messages { top: calc(64px + env(safe-area-inset-top)); }
+.reader-messages.without-header { top: env(safe-area-inset-top); }
+.reader-viewport {
+  flex: none;
+  box-sizing: border-box;
+  height: 100dvh;
+  overflow-y: auto;
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
+}
+.reader-article { padding-top: calc(80px + env(safe-area-inset-top)); padding-bottom: 0; }
+@media (max-width: 650px) {
+  .reader-article { padding-top: calc(104px + env(safe-area-inset-top)); }
+  .reader-messages { top: calc(104px + env(safe-area-inset-top)); }
+}
 </style>

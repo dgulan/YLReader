@@ -2,6 +2,7 @@ import { computed, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 import { api } from '@/api/reader'
 import { ApiError, errorText, getSession, type Model } from '@/api/client'
 import { bookKey, clearBookCache, db } from '@/db/chapters'
+import { invalidateBookCover } from './coverCache'
 export interface BookDraft { name: string; author: string; status: Model<'Book'>['status']; intro: string }
 const empty = (): BookDraft => ({ name: '', author: '', status: 'unknown', intro: '' })
 export function bookPatch(draft: BookDraft, version: number): Model<'BookUpdate'> {
@@ -86,6 +87,7 @@ export function useBookEditor(bookId: Ref<string>) {
     try {
       const patch = bookPatch(draft, book.value.version); busy.value = true
       const value = await api.updateBook(id, patch); if (!valid(token)) return false
+      invalidateBookCover(owner, id, value.custom_cover_url || value.cover_url || undefined)
       apply(value)
       try { await db.transaction('rw', db.books, db.chapters, async () => { await db.books.delete(bookKey(owner, id)); await db.chapters.where('[owner+bookId]').equals([owner, id]).delete() }); if (valid(token)) notice.value = '书籍信息已保存，重新打开章节即可更新本机缓存' }
       catch { if (valid(token)) notice.value = '书籍信息已保存，但本机缓存更新失败，请联网重新打开章节' }
@@ -99,6 +101,7 @@ export function useBookEditor(bookId: Ref<string>) {
     const token = generation, id = bookId.value; busy.value = true; error.value = ''; notice.value = ''
     try {
       try { await api.deleteBook(id) } catch (e) { if (!(e instanceof ApiError && e.status === 404)) throw e }
+      invalidateBookCover(owner, id)
       if (!valid(token)) return false
       deleted.value = true
       try { await clearBookCache(owner, id); await db.jobs.delete(bookKey(owner, id)); if (valid(token)) notice.value = '书籍已删除' }

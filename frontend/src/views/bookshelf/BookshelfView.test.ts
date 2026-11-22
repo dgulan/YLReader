@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/api/reader'
 import { setSession, type Model } from '@/api/client'
 import BookshelfView from './BookshelfView.vue'
+import { invalidateBookCover } from './coverCache'
 
 vi.mock('element-plus', async () => {
   const { h } = await import('vue')
@@ -77,7 +78,7 @@ it('cancels pending GETs on early document teardown without preventing navigatio
   await nextTick(); await nextTick()
   expect(host.querySelector('[title="synthetic-cancel"]')).toBeNull()
 })
-it('authenticates the cover fetch, displays the blob and revokes it on teardown', async () => {
+it('authenticates the cover fetch, reuses the authenticated blob across mounts and falls back on image errors', async () => {
   setSession({ access_token: 'cover-token', refresh_token: 'test', token_type: 'Bearer', expires_in: 900,
     user: { id: 'owner', username: 'reader', role: 'user', token_version: 1, created_at: '' } })
   const fetchCover = vi.fn().mockResolvedValue(new Response(new Blob(['image'], { type: 'image/png' }), { headers: { 'Content-Type': 'image/png' } }))
@@ -114,11 +115,21 @@ it('authenticates the cover fetch, displays the blob and revokes it on teardown'
   const [path, init] = fetchCover.mock.calls[0]!
   expect(path).toBe('/api/v1/books/b1/cover')
   expect(new Headers(init.headers).get('Authorization')).toBe('Bearer cover-token')
-  img.dispatchEvent(new Event('error'))
+  app!.unmount(); app = undefined; host.remove()
+  expect(revoke).not.toHaveBeenCalled()
+  await mount()
+  const cached = host.querySelector<HTMLImageElement>('img.book-cover-img')!
+  expect(cached.getAttribute('src')).toBe('blob:cover-test')
+  expect(fetchCover).toHaveBeenCalledTimes(1)
+  cached.dispatchEvent(new Event('error'))
+  await nextTick()
+  expect(host.querySelector('img.book-cover-img')?.getAttribute('src')).toBe('https://img.example/cover1.jpg')
+  expect(host.querySelector('.book-cover')?.textContent).not.toContain('带封面书')
+  host.querySelector('img.book-cover-img')!.dispatchEvent(new Event('error'))
   await nextTick()
   expect(host.querySelector('img.book-cover-img')).toBeNull()
   expect(host.querySelector('.book-cover')?.textContent).toContain('带封面书')
-  app!.unmount(); app = undefined
+  invalidateBookCover('owner', 'b1')
   expect(revoke).toHaveBeenCalledWith('blob:cover-test')
 })
 it('expands search failures when <= 2 and collapses when > 2', async () => {

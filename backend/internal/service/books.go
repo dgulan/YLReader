@@ -284,8 +284,10 @@ func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSo
 		engine := parser.New(s.sb)
 		engine.SetVariable("baseUrl", base)
 		if raw, eerr := engine.Eval(fetchCtx, rule, string(resp.Body)); eerr == nil {
-			if cover := normalizeCoverURL(raw, base); cover != nil {
-				return cover
+			for _, candidate := range strings.Split(raw, "\n") {
+				if cover := normalizeCoverURL(candidate, base); cover != nil {
+					return cover
+				}
 			}
 		}
 	}
@@ -389,8 +391,12 @@ func (s *BookService) FetchCover(ctx context.Context, userID, bookID uuid.UUID) 
 		"User-Agent": {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"},
 		"Accept":     {"image/*"},
 	}
-	if referer, err := url.Parse(origin); err == nil && validateHTTPURL(origin) == nil {
-		headers.Set("Referer", (&url.URL{Scheme: referer.Scheme, Host: referer.Host, Path: "/"}).String())
+	for _, candidate := range []string{origin, base, *cover} {
+		if ValidateSourceURL(candidate) == nil {
+			referer, _ := url.Parse(candidate)
+			headers.Set("Referer", (&url.URL{Scheme: referer.Scheme, Host: referer.Host, Path: "/"}).String())
+			break
+		}
 	}
 	var resp *fetcher.Response
 	if images, ok := s.ft.(interface {
