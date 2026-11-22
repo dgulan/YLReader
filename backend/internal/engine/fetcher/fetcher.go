@@ -216,7 +216,7 @@ func (f *Fetcher) Fetch(ctx context.Context, method, rawURL string, header http.
 				resp.Body.Close()
 				return nil, ErrChallengeRequired
 			}
-			decoded, err := f.decode(resp, rawURL)
+			decoded, err := f.decodeWithContext(ctx, resp, rawURL)
 			if err == nil && challengeResponse(decoded.StatusCode, decoded.Header, decoded.Body) {
 				return nil, ErrChallengeRequired
 			}
@@ -270,28 +270,65 @@ func validateTarget(u *url.URL) error {
 	return nil
 }
 
+type responseModeKey struct{}
+type responseMode struct {
+	charset     string
+	binaryLimit int64
+}
+
+func WithResponseCharset(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, responseModeKey{}, responseMode{charset: name})
+}
+
+func (f *Fetcher) GetImage(ctx context.Context, rawURL string, header http.Header, limit int64) (*Response, error) {
+	if limit <= 0 {
+		return nil, ErrBodyTooLarge
+	}
+	ctx = context.WithValue(ctx, responseModeKey{}, responseMode{binaryLimit: limit})
+	return f.Get(ctx, rawURL, header)
+}
+
 func (f *Fetcher) decode(resp *http.Response, rawURL string) (*Response, error) {
+	return f.decodeWithContext(context.Background(), resp, rawURL)
+}
+
+func (f *Fetcher) decodeWithContext(ctx context.Context, resp *http.Response, rawURL string) (*Response, error) {
 	defer resp.Body.Close()
 	ct := resp.Header.Get("Content-Type")
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, f.cfg.MaxBodyBytes+1))
+	mode, _ := ctx.Value(responseModeKey{}).(responseMode)
+	limit := f.cfg.MaxBodyBytes
+	if mode.binaryLimit > 0 {
+		limit = min(limit, mode.binaryLimit)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUpstreamError, err)
 	}
-	if int64(len(raw)) > f.cfg.MaxBodyBytes {
+	if int64(len(raw)) > limit {
 		return nil, ErrBodyTooLarge
 	}
-	encoding, name, certain := charset.DetermineEncoding(raw, ct)
-	peek := raw[:min(len(raw), 1024)]
-	if !certain && name == "windows-1252" && !utf8.Valid(raw) && !bytes.Contains(bytes.ToLower(peek), []byte("charset")) {
-		encoding = simplifiedchinese.GB18030
-	}
-	r := transform.NewReader(bytes.NewReader(raw), encoding.NewDecoder())
-	data, err := io.ReadAll(io.LimitReader(r, f.cfg.MaxBodyBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrUpstreamError, err)
-	}
-	if int64(len(data)) > f.cfg.MaxBodyBytes {
-		return nil, ErrBodyTooLarge
+	data := raw
+	if mode.binaryLimit == 0 {
+		encoding, name, certain := charset.DetermineEncoding(raw, ct)
+		peek := raw[:min(len(raw), 1024)]
+		if !certain && !bytes.Contains(bytes.ToLower(peek), []byte("charset")) {
+			switch {
+			case mode.charset == "gb18030":
+				encoding = simplifiedchinese.GB18030
+			case mode.charset == "gbk" || mode.charset == "gb2312":
+				encoding = simplifiedchinese.GBK
+			case name == "windows-1252" && !utf8.Valid(raw):
+				encoding = simplifiedchinese.GB18030
+			}
+		}
+		r := transform.NewReader(bytes.NewReader(raw), encoding.NewDecoder())
+		data, err = io.ReadAll(io.LimitReader(r, limit+1))
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrUpstreamError, err)
+		}
+		if int64(len(data)) > limit {
+			return nil, ErrBodyTooLarge
+		}
 	}
 	// 防御性回填 FinalURL：优先取响应携带的请求 URL（重定向后的最终地址），
 	// 任一环节为 nil 时安全回退为本次 Fetch 的原始入参，严禁裸调 panic。

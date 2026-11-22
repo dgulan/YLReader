@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/sync/semaphore"
 
 	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/engine/parser"
@@ -22,9 +22,7 @@ import (
 	"yreader/backend/internal/repository"
 )
 
-// 搜索编排的安全边界：单次参与书源数、全局并发度、单源硬超时。
-// 100+ 书源的场景下不再只取权重最高的前 20 个，而是全量（上限 200）参与，
-// 由并发池与单源超时保证整体时延可控；失败的源照旧隔离进 Failures。
+// 显式选源上限、进程内并发限制和单源预算。
 const (
 	searchSourceLimit   = 200
 	searchConcurrency   = 16
@@ -76,6 +74,7 @@ type SearchService struct {
 	ft      Fetcher
 	sb      *sandbox.Sandbox
 	health  *SourceHealthService
+	slots   chan struct{}
 }
 
 // NewSearchService 构造搜索服务。
@@ -86,6 +85,7 @@ func NewSearchService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox) *Sear
 		ft:      ft,
 		sb:      sb,
 		health:  NewSourceHealthService(pool, nil),
+		slots:   make(chan struct{}, searchConcurrency),
 	}
 }
 
@@ -118,63 +118,129 @@ func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword st
 	}
 	out.Failures = append(out.Failures, early...)
 
-	// 全局并发度 ≤ searchConcurrency；严禁 errgroup 在单源失败时 cancel 整个 context。
-	sem := semaphore.NewWeighted(searchConcurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, src := range sources {
-		src := src
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					panicErr := fmt.Errorf("search source panic: %v", r)
-					s.health.RecordFailure(src.UserID, src.ID, panicErr)
-					mu.Lock()
-					out.Failures = append(out.Failures, SearchFailure{SourceID: src.ID, Err: panicErr})
-					mu.Unlock()
-				}
-			}()
-			if err := sem.Acquire(ctx, 1); err != nil {
-				mu.Lock()
-				out.Failures = append(out.Failures, SearchFailure{SourceID: src.ID, Err: err})
-				mu.Unlock()
-				return
-			}
-			defer sem.Release(1)
-
-			start := time.Now()
-			items, err := s.searchOne(ctx, src, keyword, page, pageSize)
-			if err != nil {
-				mu.Lock()
-				out.Failures = append(out.Failures, SearchFailure{SourceID: src.ID, Err: err})
-				mu.Unlock()
-				return
-			}
-			mu.Lock()
-			out.Groups = append(out.Groups, GroupResult{
-				SourceID:   src.ID,
-				SourceName: src.BookSourceName,
-				ElapsedMs:  int(time.Since(start).Milliseconds()),
-				Items:      items,
-			})
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
+	s.searchSources(ctx, sources, keyword, page, pageSize, out)
 	return out, nil
+}
+
+func (s *SearchService) searchSources(ctx context.Context, sources []*repository.BookSource, keyword string, page, pageSize int, out *SearchOutcome) {
+	type result struct {
+		group  GroupResult
+		err    error
+		weight int32
+	}
+	results := make([]result, len(sources))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	run := func(index int) (res result) {
+		src := sources[index]
+		defer func() {
+			if recover() != nil {
+				res.err = fmt.Errorf("search source panic")
+			}
+		}()
+		select {
+		case <-ctx.Done():
+			res.err = ctx.Err()
+			return
+		case s.slots <- struct{}{}:
+		}
+		defer func() { <-s.slots }()
+		start := time.Now()
+		items, err := s.searchOne(ctx, src, keyword, page, pageSize)
+		if err != nil {
+			res.err = err
+			return
+		}
+		sort.SliceStable(items, func(i, j int) bool { return searchRelevance(items[i], keyword) > searchRelevance(items[j], keyword) })
+		if len(items) > pageSize {
+			items = items[:pageSize]
+		}
+		res.group = GroupResult{SourceID: src.ID, SourceName: src.BookSourceName, ElapsedMs: int(time.Since(start).Milliseconds()), Items: items}
+		res.weight = src.Weight
+		return
+	}
+	for range min(searchConcurrency, len(sources)) {
+		workers.Go(func() {
+			for index := range jobs {
+				results[index] = run(index)
+			}
+		})
+	}
+dispatch:
+	for i := range sources {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			for j := i; j < len(sources); j++ {
+				results[j].err = ctx.Err()
+			}
+			break dispatch
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	var ranked []result
+	for i, res := range results {
+		if res.err != nil {
+			out.Failures = append(out.Failures, SearchFailure{SourceID: sources[i].ID, Err: res.err})
+		} else {
+			ranked = append(ranked, res)
+		}
+	}
+	score := func(g GroupResult) int {
+		if len(g.Items) == 0 {
+			return -1
+		}
+		return searchRelevance(g.Items[0], keyword)
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		a, b := ranked[i], ranked[j]
+		if x, y := score(a.group), score(b.group); x != y {
+			return x > y
+		}
+		if a.weight != b.weight {
+			return a.weight > b.weight
+		}
+		return a.group.SourceID.String() < b.group.SourceID.String()
+	})
+	for _, res := range ranked {
+		out.Groups = append(out.Groups, res.group)
+	}
+}
+
+func searchRelevance(item BookItem, keyword string) int {
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	title := strings.ToLower(strings.TrimSpace(item.Name))
+	author := strings.ToLower(strings.TrimSpace(item.Author))
+	switch {
+	case title == keyword:
+		return 4
+	case strings.HasPrefix(title, keyword):
+		return 3
+	case strings.Contains(title, keyword):
+		return 2
+	case strings.Contains(author, keyword):
+		return 1
+	default:
+		return 0
+	}
 }
 
 // pickSources 解析参与搜索的书源：去重、容量防御、单次全查、内存三路分流。
 func (s *SearchService) pickSources(ctx context.Context, userID uuid.UUID, sourceIDs []uuid.UUID) ([]*repository.BookSource, []SearchFailure, error) {
 	if len(sourceIDs) == 0 {
-		enabled := true
-		list, _, err := s.sources.List(ctx, s.pool, userID, repository.SourceListFilter{
-			Enabled: &enabled, Sort: "weight_desc", Limit: searchSourceLimit, ExcludeLocal: true,
-		})
-		return list, nil, err
+		list, err := s.sources.ListEnabledForSearch(ctx, s.pool, userID)
+		if err != nil {
+			return nil, nil, err
+		}
+		eligible := list[:0]
+		for _, src := range list {
+			rules := parseSearchRules(src.Rules)
+			if strings.TrimSpace(rules.SearchURL) != "" && strings.TrimSpace(rules.BookList) != "" {
+				eligible = append(eligible, src)
+			}
+		}
+		return eligible, nil, nil
 	}
 
 	seen := make(map[uuid.UUID]struct{}, len(sourceIDs))
@@ -230,13 +296,14 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 		return nil, err
 	}
 
-	request, err := parseSearchRequest(rules.SearchURL, keyword, page)
+	request, err := s.buildSearchRequest(ctx, src.BookSourceURL, rules.SearchURL, keyword, page)
 	if err != nil {
 		s.health.RecordFailure(src.UserID, src.ID, err)
 		return nil, err
 	}
 	target := resolveURL(src.BookSourceURL, request.url)
 	headers := scopeHeadersForTarget(src.BookSourceURL, target, mergeHeaders(parseSourceHeaders(src.Header), request.header))
+	ctx = fetcher.WithResponseCharset(ctx, request.charset)
 	var resp *fetcher.Response
 	if request.method == http.MethodGet {
 		resp, err = s.ft.Get(ctx, target, headers)
@@ -251,6 +318,9 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 		s.health.RecordFailure(src.UserID, src.ID, err)
 		return nil, err
 	}
+	if resp == nil {
+		return nil, fetcher.ErrUpstreamError
+	}
 	if resp.StatusCode >= 400 {
 		// 4xx/5xx 拦截：绝不把错误页送入 bookList 解析。
 		err = fmt.Errorf("%w: upstream status %d", &fetcher.HTTPStatusError{StatusCode: resp.StatusCode}, resp.StatusCode)
@@ -260,7 +330,7 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 
 	base := resp.FinalURL
 	if base == "" {
-		base = src.BookSourceURL
+		base = target
 	}
 	items, err := s.parseBookList(ctx, string(resp.Body), base, rules)
 	if err != nil {
@@ -268,9 +338,6 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 		return nil, err
 	}
 	s.health.RecordSuccess(src.UserID, src.ID, time.Since(start))
-	if len(items) > pageSize {
-		items = items[:pageSize]
-	}
 	return items, nil
 }
 
@@ -354,6 +421,7 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 		return nil, fmt.Errorf("%w: empty bookList", sandbox.ErrUnsupportedRule)
 	}
 	engine := parser.New(s.sb)
+	engine.SetVariable("baseUrl", baseURL)
 	nodes, err := engine.EvalListNodes(ctx, rules.BookList, content)
 	if err != nil {
 		return nil, err
@@ -362,6 +430,7 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 	for _, node := range nodes {
 		// 每个 item 开始时重置一次变量池：item 内字段共享，跨 item 隔离。
 		engine.ResetVars()
+		engine.SetVariable("baseUrl", baseURL)
 		name := strings.TrimSpace(evalBookField(ctx, engine, node, rules.Name))
 		author := evalBookField(ctx, engine, node, rules.Author)
 		bookURL := resolveURL(baseURL, evalBookField(ctx, engine, node, rules.BookURL))
@@ -373,7 +442,7 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 			Name:          name,
 			Author:        author,
 			BookURL:       bookURL,
-			CoverURL:      resolveURL(baseURL, evalBookField(ctx, engine, node, rules.CoverURL)),
+			CoverURL:      derefString(normalizeCoverURL(evalBookField(ctx, engine, node, rules.CoverURL), baseURL)),
 			Intro:         evalBookField(ctx, engine, node, rules.Intro),
 			Kind:          evalBookField(ctx, engine, node, rules.Kind),
 			LatestChapter: evalBookField(ctx, engine, node, rules.LastChapter),

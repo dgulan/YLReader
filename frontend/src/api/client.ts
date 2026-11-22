@@ -57,7 +57,7 @@ async function refresh() {
   }
   await refreshing.task
 }
-export async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+async function requestResponse(path: string, options: RequestInit, retry: boolean): Promise<Response> {
 	path = path.trim()
 	const pathname = path.split(/[?#]/, 1)[0]!
   options.signal?.throwIfAborted()
@@ -70,7 +70,7 @@ export async function request<T>(path: string, options: RequestInit = {}, retry 
     if (getSession()?.user.id !== before.user.id) throw new ApiError(401, 'unauthorized', null)
     if (getSession()?.access_token === before.access_token) await refresh()
     if (getSession()?.user.id !== before.user.id) throw new ApiError(401, 'unauthorized', null)
-    return request(path, options, false)
+    return requestResponse(path, options, false)
   }
   if (!r.ok) {
     let data: { error?: { code?: string } } | null = null
@@ -79,10 +79,21 @@ export async function request<T>(path: string, options: RequestInit = {}, retry 
     if (r.status === 401 && before && getSession()?.access_token === before.access_token && pathname !== '/auth/login') setSession(null)
     throw new ApiError(r.status, data?.error?.code ?? `http_${r.status}`, data)
   }
+  return r
+}
+export async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+  const r = await requestResponse(path, options, retry)
   if (r.status === 204) return undefined as T
   const data = await r.json() as T
   options.signal?.throwIfAborted()
   return data
+}
+export async function requestBookCover(bookId: string, signal: AbortSignal): Promise<Blob> {
+  const response = await requestResponse('/books/' + encodeURIComponent(bookId) + '/cover', { signal, cache: 'no-store', headers: { Accept: 'image/*' } }, true)
+  if (!response.headers.get('Content-Type')?.startsWith('image/')) throw new Error('Invalid cover response')
+  const blob = await response.blob()
+  signal.throwIfAborted()
+  return blob
 }
 export function jsonBody(data: unknown): RequestInit { return { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) } }
 export function errorText(error: unknown) {

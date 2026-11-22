@@ -5,18 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
-	"mime"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/net/html"
 
+	"yreader/backend/internal/engine/fetcher"
 	"yreader/backend/internal/engine/parser"
 	"yreader/backend/internal/engine/sandbox"
 	"yreader/backend/internal/pkg/storage"
@@ -31,20 +30,6 @@ type CreateBookInput struct {
 	SourceID uuid.UUID
 	BookURL  string
 	CoverURL *string
-}
-
-func sanitizeCoverURL(raw *string) *string {
-	if raw == nil {
-		return nil
-	}
-	trimmed := strings.TrimSpace(*raw)
-	if trimmed == "" || len(trimmed) > 2048 {
-		return nil
-	}
-	if err := validateHTTPURL(trimmed); err != nil {
-		return nil
-	}
-	return &trimmed
 }
 
 // BookService 编排书架读写：v_bookshelf 分页、CRUD 与多源合并。
@@ -130,7 +115,7 @@ func (s *BookService) Create(ctx context.Context, userID uuid.UUID, in CreateBoo
 
 	// 入参未带封面时回源到书源详情页抓取真实封面；抓取失败不阻断加书，
 	// 前端会回退显示文字书封。抓取放在事务之前，避免网络请求长时间占用连接。
-	cover := sanitizeCoverURL(in.CoverURL)
+	cover := normalizeCoverURL(derefString(in.CoverURL), bookURL)
 	if cover == nil {
 		cover = s.fetchBookCover(ctx, src, bookURL)
 	}
@@ -295,39 +280,69 @@ func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSo
 	if base == "" {
 		base = detailURL
 	}
-	if rule := strings.TrimSpace(parseBookInfoCoverRule(src.Rules)); rule != "" && s.sb != nil {
+	if rule := strings.TrimSpace(parseBookInfoCoverRule(src.Rules)); rule != "" {
 		engine := parser.New(s.sb)
-		engine.SetVariable("baseUrl", src.BookSourceURL)
+		engine.SetVariable("baseUrl", base)
 		if raw, eerr := engine.Eval(fetchCtx, rule, string(resp.Body)); eerr == nil {
 			if cover := normalizeCoverURL(raw, base); cover != nil {
 				return cover
 			}
 		}
 	}
-	// 书源未配置详情封面规则或规则未命中时，兜底抓 og:image / 常见封面节点。
-	return normalizeCoverURL(extractCoverFromHTML(resp.Body), base)
+	return extractBookCover(resp.Body, base)
 }
 
-var (
-	// 覆盖 <meta property="og:image" content="..."> 的两种属性顺序。
-	metaCoverFirst   = regexp.MustCompile(`(?is)<meta\b[^>]*\bproperty\s*=\s*["'](?:og:image(?::url)?|twitter:image)["'][^>]*\bcontent\s*=\s*["']([^"']+)["']`)
-	metaContentFirst = regexp.MustCompile(`(?is)<meta\b[^>]*\bcontent\s*=\s*["']([^"']+)["'][^>]*\bproperty\s*=\s*["'](?:og:image(?::url)?|twitter:image)["']`)
-	// 常见书封 <img>：class/id 含 cover/bookimg/book-img/pic，src 可在前或在后。
-	imgCoverFirst    = regexp.MustCompile(`(?is)<img\b[^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["'][^>]*\bsrc\s*=\s*["']([^"']+)["']`)
-	imgSrcCoverFirst = regexp.MustCompile(`(?is)<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*\b(?:class|id)\s*=\s*["'][^"']*(?:cover|bookimg|book-img|pic)[^"']*["']`)
-)
-
-// extractCoverFromHTML 从详情页 HTML 中按优先级提取封面候选，返回解码后的原始值。
-func extractCoverFromHTML(body []byte) string {
-	rawHTML := string(body)
-	for _, re := range []*regexp.Regexp{metaCoverFirst, metaContentFirst, imgCoverFirst, imgSrcCoverFirst} {
-		if match := re.FindStringSubmatch(rawHTML); len(match) > 1 {
-			if value := strings.TrimSpace(match[1]); value != "" {
-				return html.UnescapeString(value)
+func extractBookCover(body []byte, base string) *string {
+	tokenizer := html.NewTokenizer(strings.NewReader(string(body)))
+	var marked, first *string
+	for {
+		kind := tokenizer.Next()
+		if kind == html.ErrorToken {
+			break
+		}
+		if kind != html.StartTagToken && kind != html.SelfClosingTagToken {
+			continue
+		}
+		tag := tokenizer.Token()
+		attrs := make(map[string]string, len(tag.Attr))
+		for _, attr := range tag.Attr {
+			attrs[attr.Key] = attr.Val
+		}
+		switch tag.Data {
+		case "meta":
+			switch strings.ToLower(firstNonEmpty(attrs["property"], attrs["name"])) {
+			case "og:image", "og:image:url", "og:image:secure_url", "twitter:image":
+				if cover := normalizeCoverURL(attrs["content"], base); cover != nil {
+					return cover
+				}
+			}
+		case "img":
+			if marked != nil {
+				continue
+			}
+			var cover *string
+			for _, k := range []string{"data-src", "data-original", "data-lazy-src", "src"} {
+				cover = normalizeCoverURL(attrs[k], base)
+				if cover != nil {
+					break
+				}
+			}
+			if cover == nil {
+				continue
+			}
+			if first == nil {
+				first = cover
+			}
+			label := strings.ToLower(attrs["class"] + " " + attrs["id"])
+			if strings.Contains(label, "cover") || strings.Contains(label, "bookimg") || strings.Contains(label, "book-img") {
+				marked = cover
 			}
 		}
 	}
-	return ""
+	if marked != nil {
+		return marked
+	}
+	return first
 }
 
 // maxCoverProxyBytes 限制封面代理返回的字节数，避免恶意图床耗尽内存。
@@ -350,46 +365,48 @@ func (s *BookService) FetchCover(ctx context.Context, userID, bookID uuid.UUID) 
 	if err != nil {
 		return nil, "", err
 	}
-	raw := ""
-	if b.CustomCoverURL != nil {
-		raw = strings.TrimSpace(*b.CustomCoverURL)
-	}
-	if raw == "" && b.CoverURL != nil {
-		raw = strings.TrimSpace(*b.CoverURL)
-	}
-	if raw == "" || ValidateSourceURL(raw) != nil {
-		return nil, "", repository.ErrNotFound
-	}
 	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	headers := make(http.Header)
 	origin := ""
 	if b.ActiveSourceID != nil {
 		if src, serr := s.sources.Get(ctx, s.pool, userID, *b.ActiveSourceID); serr == nil {
-			origin = strings.TrimSpace(src.BookSourceURL)
-			if parsed := parseSourceHeaders(src.Header); parsed != nil {
-				headers = parsed
-			}
+			origin = src.BookSourceURL
 			fetchCtx = sourceFetchContext(fetchCtx, src)
-			headers = scopeHeadersForTarget(origin, raw, headers)
 		}
 	}
-	// 图床通常校验 Referer；跨域时 scopeHeadersForTarget 会剥掉，服务端代理需要补回书源站点。
-	if origin != "" && headers.Get("Referer") == "" {
-		headers.Set("Referer", origin)
+	base := origin
+	if b.ActiveBookURL != nil && validateHTTPURL(*b.ActiveBookURL) == nil {
+		base = *b.ActiveBookURL
 	}
-	if headers.Get("User-Agent") == "" {
-		headers.Set("User-Agent", "Mozilla/5.0 (compatible; YLReader/1.0)")
+	cover := normalizeCoverURL(derefString(b.CustomCoverURL), base)
+	if cover == nil {
+		cover = normalizeCoverURL(derefString(b.CoverURL), base)
 	}
-	resp, err := s.ft.Get(fetchCtx, raw, headers)
+	if cover == nil || ValidateSourceURL(*cover) != nil {
+		return nil, "", repository.ErrNotFound
+	}
+	headers := http.Header{
+		"User-Agent": {"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"},
+		"Accept":     {"image/*"},
+	}
+	if referer, err := url.Parse(origin); err == nil && validateHTTPURL(origin) == nil {
+		headers.Set("Referer", (&url.URL{Scheme: referer.Scheme, Host: referer.Host, Path: "/"}).String())
+	}
+	var resp *fetcher.Response
+	if images, ok := s.ft.(interface {
+		GetImage(context.Context, string, http.Header, int64) (*fetcher.Response, error)
+	}); ok {
+		resp, err = images.GetImage(fetchCtx, *cover, headers, maxCoverProxyBytes)
+	} else {
+		resp, err = s.ft.Get(fetchCtx, *cover, headers)
+	}
 	if err != nil || resp == nil || resp.StatusCode >= 400 || len(resp.Body) == 0 || len(resp.Body) > maxCoverProxyBytes {
 		return nil, "", repository.ErrNotFound
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if parsed, _, perr := mime.ParseMediaType(contentType); perr == nil {
-		contentType = strings.ToLower(parsed)
-	} else if contentType == "" {
-		contentType = http.DetectContentType(resp.Body)
+	contentType := http.DetectContentType(resp.Body)
+	if contentType == "application/octet-stream" && len(resp.Body) >= 16 &&
+		string(resp.Body[4:8]) == "ftyp" && (string(resp.Body[8:12]) == "avif" || string(resp.Body[8:12]) == "avis") {
+		contentType = "image/avif"
 	}
 	if !coverContentTypes[contentType] {
 		return nil, "", repository.ErrNotFound
@@ -417,7 +434,14 @@ func normalizeCoverURL(raw, base string) *string {
 		}
 	}
 	resolved := resolveURL(base, raw)
-	if validateHTTPURL(resolved) != nil {
+	if len(resolved) > 2048 || ValidateSourceURL(resolved) != nil {
+		return nil
+	}
+	u, _ := url.Parse(resolved)
+	path := strings.ToLower(u.Path)
+	filename := path[strings.LastIndex(path, "/")+1:]
+	switch filename {
+	case "nocover.jpg", "no-cover.jpg", "nocover.png", "no-cover.png", "noimage.jpg", "no-image.png", "cover-placeholder.png", "placeholder.gif", "spacer.gif", "blank.gif":
 		return nil
 	}
 	return &resolved

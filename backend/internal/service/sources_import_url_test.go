@@ -55,12 +55,12 @@ func TestFetchSourcesFromURLValidationAndSSRF(t *testing.T) {
 
 func TestSanitizeCoverURL(t *testing.T) {
 	valid := "  https://img.example/cover.jpg  "
-	if got := sanitizeCoverURL(&valid); got == nil || *got != "https://img.example/cover.jpg" {
+	if got := normalizeCoverURL(valid, ""); got == nil || *got != "https://img.example/cover.jpg" {
 		t.Fatalf("valid cover got = %v", got)
 	}
 	for _, bad := range []string{"", "   ", "javascript:alert(1)", "/relative/cover.jpg", "https://img.example/" + strings.Repeat("a", 2100)} {
 		b := bad
-		if got := sanitizeCoverURL(&b); got != nil {
+		if got := normalizeCoverURL(b, ""); got != nil {
 			t.Fatalf("unsafe cover %q accepted: %q", bad, *got)
 		}
 	}

@@ -161,9 +161,18 @@ func (r *SourceRepository) Get(ctx context.Context, q Querier, userID, id uuid.U
 // ListEnabledForMatch 返回该用户全部启用书源，供章节覆盖按 host 自动匹配
 // （v1.1 §4.6.2：多源同 host 取 weight 最高、同权重取 updated_at 最新）。
 func (r *SourceRepository) ListEnabledForMatch(ctx context.Context, q Querier, userID uuid.UUID) ([]*BookSource, error) {
+	return r.listEnabled(ctx, q, userID, false)
+}
+
+// ListEnabledForSearch loads all enabled online sources for the tenant.
+func (r *SourceRepository) ListEnabledForSearch(ctx context.Context, q Querier, userID uuid.UUID) ([]*BookSource, error) {
+	return r.listEnabled(ctx, q, userID, true)
+}
+
+func (r *SourceRepository) listEnabled(ctx context.Context, q Querier, userID uuid.UUID, onlineOnly bool) ([]*BookSource, error) {
 	rows, err := q.Query(ctx, `SELECT `+sourceColumns+`
-		FROM book_sources WHERE user_id = $1 AND enabled = true
-		ORDER BY weight DESC, updated_at DESC`, userID)
+		FROM book_sources WHERE user_id = $1 AND enabled = true AND (NOT $2 OR book_source_type <> 3)
+		ORDER BY weight DESC, updated_at DESC, id`, userID, onlineOnly)
 	if err != nil {
 		return nil, err
 	}

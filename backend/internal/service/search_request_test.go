@@ -30,7 +30,7 @@ func TestSearchUnsupportedOptionsFailBeforeNetwork(t *testing.T) {
 		`<JS>java.ajax('https://example.org')</JS>/find`, `@js:result`,
 		`/find<js>result</js>`,
 		`/find,{"method":"DELETE"}`, `/find,{"method":null}`, `/find,{"body":"q=x"}`,
-		`/find,{"charset":"gbk"}`, `/find,{"proxy":"http://127.0.0.1"}`,
+		`/find,{"proxy":"http://127.0.0.1"}`,
 		`/find,{"method":"POST","method":"GET"}`, `/find,{"headers":{"User-Agent":"a","user-agent":"b"}}`,
 		`/find,{"headers":{"Cookie":"secret"}}`, `/find,{"headers":{"Authorization":"secret"}}`, `/find,{"headers":{"Host":"private"}}`,
 		`/find,{"headers":{"User-Agent":"bad\r\nInjected: yes"}}`, `/find,{"headers":null}`, `/find,{"headers":{"Accept":null}}`,

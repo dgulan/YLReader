@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,15 +14,18 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"golang.org/x/text/encoding/simplifiedchinese"
 	"yreader/backend/internal/engine/sandbox"
 )
 
 type searchRequest struct {
-	url, method, body string
-	header            http.Header
+	url, method, body, charset string
+	header                     http.Header
 }
 
 var searchOptionsStart = regexp.MustCompile(`,\s*\{`)
+var searchJSStart = regexp.MustCompile(`(?i)<js>|@js:`)
+var searchJSEnd = regexp.MustCompile(`(?i)</js>`)
 
 func requestOptionError() error {
 	return fmt.Errorf("%w: unsupported search request options", sandbox.ErrUnsupportedRule)
@@ -61,6 +65,10 @@ func optionObject(raw []byte) (map[string]json.RawMessage, error) {
 }
 
 func parseSearchRequest(raw, keyword string, page int) (searchRequest, error) {
+	return parseSearchRequestMode(raw, keyword, page, true)
+}
+
+func parseSearchRequestMode(raw, keyword string, page int, appendDefaults bool) (searchRequest, error) {
 	r := searchRequest{method: http.MethodGet}
 	if len(raw) > 64<<10 || !utf8.ValidString(raw) {
 		return r, requestOptionError()
@@ -115,7 +123,8 @@ func parseSearchRequest(raw, keyword string, page int) (searchRequest, error) {
 			case "body":
 				r.body = text
 			case "charset":
-				if text != "" && !strings.EqualFold(text, "utf-8") && !strings.EqualFold(text, "utf8") {
+				r.charset = normalizeSearchCharset(text)
+				if r.charset == "" && strings.TrimSpace(text) != "" {
 					return r, requestOptionError()
 				}
 			default:
@@ -130,11 +139,27 @@ func parseSearchRequest(raw, keyword string, page int) (searchRequest, error) {
 	if target == "" || (r.method != http.MethodGet && r.method != http.MethodPost) || (r.method == http.MethodGet && r.body != "") {
 		return r, requestOptionError()
 	}
+	encodedKeyword := keyword
+	switch r.charset {
+	case "gbk", "gb2312", "gb18030":
+		codec := simplifiedchinese.GBK
+		if r.charset == "gb18030" {
+			codec = simplifiedchinese.GB18030
+		}
+		encoded, err := codec.NewEncoder().String(keyword)
+		if err != nil {
+			return r, requestOptionError()
+		}
+		encodedKeyword = encoded
+	}
 	replace := func(value string) string {
-		return strings.NewReplacer("{{key}}", url.QueryEscape(keyword), "{{page}}", strconv.Itoa(page)).Replace(value)
+		return strings.NewReplacer("{{key}}", url.QueryEscape(encodedKeyword), "{{page}}", strconv.Itoa(page)).Replace(value)
 	}
 	if r.method == http.MethodGet {
-		r.url = expandSearchURL(target, keyword, page)
+		r.url = replace(target)
+		if appendDefaults {
+			r.url = expandSearchURL(target, encodedKeyword, page)
+		}
 	} else {
 		r.url, r.body = replace(target), replace(r.body)
 		if len(r.body) > 64<<10 {
@@ -146,17 +171,78 @@ func parseSearchRequest(raw, keyword string, page int) (searchRequest, error) {
 		contentType := r.header.Get("Content-Type")
 		if contentType == "" {
 			contentType = "application/x-www-form-urlencoded"
+			if r.charset != "" && r.charset != "utf-8" {
+				contentType += "; charset=" + r.charset
+			}
 		}
 		media, params, err := mime.ParseMediaType(contentType)
 		if err != nil || media != "application/x-www-form-urlencoded" {
 			return r, requestOptionError()
 		}
 		for key, value := range params {
-			if key != "charset" || (!strings.EqualFold(value, "utf-8") && !strings.EqualFold(value, "utf8")) {
+			want := r.charset
+			if want == "" {
+				want = "utf-8"
+			}
+			if key != "charset" || normalizeSearchCharset(value) != want {
 				return r, requestOptionError()
 			}
 		}
 		r.header.Set("Content-Type", contentType)
 	}
 	return r, nil
+}
+
+func normalizeSearchCharset(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "utf8", "utf-8":
+		return "utf-8"
+	case "gbk":
+		return "gbk"
+	case "gb2312":
+		return "gb2312"
+	case "gb18030":
+		return "gb18030"
+	default:
+		return ""
+	}
+}
+
+// buildSearchRequest only evaluates the script supplied by the source rule.
+// User input is passed as data, never interpolated into JavaScript source.
+func (s *SearchService) buildSearchRequest(ctx context.Context, base, raw, keyword string, page int) (searchRequest, error) {
+	if len(raw) > 64<<10 || !utf8.ValidString(raw) {
+		return searchRequest{}, requestOptionError()
+	}
+	marker := searchJSStart.FindStringIndex(raw)
+	options := searchOptionsStart.FindStringIndex(raw)
+	if marker == nil || (options != nil && options[0] < marker[0]) {
+		return parseSearchRequest(raw, keyword, page)
+	}
+	prefix, script := raw[:marker[0]], raw[marker[1]:]
+	suffix := ""
+	if strings.EqualFold(raw[marker[0]:marker[1]], "<js>") {
+		end := searchJSEnd.FindStringIndex(script)
+		if end == nil {
+			return searchRequest{}, requestOptionError()
+		}
+		suffix = strings.TrimSpace(script[end[1]:])
+		if suffix != "" {
+			start := searchOptionsStart.FindStringIndex(suffix)
+			if start == nil || start[0] != 0 {
+				return searchRequest{}, requestOptionError()
+			}
+		}
+		script = script[:end[0]]
+	}
+	if s.sb == nil || strings.TrimSpace(script) == "" {
+		return searchRequest{}, requestOptionError()
+	}
+	output, err := s.sb.Eval(ctx, script, map[string]any{"key": keyword, "page": page, "baseUrl": base, "result": strings.TrimSpace(prefix)})
+	if err != nil {
+		return searchRequest{}, err
+	}
+	// A dynamic URL is already assembled by its rule. Expand explicit templates,
+	// but keep a complete URL exactly as returned when it has no templates.
+	return parseSearchRequestMode(output+suffix, keyword, page, false)
 }

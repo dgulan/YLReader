@@ -2,7 +2,7 @@ import { createApp, h, nextTick, type App, type VNode } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/api/reader'
-import type { Model } from '@/api/client'
+import { setSession, type Model } from '@/api/client'
 import BookshelfView from './BookshelfView.vue'
 
 vi.mock('element-plus', async () => {
@@ -12,7 +12,7 @@ vi.mock('element-plus', async () => {
 })
 let app: App | undefined
 let host: HTMLDivElement
-afterEach(() => { app?.unmount(); app = undefined; host?.remove(); vi.restoreAllMocks() })
+afterEach(() => { app?.unmount(); app = undefined; host?.remove(); setSession(null); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 async function mount() {
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { render: () => h('div') } }] })
   await router.push('/')
@@ -77,7 +77,17 @@ it('cancels pending GETs on early document teardown without preventing navigatio
   await nextTick(); await nextTick()
   expect(host.querySelector('[title="synthetic-cancel"]')).toBeNull()
 })
-it('renders book cover image when cover_url is present and falls back on error', async () => {
+it('authenticates the cover fetch, displays the blob and revokes it on teardown', async () => {
+  setSession({ access_token: 'cover-token', refresh_token: 'test', token_type: 'Bearer', expires_in: 900,
+    user: { id: 'owner', username: 'reader', role: 'user', token_version: 1, created_at: '' } })
+  const fetchCover = vi.fn().mockResolvedValue(new Response(new Blob(['image'], { type: 'image/png' }), { headers: { 'Content-Type': 'image/png' } }))
+  vi.stubGlobal('fetch', fetchCover)
+  const RealURL = URL
+  const revoke = vi.fn()
+  vi.stubGlobal('URL', class extends RealURL {
+    static createObjectURL() { return 'blob:cover-test' }
+    static revokeObjectURL = revoke
+  })
   vi.spyOn(api, 'books').mockResolvedValue({
     items: [{
       id: 'b1',
@@ -100,16 +110,16 @@ it('renders book cover image when cover_url is present and falls back on error',
   await mount()
   await vi.waitFor(() => expect(host.querySelector('img.book-cover-img')).not.toBeNull())
   const img = host.querySelector<HTMLImageElement>('img.book-cover-img')!
-  // Prefer the same-origin proxy to bypass third-party hotlink checks.
-  expect(img.getAttribute('src')).toBe('/api/v1/books/b1/cover')
+  expect(img.getAttribute('src')).toBe('blob:cover-test')
+  const [path, init] = fetchCover.mock.calls[0]!
+  expect(path).toBe('/api/v1/books/b1/cover')
+  expect(new Headers(init.headers).get('Authorization')).toBe('Bearer cover-token')
   img.dispatchEvent(new Event('error'))
-  await nextTick()
-  // First failure falls back to the original absolute URL.
-  expect(host.querySelector<HTMLImageElement>('img.book-cover-img')!.getAttribute('src')).toBe('https://img.example/cover1.jpg')
-  host.querySelector<HTMLImageElement>('img.book-cover-img')!.dispatchEvent(new Event('error'))
   await nextTick()
   expect(host.querySelector('img.book-cover-img')).toBeNull()
   expect(host.querySelector('.book-cover')?.textContent).toContain('带封面书')
+  app!.unmount(); app = undefined
+  expect(revoke).toHaveBeenCalledWith('blob:cover-test')
 })
 it('expands search failures when <= 2 and collapses when > 2', async () => {
   vi.spyOn(api, 'books').mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20 })
