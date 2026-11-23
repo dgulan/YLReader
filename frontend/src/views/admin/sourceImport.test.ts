@@ -32,7 +32,7 @@ it('does not let an old preview authorize edited input', async () => {
   let finish!: (value: Model<'ImportResult'>) => void
   const send = vi.spyOn(api, 'importSources').mockImplementation(() => new Promise(resolve => { finish = resolve }))
   const old = state.importText(true); state.text.value = '[{}]'; finish(report); await old
-  expect(state.dryRun.value).toBeUndefined(); expect(send).toHaveBeenCalledTimes(1)
+  expect(state.dryRun.value).toBeUndefined(); await state.importText(false); expect(send).toHaveBeenCalledTimes(1)
 })
 it('previews and imports online book sources from URL via importSourcesFromUrl', async () => {
   const state = setup()
@@ -58,17 +58,18 @@ it.each([true, false])('asks before overwriting, decision %s', async overwrite =
     ...report, dry_run: false, skipped: 1, duplicate_count: 1,
     duplicates: [{ book_source_url: existing.bookSourceUrl, book_source_name: '旧规则' }],
   }
-  const send = vi.spyOn(api, 'importSources').mockResolvedValueOnce(conflict)
+  const send = vi.spyOn(api, 'importSources').mockResolvedValueOnce(report).mockResolvedValueOnce(conflict)
     .mockResolvedValueOnce({ ...report, dry_run: false, imported: 0, updated: 1, overwritten_count: 1 })
+  await state.importText(true)
   await state.importText(false)
   expect(confirm).toHaveBeenCalledWith(conflict)
-  expect(send.mock.calls[0]).toEqual([JSON.stringify([existing, added]), false, 'skip'])
+  expect(send.mock.calls[1]).toEqual([JSON.stringify([existing, added]), false, 'skip'])
   if (overwrite) {
-    expect(send.mock.calls[1]).toEqual([JSON.stringify([existing]), false, 'overwrite'])
+    expect(send.mock.calls[2]).toEqual([JSON.stringify([existing]), false, 'overwrite'])
     expect(state.result.value?.overwritten_count).toBe(1)
     expect(state.result.value?.imported).toBe(1)
   } else {
-    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledTimes(2)
     expect(state.result.value).toEqual(conflict)
   }
 })

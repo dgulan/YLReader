@@ -9,7 +9,7 @@ export function useSourceImport(reload: () => Promise<void>, confirmOverwrite: (
   let payload = '', revision = 0, activity = 0, disposed = false
   const canPreview = computed(() => Boolean(fileLabel.value || text.value.trim()) && !busy.value)
   const canPreviewUrl = computed(() => /^https?:\/\/\S+$/i.test(sourceUrl.value.trim()) && !busy.value)
-  const canCommitText = computed(() => canPreview.value)
+  const canCommitText = computed(() => canPreview.value && Boolean(dryRun.value) && dryRunMode.value === 'text')
   const canCommitUrl = computed(() => Boolean(dryRun.value && dryRunMode.value === 'url') && !busy.value)
   watch(text, () => { revision++; payload = ''; fileLabel.value = ''; dryRun.value = undefined; dryRunMode.value = ''; result.value = undefined }, { flush: 'sync' })
   watch(sourceUrl, () => { revision++; dryRun.value = undefined; dryRunMode.value = ''; result.value = undefined }, { flush: 'sync' })
@@ -33,7 +33,7 @@ export function useSourceImport(reload: () => Promise<void>, confirmOverwrite: (
   }
   async function importText(preview: boolean) {
     const owner = getSession()?.user.id, input = fileLabel.value ? payload : text.value, at = revision
-    if (!owner || busy.value || !input.trim()) return
+    if (!owner || busy.value || !input.trim() || (!preview && !canCommitText.value)) return
     const token = ++activity
     const valid = () => !disposed && revision === at && getSession()?.user.id === owner
     busy.value = true; error.value = ''
