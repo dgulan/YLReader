@@ -27,7 +27,7 @@
 |---|---|
 | docs/architecture.md | 037448ac1c9b82e7cf333e942783d725b2b38f63ca116ba91f5b583c9adf52a8 |
 | docs/schema.sql | fa26a8e596a4f2c89bd2ef9713ff1028aeb42925377c25ae26f957a165ba07b0 |
-| docs/openapi.yaml | a59d077adee7c5693b54ed233b25eca7cc54ddb8c256aa6025a5b1a95c7be0bc |
+| docs/openapi.yaml | c76360c2967d684e53c914e675db07539b90ab13455b60a104720aa60e78cf33 |
 | docs/research/1432433gg_reader-next.md | f47d1e87516b6980d86ed7a4b84f3db526770f422c4786b7aa1df5a2c65cb678 |
 | docs/research/changshengyu_openreader.md | 909606b90fe636aeac64ac0cd2e745d960915bba534a5bcae0c2e248778bcde8 |
 | docs/research/changshengyu_reader-dev.md | eaf8a857590c548a3a835c45309f5615f0c6d711afc8bb1649ef8caa8256d9fa |
@@ -69,3 +69,5 @@ sandbox-worker-design 在实现前冻结。新增受限独立 worker、有界 IP
 ## 2026-11-15：补登记阶段2父进程在途预算
 
 对照2026-11-14 22:41源码快照，architecture仅新增§3.3.2父进程在途编码预算行，并将预算饱和加入既有ErrSandboxTimeout映射。默认64MiB、两倍输入成本、250ms准入来自本轮前已完成的阶段2设计/实现；补齐此前遗漏的摘要登记。其余9份主冻结文档及6份备份协议字节不变，公开API/DDL、数据库版本及迁移基线不变。摘要一致性校验不等于提交后的人工冻结评审或发布批准。
+
+2026-11-23：书源导入新增可选 conflict_mode 和重复摘要字段。原 overwrite、统计字段及 dry_run 语义继续兼容。数据库与备份格式沿用原契约。

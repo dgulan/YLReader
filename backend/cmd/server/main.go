@@ -211,7 +211,7 @@ func run() error {
 		Auth:          authSvc,
 		Sources:       service.NewSourceService(pool).WithFetcher(ft),
 		Debug:         service.NewDebugService(pool, ft, sb),
-		Search:        service.NewSearchService(pool, ft, sb),
+		Search:        service.NewSearchService(pool, ft, sb).WithLogger(log),
 		Books:         service.NewBookService(pool, storageProvider, log).WithFetcher(ft, sb),
 		Progress:      service.NewProgressService(pool),
 		Mapping:       service.NewMappingService(pool),

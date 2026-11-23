@@ -121,6 +121,12 @@ const (
 	ErrorCodeValidationError       ErrorCode = "validation_error"
 )
 
+// Defines values for ImportRequestConflictMode.
+const (
+	ImportRequestConflictModeOverwrite ImportRequestConflictMode = "overwrite"
+	ImportRequestConflictModeSkip      ImportRequestConflictMode = "skip"
+)
+
 // Defines values for ImportRequestFormat.
 const (
 	LegadoJson    ImportRequestFormat = "legado_json"
@@ -135,8 +141,8 @@ const (
 
 // Defines values for ImportURLRequestOverwrite.
 const (
-	ImportURLRequestOverwriteSkip   ImportURLRequestOverwrite = "skip"
-	ImportURLRequestOverwriteUpdate ImportURLRequestOverwrite = "update"
+	Skip   ImportURLRequestOverwrite = "skip"
+	Update ImportURLRequestOverwrite = "update"
 )
 
 // Defines values for JobStatus.
@@ -525,6 +531,12 @@ type ErrorResponse struct {
 	Error Error `json:"error"`
 }
 
+// ImportDuplicate defines model for ImportDuplicate.
+type ImportDuplicate struct {
+	BookSourceName string `json:"book_source_name"`
+	BookSourceUrl  string `json:"book_source_url"`
+}
+
 // ImportFailure defines model for ImportFailure.
 type ImportFailure struct {
 	BookSourceUrl *string `json:"book_source_url,omitempty"`
@@ -534,12 +546,18 @@ type ImportFailure struct {
 
 // ImportRequest defines model for ImportRequest.
 type ImportRequest struct {
+	// ConflictMode 默认 skip。显式指定时优先于旧 overwrite 字段。
+	ConflictMode *ImportRequestConflictMode `json:"conflict_mode,omitempty"`
+
 	// Data JSON 文本（对象数组或单对象）；上限 32 MiB / 5000 条
 	Data      string                  `json:"data"`
 	DryRun    *bool                   `json:"dry_run,omitempty"`
 	Format    ImportRequestFormat     `json:"format"`
 	Overwrite *ImportRequestOverwrite `json:"overwrite,omitempty"`
 }
+
+// ImportRequestConflictMode 默认 skip。显式指定时优先于旧 overwrite 字段。
+type ImportRequestConflictMode string
 
 // ImportRequestFormat defines model for ImportRequest.Format.
 type ImportRequestFormat string
@@ -549,11 +567,15 @@ type ImportRequestOverwrite string
 
 // ImportResult defines model for ImportResult.
 type ImportResult struct {
-	DryRun   bool            `json:"dry_run"`
-	Failed   []ImportFailure `json:"failed"`
-	Imported int             `json:"imported"`
-	Skipped  int             `json:"skipped"`
-	Updated  int             `json:"updated"`
+	DryRun           bool               `json:"dry_run"`
+	DuplicateCount   *int               `json:"duplicate_count,omitempty"`
+	Duplicates       *[]ImportDuplicate `json:"duplicates,omitempty"`
+	Failed           []ImportFailure    `json:"failed"`
+	Imported         int                `json:"imported"`
+	ImportedCount    *int               `json:"imported_count,omitempty"`
+	OverwrittenCount *int               `json:"overwritten_count,omitempty"`
+	Skipped          int                `json:"skipped"`
+	Updated          int                `json:"updated"`
 }
 
 // ImportURLRequest defines model for ImportURLRequest.

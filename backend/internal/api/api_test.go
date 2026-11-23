@@ -283,9 +283,12 @@ func TestSourcesCRUDExportDryRun(t *testing.T) {
 		t.Fatalf("import: want 200, got %d: %s", status, resp)
 	}
 	var imp struct {
-		Imported int `json:"imported"`
-		Skipped  int `json:"skipped"`
-		Updated  int `json:"updated"`
+		Imported         int                   `json:"imported"`
+		Skipped          int                   `json:"skipped"`
+		Updated          int                   `json:"updated"`
+		DuplicateCount   int                   `json:"duplicate_count"`
+		Duplicates       []api.ImportDuplicate `json:"duplicates"`
+		OverwrittenCount int                   `json:"overwritten_count"`
 	}
 	_ = json.Unmarshal(resp, &imp)
 	if imp.Imported != 1 {
@@ -298,19 +301,20 @@ func TestSourcesCRUDExportDryRun(t *testing.T) {
 		t.Fatalf("re-import: want 200, got %d: %s", status, resp)
 	}
 	_ = json.Unmarshal(resp, &imp)
-	if imp.Skipped != 1 {
+	if imp.Skipped != 1 || imp.DuplicateCount != 1 || len(imp.Duplicates) != 1 ||
+		imp.Duplicates[0].BookSourceUrl != "https://example.com/s2" || imp.Duplicates[0].BookSourceName != "Imported" {
 		t.Fatalf("re-import: want skipped=1, got %s", resp)
 	}
 
 	// overwrite=update 改名
 	updateData := strings.Replace(importData, `"Imported"`, `"Imported Updated"`, 1)
-	updImpBody, _ := json.Marshal(map[string]any{"data": updateData, "format": "legado_json", "overwrite": "update"})
+	updImpBody, _ := json.Marshal(map[string]any{"data": updateData, "format": "legado_json", "conflict_mode": "overwrite", "overwrite": "skip"})
 	status, resp = doJSON(t, http.MethodPost, base+"/sources/import", token, updImpBody)
 	if status != http.StatusOK {
 		t.Fatalf("update import: want 200, got %d: %s", status, resp)
 	}
 	_ = json.Unmarshal(resp, &imp)
-	if imp.Updated != 1 {
+	if imp.Updated != 1 || imp.OverwrittenCount != 1 || imp.Imported != 0 {
 		t.Fatalf("update import: want updated=1, got %s", resp)
 	}
 

@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -74,6 +76,7 @@ type SearchService struct {
 	ft      Fetcher
 	sb      *sandbox.Sandbox
 	health  *SourceHealthService
+	logger  *slog.Logger
 	slots   chan struct{}
 }
 
@@ -85,6 +88,7 @@ func NewSearchService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox) *Sear
 		ft:      ft,
 		sb:      sb,
 		health:  NewSourceHealthService(pool, nil),
+		logger:  slog.Default(),
 		slots:   make(chan struct{}, searchConcurrency),
 	}
 }
@@ -92,6 +96,11 @@ func NewSearchService(pool *pgxpool.Pool, ft Fetcher, sb *sandbox.Sandbox) *Sear
 // WithHealth 注入自定义书源健康度服务（测试用）。
 func (s *SearchService) WithHealth(h *SourceHealthService) *SearchService {
 	s.health = h
+	return s
+}
+
+func (s *SearchService) WithLogger(logger *slog.Logger) *SearchService {
+	s.logger = logger
 	return s
 }
 
@@ -119,7 +128,37 @@ func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword st
 	out.Failures = append(out.Failures, early...)
 
 	s.searchSources(ctx, sources, keyword, page, pageSize, out)
+	s.logSearchSummary(ctx, len(sources), out)
 	return out, nil
+}
+
+func (s *SearchService) logSearchSummary(ctx context.Context, eligible int, out *SearchOutcome) {
+	hits, empty, timeouts, upstream, canceled := 0, 0, 0, 0, 0
+	examples := make([]string, 0, 3)
+	for _, group := range out.Groups {
+		if len(group.Items) == 0 {
+			empty++
+		} else {
+			hits++
+		}
+	}
+	for _, failure := range out.Failures {
+		kind, code, safeMessage := ClassifySourceFailure(failure.Err)
+		var status *fetcher.HTTPStatusError
+		switch {
+		case errors.Is(failure.Err, context.Canceled):
+			canceled++
+		case kind == repository.FailureKindTimeout:
+			timeouts++
+		case errors.As(failure.Err, &status), kind == repository.FailureKindNetwork, kind == repository.FailureKindAuth:
+			upstream++
+		}
+		if len(examples) < 3 {
+			examples = append(examples, code+": "+safeMessage)
+		}
+	}
+	s.logger.InfoContext(ctx, "source search summary", "eligible", eligible, "matched", hits, "empty", empty,
+		"timeouts", timeouts, "http_network_errors", upstream, "canceled", canceled, "failures", len(out.Failures), "examples", examples)
 }
 
 func (s *SearchService) searchSources(ctx context.Context, sources []*repository.BookSource, keyword string, page, pageSize int, out *SearchOutcome) {
@@ -332,13 +371,57 @@ func (s *SearchService) searchOne(ctx context.Context, src *repository.BookSourc
 	if base == "" {
 		base = target
 	}
-	items, err := s.parseBookList(ctx, string(resp.Body), base, rules)
+	body := string(resp.Body)
+	vars := map[string]any{"key": keyword, "page": page}
+	items, err := s.parseBookList(ctx, body, base, rules, vars)
+	if len(items) == 0 && ctx.Err() == nil {
+		if item, ok := s.searchDetail(ctx, src.Rules, body, base, keyword, page, target != base); ok {
+			items, err = []BookItem{item}, nil
+		}
+	}
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		s.health.RecordFailure(src.UserID, src.ID, err)
 		return nil, err
 	}
 	s.health.RecordSuccess(src.UserID, src.ID, time.Since(start))
 	return items, nil
+}
+
+func (s *SearchService) searchDetail(ctx context.Context, raw json.RawMessage, body, base, keyword string, page int, redirected bool) (BookItem, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || ValidateSourceURL(base) != nil {
+		return BookItem{}, false
+	}
+	rule := func(field string) string {
+		return firstNonEmpty(nestedText(fields, "bookInfo", field), nestedText(fields, "ruleBookInfo", field))
+	}
+	engine := parser.New(s.sb)
+	engine.SetVariable("baseUrl", base)
+	engine.SetVariable("key", keyword)
+	engine.SetVariableAny("page", page)
+	eval := func(field string) string {
+		expression := rule(field)
+		if expression == "" {
+			return ""
+		}
+		value, e := engine.Eval(ctx, expression, body)
+		if e != nil {
+			return ""
+		}
+		return strings.TrimSpace(value)
+	}
+	name := eval("name")
+	if name == "" || (!redirected && !strings.Contains(strings.ToLower(name), strings.ToLower(keyword))) {
+		return BookItem{}, false
+	}
+	cover := normalizeCoverURL(eval("coverUrl"), base)
+	if cover == nil {
+		cover = extractBookCover([]byte(body), base)
+	}
+	return BookItem{Name: name, Author: eval("author"), BookURL: base, CoverURL: derefString(cover), Intro: eval("intro")}, true
 }
 
 type searchRules struct {
@@ -416,12 +499,20 @@ func expandSearchURL(tpl, keyword string, page int) string {
 
 // parseBookList 用解析引擎的 RuleNode 列表切分解析 bookList，再对每个节点做
 // 字段级求值（M1c：替换原 CSS-MVP，支持 CSS/XPath/JSON/Regex/JS 全模式）。
-func (s *SearchService) parseBookList(ctx context.Context, content, baseURL string, rules searchRules) ([]BookItem, error) {
+func (s *SearchService) parseBookList(ctx context.Context, content, baseURL string, rules searchRules, globals ...map[string]any) ([]BookItem, error) {
 	if strings.TrimSpace(rules.BookList) == "" {
 		return nil, fmt.Errorf("%w: empty bookList", sandbox.ErrUnsupportedRule)
 	}
 	engine := parser.New(s.sb)
-	engine.SetVariable("baseUrl", baseURL)
+	setGlobals := func() {
+		engine.SetVariable("baseUrl", baseURL)
+		if len(globals) > 0 {
+			for key, value := range globals[0] {
+				engine.SetVariableAny(key, value)
+			}
+		}
+	}
+	setGlobals()
 	nodes, err := engine.EvalListNodes(ctx, rules.BookList, content)
 	if err != nil {
 		return nil, err
@@ -430,7 +521,7 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 	for _, node := range nodes {
 		// 每个 item 开始时重置一次变量池：item 内字段共享，跨 item 隔离。
 		engine.ResetVars()
-		engine.SetVariable("baseUrl", baseURL)
+		setGlobals()
 		name := strings.TrimSpace(evalBookField(ctx, engine, node, rules.Name))
 		author := evalBookField(ctx, engine, node, rules.Author)
 		bookURL := resolveURL(baseURL, evalBookField(ctx, engine, node, rules.BookURL))

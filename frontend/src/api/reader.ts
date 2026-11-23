@@ -30,7 +30,7 @@ export const api = {
   deleteChapterOverride: (bookId: string, chapterIndex: number, signal?: AbortSignal) => request<void>(`/books/${id(bookId)}/chapters/${chapterIndex}/override`, { method: 'DELETE', signal }),
   switchSource: (bookId: string, data: Model<'SwitchSourceRequest'>, signal?: AbortSignal) => request<Model<'SwitchSourceResult'>>(`/books/${id(bookId)}/switch-source`, { method: 'POST', signal, ...jsonBody(data) }),
   sources: (page = 1) => request<Model<'SourcePage'>>(`/sources?page=${page}&page_size=100`),
-  importSources: (data: string, dry_run: boolean) => request<Model<'ImportResult'>>('/sources/import', { method: 'POST', ...jsonBody({ format: 'legado_json', data, dry_run, overwrite: 'skip' }) }),
+  importSources: (data: string, dry_run: boolean, conflict_mode: 'skip' | 'overwrite' = 'skip') => request<Model<'ImportResult'>>('/sources/import', { method: 'POST', ...jsonBody({ format: 'legado_json', data, dry_run, conflict_mode }) }),
   importSourcesFromUrl: (url: string, dry_run: boolean) => request<Model<'ImportResult'>>('/sources/import-url', { method: 'POST', ...jsonBody({ url, dry_run, overwrite: 'skip' }) }),
   search: (keyword: string, signal?: AbortSignal) => request<Model<'SearchResponse'>>(`/search?keyword=${id(keyword)}`, { signal }),
   addBook: (book: Model<'SearchBook'>) => request<Model<'Book'>>('/books', { method: 'POST', ...jsonBody({ source_id: book.source_id, book_url: book.book_url, name: book.name, author: book.author ?? '', cover_url: book.cover_url ?? null }) }),

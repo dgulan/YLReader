@@ -2,14 +2,14 @@ import { computed, onScopeDispose, ref, watch } from 'vue'
 import { api } from '@/api/reader'
 import { errorText, getSession, type Model } from '@/api/client'
 
-export function useSourceImport(reload: () => Promise<void>) {
+export function useSourceImport(reload: () => Promise<void>, confirmOverwrite: (report: Model<'ImportResult'>) => Promise<boolean> = async () => false) {
   const text = ref(''), sourceUrl = ref(''), fileLabel = ref(''), error = ref(''), busy = ref(false)
   const dryRun = ref<Model<'ImportResult'>>(), result = ref<Model<'ImportResult'>>()
   const dryRunMode = ref<'text' | 'url' | ''>('')
   let payload = '', revision = 0, activity = 0, disposed = false
   const canPreview = computed(() => Boolean(fileLabel.value || text.value.trim()) && !busy.value)
   const canPreviewUrl = computed(() => /^https?:\/\/\S+$/i.test(sourceUrl.value.trim()) && !busy.value)
-  const canCommitText = computed(() => Boolean(dryRun.value && dryRunMode.value === 'text') && !busy.value)
+  const canCommitText = computed(() => canPreview.value)
   const canCommitUrl = computed(() => Boolean(dryRun.value && dryRunMode.value === 'url') && !busy.value)
   watch(text, () => { revision++; payload = ''; fileLabel.value = ''; dryRun.value = undefined; dryRunMode.value = ''; result.value = undefined }, { flush: 'sync' })
   watch(sourceUrl, () => { revision++; dryRun.value = undefined; dryRunMode.value = ''; result.value = undefined }, { flush: 'sync' })
@@ -33,18 +33,40 @@ export function useSourceImport(reload: () => Promise<void>) {
   }
   async function importText(preview: boolean) {
     const owner = getSession()?.user.id, input = fileLabel.value ? payload : text.value, at = revision
-    if (!owner || busy.value || (!preview && (!dryRun.value || dryRunMode.value !== 'text'))) return
+    if (!owner || busy.value || !input.trim()) return
     const token = ++activity
     const valid = () => !disposed && revision === at && getSession()?.user.id === owner
     busy.value = true; error.value = ''
     try {
-      JSON.parse(input)
-      const report = await api.importSources(input, preview)
+      const original: unknown = JSON.parse(input)
+      let report = await api.importSources(input, preview, 'skip')
       if (!valid()) return
-      if (preview) { dryRun.value = report; dryRunMode.value = 'text' }
-      else { result.value = report; dryRun.value = undefined; dryRunMode.value = ''; await reload() }
+      if (preview) { dryRun.value = report; dryRunMode.value = 'text'; return }
+      result.value = report; dryRun.value = undefined; dryRunMode.value = ''
+      const duplicates = report.duplicates ?? []
+      if (report.duplicate_count && duplicates.length && await confirmOverwrite(report) && valid()) {
+        const urls = new Set(duplicates.map(item => item.book_source_url))
+        const rows: unknown[] = Array.isArray(original) ? original : [original]
+        const selected = rows.map((row, index) => ({ row, index })).filter(({ row }) => {
+          if (!row || typeof row !== 'object' || !('bookSourceUrl' in row) || typeof row.bookSourceUrl !== 'string') return false
+          return urls.delete(row.bookSourceUrl)
+        })
+        if (selected.length) {
+          const updated = await api.importSources(JSON.stringify(selected.map(entry => entry.row)), false, 'overwrite')
+          if (!valid()) return
+          report = {
+            ...updated, imported: report.imported + updated.imported,
+            failed: [...report.failed, ...updated.failed.map(failure => ({ ...failure, index: selected[failure.index]?.index ?? failure.index }))],
+            imported_count: (report.imported_count ?? report.imported) + (updated.imported_count ?? updated.imported),
+          }
+          result.value = report
+        }
+      }
     } catch (e) { if (valid()) error.value = e instanceof SyntaxError ? 'JSON 格式不正确，请检查文件内容' : errorText(e) }
-    finally { if (!disposed && token === activity) busy.value = false }
+    finally {
+      try { if (!preview && valid() && result.value) await reload() }
+      finally { if (!disposed && token === activity) busy.value = false }
+    }
   }
   async function importUrl(preview: boolean) {
     const owner = getSession()?.user.id, target = sourceUrl.value.trim(), at = revision

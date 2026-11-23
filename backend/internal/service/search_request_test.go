@@ -89,3 +89,49 @@ func TestSearchPOSTUsesSafeFetcherOnce(t *testing.T) {
 		t.Fatal(getOnly, err)
 	}
 }
+
+func TestSearchDynamicGBKPostWithMixedQuotedOptions(t *testing.T) {
+	rule := `<js>java.put("x", "/find"); java.get("x")</js>,{
+		'method': "POST", "charset": 'gbk', 'body': "q={{key}}&p={{page}}",
+		'headers': {"User-Agent": 'fixture'}
+	}`
+	data, _ := json.Marshal(map[string]any{"searchUrl": rule, "ruleSearch": map[string]string{"bookList": "article"}})
+	ft := &searchPostFetcher{}
+	s := &SearchService{ft: ft, sb: sandbox.New(sandbox.Config{}, nil)}
+	_, err := s.searchOne(t.Context(), &repository.BookSource{BookSourceURL: "https://books.example", Rules: data}, "中文", 3, 20)
+	if !errors.Is(err, fetcher.ErrSSRFBlocked) || ft.calls != 1 || ft.body != "q=%D6%D0%CE%C4&p=3" || ft.header.Get("User-Agent") != "fixture" {
+		t.Fatalf("unexpected request: %+v, %v", ft, err)
+	}
+	enc, err := s.sb.Eval(t.Context(), `java.encodeURI("中文 空", "GBK")`, nil)
+	if err != nil || enc != "%D6%D0%CE%C4%20%BF%D5" {
+		t.Fatal(enc, err)
+	}
+}
+
+type detailFallbackFetcher struct{ finalURL string }
+
+func (f detailFallbackFetcher) Get(_ context.Context, target string, headers http.Header) (*fetcher.Response, error) {
+	if headers.Get("User-Agent") != "source-fixture" || headers.Get("Referer") != "https://books.example/" {
+		return nil, errors.New("source headers missing")
+	}
+	final := f.finalURL
+	if final == "" {
+		final = target
+	}
+	return &fetcher.Response{StatusCode: 200, FinalURL: final, Body: []byte(`<h1>从金刚功开始肉身成圣</h1><span class="author">甲</span><img src="../cover.jpg">`)}, nil
+}
+
+func TestSearchDetailFallbackUsesFinalResponse(t *testing.T) {
+	src := &repository.BookSource{BookSourceURL: "https://books.example", Header: []byte(`{"User-Agent":"source-fixture","Referer":"https://books.example/"}`),
+		Rules: []byte(`{"searchUrl":"/find?q={{key}}","ruleSearch":{"bookList":"article"},"ruleBookInfo":{"name":"h1@text","author":".author@text","coverUrl":"img@src"}}`)}
+	s := &SearchService{ft: detailFallbackFetcher{"https://books.example/book/10"}}
+	items, err := s.searchOne(t.Context(), src, "从金刚功开始肉身成圣", 1, 20)
+	if err != nil || len(items) != 1 || items[0].BookURL != "https://books.example/book/10" || items[0].CoverURL != "https://books.example/cover.jpg" || items[0].Author != "甲" {
+		t.Fatal(items, err)
+	}
+	s.ft = detailFallbackFetcher{}
+	items, err = s.searchOne(t.Context(), src, "无关的书", 1, 20)
+	if err != nil || len(items) != 0 {
+		t.Fatal("unrelated non-redirect matched", items, err)
+	}
+}

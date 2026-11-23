@@ -64,6 +64,50 @@ func optionObject(raw []byte) (map[string]json.RawMessage, error) {
 	return out, nil
 }
 
+// normalizeSearchOptions accepts single-quoted strings alongside JSON strings.
+// The result still passes the strict object parser and option allowlist.
+func normalizeSearchOptions(raw string) (string, error) {
+	var out strings.Builder
+	var quote byte
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if quote == 0 {
+			if c == '\'' || c == '"' {
+				quote = c
+				c = '"'
+			}
+			out.WriteByte(c)
+			continue
+		}
+		if c == quote {
+			quote = 0
+			out.WriteByte('"')
+			continue
+		}
+		if c == '\\' {
+			i++
+			if i == len(raw) {
+				return "", requestOptionError()
+			}
+			if quote == '\'' && raw[i] == '\'' {
+				out.WriteByte('\'')
+				continue
+			}
+			out.WriteByte(c)
+			out.WriteByte(raw[i])
+			continue
+		}
+		if quote == '\'' && c == '"' {
+			out.WriteByte('\\')
+		}
+		out.WriteByte(c)
+	}
+	if quote != 0 {
+		return "", requestOptionError()
+	}
+	return out.String(), nil
+}
+
 func parseSearchRequest(raw, keyword string, page int) (searchRequest, error) {
 	return parseSearchRequestMode(raw, keyword, page, true)
 }
@@ -81,7 +125,11 @@ func parseSearchRequestMode(raw, keyword string, page int, appendDefaults bool) 
 	target := raw
 	if loc := searchOptionsStart.FindStringIndex(raw); loc != nil {
 		target = strings.TrimSpace(raw[:loc[0]])
-		options, err := optionObject([]byte(strings.TrimSpace(raw[loc[0]+1:])))
+		normalized, err := normalizeSearchOptions(strings.TrimSpace(raw[loc[0]+1:]))
+		if err != nil {
+			return r, err
+		}
+		options, err := optionObject([]byte(normalized))
 		if err != nil {
 			return r, err
 		}

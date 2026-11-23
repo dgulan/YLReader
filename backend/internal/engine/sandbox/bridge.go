@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"golang.org/x/text/encoding/simplifiedchinese"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -28,8 +30,37 @@ func installBridge(rt *goja.Runtime, ec *execCtx) {
 		return ec.doHTTP(rt, http.MethodGet, url, nil)
 	})
 	java.Set("get", func(call goja.FunctionCall) goja.Value {
-		url := call.Argument(0).String()
-		return ec.doHTTP(rt, http.MethodGet, url, nil)
+		key := call.Argument(0).String()
+		if value, ok := ec.sourceVars[key]; ok {
+			return rt.ToValue(value)
+		}
+		if strings.HasPrefix(key, "http://") || strings.HasPrefix(key, "https://") {
+			return ec.doHTTP(rt, http.MethodGet, key, nil)
+		}
+		return rt.ToValue("")
+	})
+	java.Set("encodeURI", func(call goja.FunctionCall) goja.Value {
+		value := call.Argument(0).String()
+		if len(value) > 64<<10 {
+			return rt.ToValue("")
+		}
+		charset := strings.ToLower(strings.TrimSpace(call.Argument(1).String()))
+		switch charset {
+		case "", "undefined", "utf8", "utf-8":
+		case "gbk", "gb2312", "gb18030":
+			codec := simplifiedchinese.GBK
+			if charset == "gb18030" {
+				codec = simplifiedchinese.GB18030
+			}
+			encoded, err := codec.NewEncoder().String(value)
+			if err != nil {
+				return rt.ToValue("")
+			}
+			value = encoded
+		default:
+			return rt.ToValue("")
+		}
+		return rt.ToValue(strings.ReplaceAll(url.QueryEscape(value), "+", "%20"))
 	})
 	java.Set("post", func(call goja.FunctionCall) goja.Value {
 		url := call.Argument(0).String()

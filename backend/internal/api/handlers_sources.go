@@ -191,6 +191,17 @@ func (s *Server) ImportSources(w http.ResponseWriter, r *http.Request, _ ImportS
 	if req.Overwrite != nil {
 		overwrite = string(*req.Overwrite)
 	}
+	if req.ConflictMode != nil {
+		switch string(*req.ConflictMode) {
+		case "skip":
+			overwrite = "skip"
+		case "overwrite":
+			overwrite = "update"
+		default:
+			writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+			return
+		}
+	}
 	dryRun := req.DryRun != nil && *req.DryRun
 
 	rep, err := s.Sources.Import(r.Context(), uid, sources, repository.ImportOptions{
@@ -211,12 +222,21 @@ func (s *Server) ImportSources(w http.ResponseWriter, r *http.Request, _ ImportS
 		}
 		failed = append(failed, item)
 	}
+	duplicates := make([]ImportDuplicate, 0, len(rep.Duplicates))
+	for _, item := range rep.Duplicates {
+		duplicates = append(duplicates, ImportDuplicate{BookSourceUrl: item.URL, BookSourceName: item.Name})
+	}
+	duplicateCount := len(duplicates)
 	writeJSON(w, http.StatusOK, ImportResult{
-		DryRun:   dryRun,
-		Imported: rep.Success,
-		Skipped:  rep.Skipped,
-		Updated:  rep.Updated,
-		Failed:   failed,
+		ImportedCount:    &rep.Success,
+		OverwrittenCount: &rep.Updated,
+		DuplicateCount:   &duplicateCount,
+		Duplicates:       &duplicates,
+		DryRun:           dryRun,
+		Imported:         rep.Success,
+		Skipped:          rep.Skipped,
+		Updated:          rep.Updated,
+		Failed:           failed,
 	})
 }
 
@@ -274,12 +294,21 @@ func (s *Server) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, _ 
 		}
 		failed = append(failed, item)
 	}
+	duplicates := make([]ImportDuplicate, 0, len(rep.Duplicates))
+	for _, item := range rep.Duplicates {
+		duplicates = append(duplicates, ImportDuplicate{BookSourceUrl: item.URL, BookSourceName: item.Name})
+	}
+	duplicateCount := len(duplicates)
 	writeJSON(w, http.StatusOK, ImportResult{
-		DryRun:   dryRun,
-		Imported: rep.Success,
-		Skipped:  rep.Skipped,
-		Updated:  rep.Updated,
-		Failed:   failed,
+		ImportedCount:    &rep.Success,
+		OverwrittenCount: &rep.Updated,
+		DuplicateCount:   &duplicateCount,
+		Duplicates:       &duplicates,
+		DryRun:           dryRun,
+		Imported:         rep.Success,
+		Skipped:          rep.Skipped,
+		Updated:          rep.Updated,
+		Failed:           failed,
 	})
 }
 

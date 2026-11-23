@@ -1548,6 +1548,10 @@ components:
           type: string
           enum: [skip, update]
           default: skip
+        conflict_mode:
+          type: string
+          enum: [skip, overwrite]
+          description: 默认 skip。显式指定时优先于旧 overwrite 字段。
 
     ImportURLRequest:
       type: object
@@ -1586,6 +1590,20 @@ components:
           items:
             $ref: '#/components/schemas/ImportFailure'
         dry_run: { type: boolean }
+        imported_count: { type: integer, minimum: 0 }
+        overwritten_count: { type: integer, minimum: 0 }
+        duplicate_count: { type: integer, minimum: 0 }
+        duplicates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportDuplicate'
+
+    ImportDuplicate:
+      type: object
+      required: [book_source_url, book_source_name]
+      properties:
+        book_source_url: { type: string }
+        book_source_name: { type: string }
 
     DebugRequest:
       type: object

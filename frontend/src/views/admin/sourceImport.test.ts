@@ -5,7 +5,7 @@ import { setSession, type Model } from '@/api/client'
 import { useSourceImport } from './sourceImport'
 const scopes: EffectScope[] = []
 const report: Model<'ImportResult'> = { imported: 1, updated: 0, skipped: 0, failed: [], dry_run: true }
-function setup() { const scope = effectScope(); scopes.push(scope); return scope.run(() => useSourceImport(async () => undefined))! }
+function setup(confirm?: (report: Model<'ImportResult'>) => Promise<boolean>) { const scope = effectScope(); scopes.push(scope); return scope.run(() => useSourceImport(async () => undefined, confirm))! }
 beforeEach(() => setSession({ access_token: 'a', refresh_token: 'r', token_type: 'Bearer', expires_in: 900, user: { id: 'a', username: 'a', role: 'user', token_version: 1, created_at: '' } }))
 afterEach(() => { scopes.splice(0).forEach(scope => scope.stop()); setSession(null); vi.restoreAllMocks() })
 it('keeps a large file out of the textarea while sending its exact contents', async () => {
@@ -32,7 +32,7 @@ it('does not let an old preview authorize edited input', async () => {
   let finish!: (value: Model<'ImportResult'>) => void
   const send = vi.spyOn(api, 'importSources').mockImplementation(() => new Promise(resolve => { finish = resolve }))
   const old = state.importText(true); state.text.value = '[{}]'; finish(report); await old
-  expect(state.dryRun.value).toBeUndefined(); await state.importText(false); expect(send).toHaveBeenCalledTimes(1)
+  expect(state.dryRun.value).toBeUndefined(); expect(send).toHaveBeenCalledTimes(1)
 })
 it('previews and imports online book sources from URL via importSourcesFromUrl', async () => {
   const state = setup()
@@ -46,4 +46,29 @@ it('previews and imports online book sources from URL via importSourcesFromUrl',
     ['https://example.com/sources.json', true],
     ['https://example.com/sources.json', false],
   ])
+})
+
+it.each([true, false])('asks before overwriting, decision %s', async overwrite => {
+  const confirm = vi.fn().mockResolvedValue(overwrite)
+  const state = setup(confirm)
+  const existing = { bookSourceUrl: 'https://old.example', bookSourceName: '新规则' }
+  const added = { bookSourceUrl: 'https://new.example', bookSourceName: '新增' }
+  state.text.value = JSON.stringify([existing, added])
+  const conflict = {
+    ...report, dry_run: false, skipped: 1, duplicate_count: 1,
+    duplicates: [{ book_source_url: existing.bookSourceUrl, book_source_name: '旧规则' }],
+  }
+  const send = vi.spyOn(api, 'importSources').mockResolvedValueOnce(conflict)
+    .mockResolvedValueOnce({ ...report, dry_run: false, imported: 0, updated: 1, overwritten_count: 1 })
+  await state.importText(false)
+  expect(confirm).toHaveBeenCalledWith(conflict)
+  expect(send.mock.calls[0]).toEqual([JSON.stringify([existing, added]), false, 'skip'])
+  if (overwrite) {
+    expect(send.mock.calls[1]).toEqual([JSON.stringify([existing]), false, 'overwrite'])
+    expect(state.result.value?.overwritten_count).toBe(1)
+    expect(state.result.value?.imported).toBe(1)
+  } else {
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(state.result.value).toEqual(conflict)
+  }
 })

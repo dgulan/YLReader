@@ -44,14 +44,19 @@ type ImportFailure struct {
 }
 
 // ImportReport 是导入的统计报告。
+type ImportDuplicate struct {
+	URL, Name string
+}
+
 type ImportReport struct {
-	Total    int             `json:"total"`
-	Success  int             `json:"success"`
-	Failed   int             `json:"failed"`
-	Skipped  int             `json:"skipped"`
-	Updated  int             `json:"updated"`
-	IDs      []uuid.UUID     `json:"ids"`
-	Failures []ImportFailure `json:"failures,omitempty"`
+	Duplicates []ImportDuplicate
+	Total      int             `json:"total"`
+	Success    int             `json:"success"`
+	Failed     int             `json:"failed"`
+	Skipped    int             `json:"skipped"`
+	Updated    int             `json:"updated"`
+	IDs        []uuid.UUID     `json:"ids"`
+	Failures   []ImportFailure `json:"failures,omitempty"`
 }
 
 // Import 逐条导入书源。单条非法只计入 Failed 并继续；同 URL 存在时按
@@ -63,6 +68,8 @@ func (r *ImportExportRepository) Import(ctx context.Context, q Querier, userID u
 	}
 	rep := &ImportReport{Total: len(sources), IDs: make([]uuid.UUID, 0, len(sources))}
 	srcRepo := NewSourceRepository()
+	created := make(map[string]bool)
+	duplicated := make(map[string]bool)
 
 	for i, raw := range sources {
 		s, err := parseSource(raw, userID)
@@ -73,8 +80,9 @@ func (r *ImportExportRepository) Import(ctx context.Context, q Querier, userID u
 		}
 
 		var existingID uuid.UUID
-		err = q.QueryRow(ctx, `SELECT id FROM book_sources WHERE user_id = $1 AND book_source_url = $2`,
-			userID, s.BookSourceURL).Scan(&existingID)
+		var existingName string
+		err = q.QueryRow(ctx, `SELECT id, book_source_name FROM book_sources WHERE user_id = $1 AND book_source_url = $2`,
+			userID, s.BookSourceURL).Scan(&existingID, &existingName)
 		switch {
 		case err == nil:
 			if overwrite == "update" {
@@ -87,6 +95,10 @@ func (r *ImportExportRepository) Import(ctx context.Context, q Querier, userID u
 				rep.IDs = append(rep.IDs, existingID)
 			} else {
 				rep.Skipped++
+				if !created[s.BookSourceURL] && !duplicated[s.BookSourceURL] {
+					rep.Duplicates = append(rep.Duplicates, ImportDuplicate{URL: s.BookSourceURL, Name: existingName})
+					duplicated[s.BookSourceURL] = true
+				}
 			}
 		case errors.Is(err, pgx.ErrNoRows):
 			if cerr := srcRepo.Create(ctx, q, s); cerr != nil {
@@ -95,6 +107,7 @@ func (r *ImportExportRepository) Import(ctx context.Context, q Querier, userID u
 				continue
 			}
 			rep.Success++
+			created[s.BookSourceURL] = true
 			rep.IDs = append(rep.IDs, s.ID)
 		default:
 			rep.Failed++
@@ -203,7 +216,7 @@ func (r *ImportExportRepository) updateSource(ctx context.Context, q Querier, id
 			book_source_name = $3, book_source_group = $4, book_source_type = $5,
 			enabled = $6, enabled_explore = $7, weight = $8, respond_time = $9,
 			charset = $10, concurrent_rate = $11, header = $12, login_url = $13,
-			login_check_js = $14, rules = $15
+			login_check_js = $14, rules = $15, updated_at = now()
 		WHERE id = $1 AND user_id = $2`,
 		id, userID, s.BookSourceName, s.BookSourceGroup, s.BookSourceType,
 		s.Enabled, s.EnabledExplore, s.Weight, s.RespondTime,

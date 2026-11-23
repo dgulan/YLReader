@@ -935,6 +935,11 @@ export interface components {
              * @enum {string}
              */
             overwrite: "skip" | "update";
+            /**
+             * @description 默认 skip。显式指定时优先于旧 overwrite 字段。
+             * @enum {string}
+             */
+            conflict_mode?: "skip" | "overwrite";
         };
         ImportURLRequest: {
             /**
@@ -961,6 +966,14 @@ export interface components {
             skipped: number;
             failed: components["schemas"]["ImportFailure"][];
             dry_run: boolean;
+            imported_count?: number;
+            overwritten_count?: number;
+            duplicate_count?: number;
+            duplicates?: components["schemas"]["ImportDuplicate"][];
+        };
+        ImportDuplicate: {
+            book_source_url: string;
+            book_source_name: string;
         };
         DebugRequest: {
             /**
