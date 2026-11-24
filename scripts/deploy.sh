@@ -81,7 +81,7 @@ if [ ! -f "$ENV_FILE" ]; then
   - SEED_USERNAME / SEED_PASSWORD（首次初始化管理员账号）
 可选配置：
   - YLREADER_BIND_IP（默认 127.0.0.1；局域网直连请改为 0.0.0.0）
-  - YLREADER_IMAGE_TAG（预构建镜像版本，默认 v1.1.3）
+  - YLREADER_IMAGE_TAG（预构建镜像版本，默认 latest）
   - ALPINE_MIRROR / GOPROXY / NPM_REGISTRY（仅 --build 源码构建时生效，国内网络建议取消注释）
 EOF
   exit 0
@@ -108,7 +108,7 @@ mkdir -p data/backups
 
 docker compose -f "$COMPOSE_FILE" config --quiet
 
-image_tag="${YLREADER_IMAGE_TAG:-v1.1.3}"
+image_tag="${YLREADER_IMAGE_TAG:-latest}"
 
 if [ "$BUILD_MODE" -eq 1 ]; then
   echo "==> 源码构建模式：开始构建本地镜像（首次构建较慢，可在 .env 中配置 ALPINE_MIRROR / GOPROXY / NPM_REGISTRY 加速）..."

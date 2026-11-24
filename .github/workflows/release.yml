@@ -2,12 +2,18 @@ name: release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   contracts-and-security:
@@ -224,6 +230,7 @@ jobs:
           if-no-files-found: ignore
 
   cli-binaries:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -312,7 +319,7 @@ jobs:
   publish-ghcr:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     needs: [contracts-and-security, backend-race-integration, frontend-and-e2e, images]
     permissions:
       contents: read
@@ -321,6 +328,9 @@ jobs:
       fail-fast: false
       matrix:
         component: [backend, frontend, worker]
+    env:
+      IMAGE_NAME: ghcr.io/dgulan/ylreader-${{ matrix.component }}
+      IMAGE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('sha-{0}', github.sha) }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -338,13 +348,14 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/dgulan/ylreader-${{ matrix.component }}:${{ github.ref_name }}
-            ghcr.io/dgulan/ylreader-${{ matrix.component }}:latest
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.IMAGE_NAME }}:latest
           labels: |
             org.opencontainers.image.source=https://github.com/dgulan/YLReader
             org.opencontainers.image.revision=${{ github.sha }}
 
   release-bundle:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [contracts-and-security, backend-race-integration, frontend-and-e2e, cli-binaries, images]

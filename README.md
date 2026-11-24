@@ -20,7 +20,7 @@
 
 ### 生产环境部署（`docker-compose.prod.yml`）
 
-> 默认部署方式直接拉取 GitHub Actions 预构建的多架构镜像（`ghcr.io/dgulan/ylreader-{backend,frontend,worker}:v1.1.3`），服务器无需下载 Go/Node 编译器，通常在 30 秒内完成启动。
+> 默认部署方式直接拉取 GitHub Actions 预构建的多架构镜像（`ghcr.io/dgulan/ylreader-{backend,frontend,worker}:latest`），服务器无需下载 Go/Node 编译器，通常在 30 秒内完成启动。
 
 ```bash
 # 下载并解压到固定目录 /opt/YLReader（后续升级覆盖同一目录即可，避免数据目录分散）
@@ -47,7 +47,7 @@ nano /opt/YLReader/.env
 ```dotenv
 YLREADER_BIND_IP=127.0.0.1   # 局域网直连请改为 0.0.0.0
 YLREADER_HTTP_PORT=8080      # 按需修改访问端口
-# YLREADER_IMAGE_TAG=v1.1.3  # 指定预构建镜像版本（默认 v1.1.3）
+YLREADER_IMAGE_TAG=latest  # 可改为具体发布标签，例如 v1.1.3
 ```
 
 **国内服务器加速：**
@@ -103,7 +103,8 @@ docker compose up --build -d
 
 ## 升级指南
 
-升级前先备份。升级服务端需要拉取镜像并重建容器，完成后再刷新浏览器。
+> **Tip**
+> 升级前请先备份数据。升级服务端需要拉取镜像并重建容器，完成后再刷新浏览器。
 
 ### 1. 升级前备份
 
@@ -129,18 +130,22 @@ tar -czf "$backup/ylreader-config.tar.gz" docker-compose.prod.yml .env
 自定义存储卷、外部密钥或反向代理配置也应单独备份。若暂缓升级，可用 `docker compose -f docker-compose.prod.yml start app frontend` 恢复服务。
 备份归档校验、隔离演练和受控恢复参见 [部署与恢复文档](docs/deployment.md#6-灾备恢复运维闭环cmdbackup)。
 
-### 2. Docker Compose 升级
+### 2. Docker Compose 升级（默认 `latest`）
 
-把目标版本的部署文件更新到原部署目录，保留原有 `.env`、卷和 Compose 项目名。
+在 `docker-compose.prod.yml` 所在目录执行。首次从旧版部署文件切换时，先更新 Compose 配置，并将 `.env` 中原有的版本号改为 `YLREADER_IMAGE_TAG=latest` 或移除该行。保留现有的 `.env`、数据卷和 Compose 项目名。
 
-- 固定版本（推荐）。在 `.env` 中设置 `YLREADER_IMAGE_TAG=v1.1.3`。
-- 跟随最新发布。在 `.env` 中设置 `YLREADER_IMAGE_TAG=latest`。建议先核对目标版本的发布说明。
-
-运行以下命令。部署脚本会拉取镜像、检查并应用数据库迁移，然后启动服务。
+默认的镜像标签为 `${YLREADER_IMAGE_TAG:-latest}`。`main` 和 `v*` 标签通过发布流水线后都会更新 `latest`，其中 `main` 的构建还会推送 `sha-<提交 SHA>` 标签。若目标镜像与当前数据库结构兼容，可用一条命令拉取并重建容器。
 
 ```bash
-./scripts/deploy.sh
-docker compose -f docker-compose.prod.yml up -d --force-recreate
+docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --force-recreate
+```
+
+若发布说明要求数据库迁移，请先更新目标版本的部署文件，再运行 `./scripts/deploy.sh`。脚本会拉取镜像、执行迁移并启动服务。
+
+如需清理悬空镜像，可在确认升级成功后执行以下命令。此操作作用于整台 Docker 主机。
+
+```bash
+docker image prune -f
 ```
 
 ### 3. 确认版本与服务状态
@@ -151,11 +156,23 @@ docker compose -f docker-compose.prod.yml images
 docker compose -f docker-compose.prod.yml exec -T app wget -qO- http://127.0.0.1:8080/readyz
 ```
 
-确认 app、frontend、两个 sandboxworker、postgres 和 redis 运行正常；一次性初始化服务 sandboxworker-init 完成后会退出。重新打开浏览器标签页或强制刷新，检查登录和阅读。
+确认 `app`、`frontend`、`sandboxworker-1`、`sandboxworker-2`、`postgres` 和 `redis` 均在运行，配置了健康检查的服务应显示 `healthy`。一次性初始化服务 `sandboxworker-init` 完成后会退出。重新打开浏览器标签页或强制刷新，检查登录和阅读。
 
 ### 4. 固定版本与回退
 
-在 `.env` 中设置具体版本，例如 `YLREADER_IMAGE_TAG=v1.1.3`，可以锁定后端、前端和 worker 镜像。若数据库仍兼容旧版，恢复旧版部署文件和版本标签，拉取旧镜像并重建容器。跨数据库结构版本时，先在隔离环境恢复并验证同一时间点的数据库、书库文件和密钥，再按受控恢复流程切换服务。
+1. 在 `.env` 中设置具体的发布标签，例如：
+
+   ```dotenv
+   YLREADER_IMAGE_TAG=v1.1.3
+   ```
+
+2. 确认目标版本与当前数据库结构兼容，再拉取目标镜像并重建容器：
+
+   ```bash
+   docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --force-recreate
+   ```
+
+3. 若跨版本涉及数据库结构变更，先在隔离环境恢复并验证同一时间点的数据库、书库文件和密钥，再按受控恢复流程切换服务。恢复跟随 `latest` 时，将 `.env` 改回 `YLREADER_IMAGE_TAG=latest` 或移除该行。
 
 ## 致谢
 
