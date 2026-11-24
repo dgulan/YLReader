@@ -56,6 +56,7 @@ export function useSourceImport(reload: () => Promise<void>, confirmOverwrite: (
           if (!valid()) return
           report = {
             ...updated, imported: report.imported + updated.imported,
+            skipped: report.skipped - selected.length + updated.skipped,
             failed: [...report.failed, ...updated.failed.map(failure => ({ ...failure, index: selected[failure.index]?.index ?? failure.index }))],
             imported_count: (report.imported_count ?? report.imported) + (updated.imported_count ?? updated.imported),
           }
@@ -75,10 +76,18 @@ export function useSourceImport(reload: () => Promise<void>, confirmOverwrite: (
     const valid = () => !disposed && revision === at && getSession()?.user.id === owner
     busy.value = true; error.value = ''
     try {
-      const report = await api.importSourcesFromUrl(target, preview)
+      if (preview) {
+        const report = await api.importSourcesFromUrl(target, true, 'skip')
+        if (valid()) { dryRun.value = report; dryRunMode.value = 'url' }
+        return
+      }
+      const existing = dryRun.value
+      const overwrite = existing && (existing.duplicate_count ?? existing.skipped) > 0 && await confirmOverwrite(existing)
       if (!valid()) return
-      if (preview) { dryRun.value = report; dryRunMode.value = 'url' }
-      else { result.value = report; dryRun.value = undefined; dryRunMode.value = ''; await reload() }
+      const report = await api.importSourcesFromUrl(target, false, overwrite ? 'overwrite' : 'skip')
+      if (!valid()) return
+      result.value = report; dryRun.value = undefined; dryRunMode.value = ''
+      await reload()
     } catch (e) { if (valid()) error.value = errorText(e) }
     finally { if (!disposed && token === activity) busy.value = false }
   }

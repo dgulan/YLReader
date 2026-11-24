@@ -262,3 +262,15 @@ func (r *ChapterRepository) NeighborIndexes(ctx context.Context, q Querier, user
 	}
 	return p, n, nil
 }
+
+// NextReadableURL 返回同一书源中下一可读章节的地址。
+func (r *ChapterRepository) NextReadableURL(ctx context.Context, q Querier, userID, bookID, sourceID uuid.UUID, curIndex int32) (string, error) {
+	var next string
+	err := q.QueryRow(ctx, `SELECT COALESCE((
+		SELECT c.url FROM chapters c
+		JOIN books b ON b.id = c.book_id AND b.user_id = $1
+		WHERE c.book_id = $2 AND c.source_id = $3 AND c.chapter_index > $4
+		ORDER BY c.chapter_index ASC LIMIT 1
+	), '')`, userID, bookID, sourceID, curIndex).Scan(&next)
+	return next, err
+}

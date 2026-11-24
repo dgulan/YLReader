@@ -102,9 +102,11 @@ func evalNextURLCSS(rule, content string) (string, error) {
 		}
 		return "", nil
 	default:
-		if v, ok := first.Attr(getter); ok {
-			return strings.TrimSpace(v), nil
-		}
-		return "", nil
+		var value string
+		sel.EachWithBreak(func(_ int, node *goquery.Selection) bool {
+			value = strings.TrimSpace(node.AttrOr(getter, ""))
+			return value == ""
+		})
+		return value, nil
 	}
 }

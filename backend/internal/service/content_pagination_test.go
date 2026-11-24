@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
 	"yreader/backend/internal/engine/fetcher"
+	"yreader/backend/internal/engine/sandbox"
 	"yreader/backend/internal/repository"
 )
 
@@ -67,6 +69,51 @@ func TestContentPaginationNeverReturnsPartial(t *testing.T) {
 			}
 			if mode == "limit" && f.calls != maxContentPages {
 				t.Fatal("pagination bound lost")
+			}
+		})
+	}
+}
+
+func TestSuduguChapterPagination(t *testing.T) {
+	const first = "https://www.sudugu520.com/426/464502.html"
+	const second = "https://www.sudugu520.com/426/464502-2.html"
+	const nextChapter = "https://www.sudugu520.com/426/464503.html"
+	for _, tc := range []struct {
+		name string
+		rule string
+	}{
+		{"source rule", `@css:.prenext > span:nth-last-child(1) > a[href*="-"][href$=".html"]@href`},
+		{"CSS contains", `a:contains(下一页)@href`},
+		{"Legado text", `text.下一页@href`},
+		{"regular expression", `:<a href="([^"]+)">下一页</a>`},
+		{"JavaScript", `@js:(String(result).match(/<a href="([^"]+)">下一页<\/a>/) || [])[1] || ""`},
+		{"next chapter boundary", `.prenext > span:nth-last-child(1) > a@href`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ft := &headerRecordingFetcher{}
+			ft.fn = func(_ context.Context, target string, headers http.Header) (*fetcher.Response, error) {
+				if headers.Get("User-Agent") != "YLReader" {
+					t.Errorf("missing source header for %s", target)
+				}
+				switch target {
+				case first:
+					return &fetcher.Response{StatusCode: 200, FinalURL: first, Body: []byte(`
+						<div class="con"><p>第一段</p></div>
+						<div class="prenext"><span>上一章</span><a href="/426/#dir">目录</a><span><a href="464502-2.html">下一页</a></span></div>`)}, nil
+				case second:
+					return &fetcher.Response{StatusCode: 200, FinalURL: second, Body: []byte(`
+						<div class="con"><p>第二段</p></div>
+						<div class="prenext"><span><a href="464502.html">上一页</a></span><a href="/426/#dir">目录</a><span><a href="/426/464503.html#top">下一章</a></span></div>`)}, nil
+				default:
+					return nil, fmt.Errorf("unexpected page %s", target)
+				}
+			}
+			svc := &ContentService{ft: ft, sb: sandbox.New(sandbox.Config{}, nil)}
+			got, err := svc.fetchContentWithHeaders(t.Context(), contentRules{
+				Content: "@css:.con > p@text", NextContentURL: tc.rule,
+			}, first, http.Header{"User-Agent": {"YLReader"}}, nextChapter)
+			if err != nil || got != "第一段\n第二段" || len(ft.calls) != 2 {
+				t.Fatalf("content=%q, requests=%d, error=%v", got, len(ft.calls), err)
 			}
 		})
 	}

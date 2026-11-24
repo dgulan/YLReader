@@ -1569,6 +1569,10 @@ components:
           type: string
           enum: [skip, update]
           default: skip
+        conflict_mode:
+          type: string
+          enum: [skip, overwrite]
+          description: 默认 skip。显式指定时优先于旧 overwrite 字段。
 
     ImportFailure:
       type: object

@@ -954,6 +954,11 @@ export interface components {
              * @enum {string}
              */
             overwrite: "skip" | "update";
+            /**
+             * @description 默认 skip。显式指定时优先于旧 overwrite 字段。
+             * @enum {string}
+             */
+            conflict_mode?: "skip" | "overwrite";
         };
         ImportFailure: {
             index: number;

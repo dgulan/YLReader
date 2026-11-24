@@ -290,7 +290,7 @@ func TestCrossHostAndDowngradeHeaderScoping(t *testing.T) {
 		text, err := svc.fetchContentWithHeaders(context.Background(), contentRules{
 			Content:        "#c@text",
 			NextContentURL: "a.next@href",
-		}, "https://book.example/ch/1", parseSourceHeaders(srcHeaders))
+		}, "https://book.example/ch/1", parseSourceHeaders(srcHeaders), "")
 		if err != nil {
 			t.Fatalf("fetchContentWithHeaders: %v", err)
 		}

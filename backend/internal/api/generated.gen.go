@@ -139,10 +139,16 @@ const (
 	ImportRequestOverwriteUpdate ImportRequestOverwrite = "update"
 )
 
+// Defines values for ImportURLRequestConflictMode.
+const (
+	ImportURLRequestConflictModeOverwrite ImportURLRequestConflictMode = "overwrite"
+	ImportURLRequestConflictModeSkip      ImportURLRequestConflictMode = "skip"
+)
+
 // Defines values for ImportURLRequestOverwrite.
 const (
-	Skip   ImportURLRequestOverwrite = "skip"
-	Update ImportURLRequestOverwrite = "update"
+	ImportURLRequestOverwriteSkip   ImportURLRequestOverwrite = "skip"
+	ImportURLRequestOverwriteUpdate ImportURLRequestOverwrite = "update"
 )
 
 // Defines values for JobStatus.
@@ -580,12 +586,17 @@ type ImportResult struct {
 
 // ImportURLRequest defines model for ImportURLRequest.
 type ImportURLRequest struct {
-	DryRun    *bool                      `json:"dry_run,omitempty"`
-	Overwrite *ImportURLRequestOverwrite `json:"overwrite,omitempty"`
+	// ConflictMode 默认 skip。显式指定时优先于旧 overwrite 字段。
+	ConflictMode *ImportURLRequestConflictMode `json:"conflict_mode,omitempty"`
+	DryRun       *bool                         `json:"dry_run,omitempty"`
+	Overwrite    *ImportURLRequestOverwrite    `json:"overwrite,omitempty"`
 
 	// Url 远程书源 JSON 地址（仅允许公开 http/https）
 	Url string `json:"url"`
 }
+
+// ImportURLRequestConflictMode 默认 skip。显式指定时优先于旧 overwrite 字段。
+type ImportURLRequestConflictMode string
 
 // ImportURLRequestOverwrite defines model for ImportURLRequest.Overwrite.
 type ImportURLRequestOverwrite string

@@ -38,7 +38,9 @@ func (q *importConflictQuery) Exec(_ context.Context, sql string, args ...any) (
 	q.updates++
 	if args[0] != q.id || args[1] != q.user || args[2] != "新名称" || args[3] != "新分组" || args[5] != false || args[7] != int32(9) ||
 		!strings.Contains(sql, "updated_at = now()") || strings.Contains(sql, "created_at") ||
-		!strings.Contains(string(args[14].(json.RawMessage)), `"bookList":"article"`) {
+		!strings.Contains(string(args[14].(json.RawMessage)), `"bookList":"article"`) ||
+		!strings.Contains(string(args[14].(json.RawMessage)), `"nextContentUrl":"a.next@href"`) ||
+		!strings.Contains(string(args[14].(json.RawMessage)), `"extension":{"enabled":true}`) {
 		q.t.Fatal("overwrite did not preserve identity and replace source metadata/rules")
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
@@ -46,7 +48,7 @@ func (q *importConflictQuery) Exec(_ context.Context, sql string, args ...any) (
 
 func TestImportConflictSkipAndOverwrite(t *testing.T) {
 	q := &importConflictQuery{t: t, id: uuid.New(), user: uuid.New()}
-	rows := []json.RawMessage{json.RawMessage(`{"bookSourceUrl":"https://books.example/","bookSourceName":"新名称","bookSourceGroup":"新分组","enabled":false,"weight":9,"ruleSearch":{"bookList":"article"}}`)}
+	rows := []json.RawMessage{json.RawMessage(`{"bookSourceUrl":"https://books.example/","bookSourceName":"新名称","bookSourceGroup":"新分组","enabled":false,"weight":9,"ruleSearch":{"bookList":"article"},"ruleContent":{"nextContentUrl":"a.next@href"},"extension":{"enabled":true}}`)}
 	r := NewImportExportRepository()
 	skip, err := r.Import(t.Context(), q, q.user, rows, ImportOptions{})
 	if err != nil || skip.Skipped != 1 || len(skip.Duplicates) != 1 || skip.Duplicates[0].Name != "旧名称" || q.updates != 0 {

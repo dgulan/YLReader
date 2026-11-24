@@ -43,9 +43,27 @@ it('previews and imports online book sources from URL via importSourcesFromUrl',
   expect(state.canCommitUrl.value).toBe(true)
   await state.importUrl(false)
   expect(sendUrl.mock.calls).toEqual([
-    ['https://example.com/sources.json', true],
-    ['https://example.com/sources.json', false],
+    ['https://example.com/sources.json', true, 'skip'],
+    ['https://example.com/sources.json', false, 'skip'],
   ])
+})
+
+it.each([true, false])('asks before importing duplicate online sources, decision %s', async overwrite => {
+  const confirm = vi.fn().mockResolvedValue(overwrite)
+  const state = setup(confirm), url = 'https://example.com/sources.json'
+  const conflict: Model<'ImportResult'> = {
+    ...report, skipped: 1, duplicate_count: 1,
+    duplicates: [{ book_source_url: 'https://old.example/', book_source_name: '旧书源' }],
+  }
+  const final = { ...report, dry_run: false, skipped: overwrite ? 0 : 1, updated: overwrite ? 1 : 0 }
+  const send = vi.spyOn(api, 'importSourcesFromUrl').mockResolvedValueOnce(conflict).mockResolvedValueOnce(final)
+  state.sourceUrl.value = url
+  await state.importUrl(true)
+  expect(confirm).not.toHaveBeenCalled()
+  await state.importUrl(false)
+  expect(confirm).toHaveBeenCalledWith(conflict)
+  expect(send.mock.calls).toEqual([[url, true, 'skip'], [url, false, overwrite ? 'overwrite' : 'skip']])
+  expect(state.result.value).toEqual(final)
 })
 
 it.each([true, false])('asks before overwriting, decision %s', async overwrite => {

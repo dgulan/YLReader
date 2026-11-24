@@ -187,20 +187,10 @@ func (s *Server) ImportSources(w http.ResponseWriter, r *http.Request, _ ImportS
 		return
 	}
 
-	overwrite := "skip"
-	if req.Overwrite != nil {
-		overwrite = string(*req.Overwrite)
-	}
-	if req.ConflictMode != nil {
-		switch string(*req.ConflictMode) {
-		case "skip":
-			overwrite = "skip"
-		case "overwrite":
-			overwrite = "update"
-		default:
-			writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
-			return
-		}
+	overwrite, ok := importConflictMode((*string)(req.Overwrite), (*string)(req.ConflictMode))
+	if !ok {
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+		return
 	}
 	dryRun := req.DryRun != nil && *req.DryRun
 
@@ -249,6 +239,11 @@ func (s *Server) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, _ 
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
+	overwrite, ok := importConflictMode((*string)(req.Overwrite), (*string)(req.ConflictMode))
+	if !ok {
+		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+		return
+	}
 	if err := validateSourceURL(req.Url); err != nil {
 		writeError(w, r, err)
 		return
@@ -270,10 +265,6 @@ func (s *Server) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 
-	overwrite := "skip"
-	if req.Overwrite != nil {
-		overwrite = string(*req.Overwrite)
-	}
 	dryRun := req.DryRun != nil && *req.DryRun
 
 	rep, err := s.Sources.Import(r.Context(), uid, sources, repository.ImportOptions{
@@ -310,6 +301,23 @@ func (s *Server) ImportSourcesFromUrl(w http.ResponseWriter, r *http.Request, _ 
 		Updated:          rep.Updated,
 		Failed:           failed,
 	})
+}
+
+func importConflictMode(legacy, mode *string) (string, bool) {
+	if mode == nil {
+		if legacy != nil && *legacy == "update" {
+			return "update", true
+		}
+		return "skip", true
+	}
+	switch *mode {
+	case "skip":
+		return "skip", true
+	case "overwrite":
+		return "update", true
+	default:
+		return "", false
+	}
 }
 
 // ExportSources 处理 GET /sources/export（Legado 兼容 JSON 数组）。
