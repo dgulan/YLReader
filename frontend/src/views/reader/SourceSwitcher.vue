@@ -288,7 +288,7 @@ defineExpose({ open })
             <span v-if="latestRank && latestRanks.get(item.id) === latestRank" class="source-badge newest">最新</span>
           </span>
           <span v-if="item.elapsedMs !== undefined" class="source-latency" :class="item.elapsedMs < fastLimit ? 'fast' : 'slow'">{{ item.elapsedMs }}ms</span>
-          <span class="source-action">{{ item.current ? '✓' : '切换' }}</span>
+          <span class="source-action">{{ item.current ? '✓' : '预览切换' }}</span>
         </span>
         <span class="source-secondary">
           <span class="source-chapter" :title="item.latestChapter || undefined">{{ item.latestChapter || '暂无最新章节' }}</span>
@@ -339,7 +339,7 @@ button:disabled { opacity: .55; cursor: default; }
 .source-latency.fast { color: var(--switch-fast, #27754a); }
 .source-latency.slow { color: var(--switch-slow, #a94425); }
 :global(.reader[data-theme="night"] .switch-dialog) { --switch-fast: #8dd5a4; --switch-slow: #ffab85; }
-.source-action { padding: 4px 6px; border-radius: 5px; background: #8882; font-size: 12px; font-weight: 650; }
+.source-action { flex-shrink: 0; padding: 4px 6px; border-radius: 5px; background: #8882; font-size: 12px; font-weight: 650; }
 .source-lag { flex-shrink: 0; margin-left: auto; }
 .switch-preview { border-top: 1px solid #8884; margin-top: 12px; }
 </style>

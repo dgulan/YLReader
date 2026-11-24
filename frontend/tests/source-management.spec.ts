@@ -27,17 +27,37 @@ test('switch preview does not mutate active source and confirmed switch invalida
   await page.route(`**/api/v1/books/${book.id}/chapters?*`, async route => { const requested = new URL(route.request().url()).searchParams.get('source_id'); const current = await (await page.request.get(`/api/v1/books/${book.id}`, { headers })).json(); return route.fulfill({ json: { book_id: book.id, source_id: requested ?? current.active_source_id, total: 2, items: [0,1].map(i => ({ id: i + 1, chapter_index: i, sort_order: i, title: `第${i + 1}章`, normalized_title: `n:${i + 1}`, url: 'https://example.com/chapter', is_volume: false, word_count: 10 })) } }) })
   await page.route(`**/api/v1/books/${book.id}/content?*`, async route => { const i = Number(new URL(route.request().url()).searchParams.get('chapter_index')), current = await (await page.request.get(`/api/v1/books/${book.id}`, { headers })).json(); return route.fulfill({ json: { chapter: { id: i + 1, chapter_index: i, sort_order: i, title: `第${i + 1}章`, normalized_title: `n:${i + 1}`, url: 'https://example.com/chapter', is_volume: false, word_count: 10 }, content: current.active_source_id === a.id ? '源A正文' : '源B正文', source_id: current.active_source_id, cached: false, word_count: 10, prev_chapter_index: i ? 0 : null, next_chapter_index: i ? null : 1 } }) })
   await page.goto(`/reader/${book.id}`); await expect(page.getByLabel('章节阅读区')).toHaveAttribute('aria-busy','false'); await expect(page.locator('.chapter-body')).toHaveText('源A正文'); await page.getByRole('button', { name: '换源', exact: true }).click()
-  const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible(); await dialog.getByRole('button', { name: /备用源B/ }).first().click(); await expect(dialog.getByText(/定位策略：exact/)).toBeVisible()
+  const dialog = page.getByRole('dialog', { name: '切换书源' })
+  const sources = dialog.getByRole('list', { name: '换源候选列表' })
+  const cachedSources = () => page.evaluate(bookId => new Promise<string[]>((resolve, reject) => {
+    const request = indexedDB.open('yreader-offline-v1')
+    request.onerror = () => reject(request.error)
+    request.onsuccess = () => {
+      const db = request.result
+      const read = db.transaction('chapters').objectStore('chapters').getAll()
+      read.onerror = () => { db.close(); reject(read.error) }
+      read.onsuccess = () => {
+        db.close()
+        resolve(read.result.filter(chapter => chapter.bookId === bookId).map(chapter => chapter.content.source_id))
+      }
+    }
+  }), book.id)
+  await expect.poll(cachedSources).toContain(a.id)
+  await expect(dialog).toBeVisible()
+  await sources.getByRole('button', { name: /备用源B.*预览切换/ }).click()
+  await expect(dialog.getByText('定位策略：exact', { exact: true })).toBeVisible()
+  await expect(dialog.getByText('当前源：源A', { exact: true })).toBeVisible()
   await page.screenshot({ path: '.test-artifacts/source-switch-preview.png', fullPage: true }); let current = await (await page.request.get(`/api/v1/books/${book.id}`, { headers })).json(); expect(current.active_source_id).toBe(a.id)
   await dialog.getByRole('button', { name: '确认切换并清除单章覆盖', exact: true }).click(); await expect(dialog).toBeHidden(); await expect(page.locator('.chapter-body')).toHaveText('源B正文'); current = await (await page.request.get(`/api/v1/books/${book.id}`, { headers })).json(); expect(current.active_source_id).toBe(b.id)
-  const cachedSources = await page.evaluate(() => new Promise<string[]>((resolve, reject) => { const req = indexedDB.open('yreader-offline-v1'); req.onerror = () => reject(req.error); req.onsuccess = () => { const d = req.result, get = d.transaction('chapters').objectStore('chapters').getAll(); get.onsuccess = () => { resolve(get.result.map(c => c.content.source_id)); d.close() } } }))
-  expect(cachedSources).not.toContain(a.id)
+  expect(await cachedSources()).not.toContain(a.id)
   await page.route(`**/api/v1/books/${book.id}/chapters?*`, async route => { const requested = new URL(route.request().url()).searchParams.get('source_id'); if (!requested) return route.fulfill({ status: 502, json: { error: { code: 'source_request_failed' } } }); return route.fallback() })
   // A recoverable TOC failure now uses the matching cached directory. Prove
   // the injected failure occurred without requiring the obsolete fatal alert.
   const failedTOC = page.waitForResponse(r => r.url().includes(`/books/${book.id}/chapters?`) && r.status() === 502)
   await page.reload(); await failedTOC
   await expect(page.locator('.chapter-body')).toHaveText('源B正文')
-  await page.getByRole('button', { name: '换源', exact: true }).click(); await expect(page.getByRole('dialog').locator('.virtual-list button')).toHaveCount(1)
+  await page.getByRole('button', { name: '换源', exact: true }).click()
+  await expect(sources.getByRole('button', { name: /备用源B.*当前源/ })).toBeDisabled()
+  await expect(sources.getByRole('button', { name: /源A.*预览切换/ })).toBeEnabled()
 
 })

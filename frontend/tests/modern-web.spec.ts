@@ -80,7 +80,7 @@ test('mobile source switcher keeps duration, action and the second chapter row w
   const card = dialog.getByRole('button', { name: /备用书源/ })
   await expect(card.locator('.source-host')).toHaveText('www.backup.example')
   await expect(card.locator('.source-latency')).toHaveText('659ms')
-  await expect(card.locator('.source-action')).toHaveText('切换')
+  await expect(card.locator('.source-action')).toHaveText('预览切换')
   await expect(dialog.getByText('已探 2 源')).toBeVisible()
   const bounds = (await card.boundingBox())!
   const latency = (await card.locator('.source-latency').boundingBox())!
