@@ -30,7 +30,7 @@ func (s *Server) AddMapping(w http.ResponseWriter, r *http.Request, bookId BookI
 		return
 	}
 	m, err := s.Mapping.Add(r.Context(), userIDFrom(r.Context()), bookId,
-		req.SourceId, req.BookUrl)
+		req.SourceId, req.BookUrl, req.TocUrl)
 	if err != nil {
 		writeError(w, r, err)
 		return

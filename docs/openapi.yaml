@@ -392,12 +392,17 @@ paths:
         请求头 Accept 为 application/x-ndjson 时，逐行发送 JSON 对象：
         {"type":"group","group":SearchGroup} 表示某个书源已返回非空结果，
         {"type":"done","result":SearchResponse} 表示搜索结束，含最终排序结果与失败汇总。
+        scan=true 时还会在每个源结束后发送 {"type":"probe","searched":N}，累计包含未命中和失败的探测。
         连接在 done 前中断时，已收到的结果为部分结果。
       parameters:
         - name: keyword
           in: query
           required: true
           schema: { type: string, minLength: 1, maxLength: 100 }
+        - name: scan
+          in: query
+          description: 为 NDJSON 增加逐源探测进度，普通 JSON 响应忽略此参数。
+          schema: { type: boolean, default: false }
         - name: source_ids
           in: query
           description: 省略则使用用户全部启用且可搜索的书源；显式传入时最多 20 个
@@ -571,8 +576,8 @@ paths:
     patch:
       tags: [books]
       operationId: updateBook
-      summary: 更新书籍元数据（自定义封面/状态/分组）
-      description: 以 version 乐观锁修改用户书籍元数据。
+      summary: 更新书籍元数据或回填简介
+      description: 以 version 乐观锁修改用户书籍元数据。refresh_intro=true 时只为简介为空的在线书执行详情规则并保存非空结果，不与手动编辑字段合用。
       requestBody:
         required: true
         content:
@@ -586,10 +591,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Book'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '502':
+          $ref: '#/components/responses/ServerError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
     delete:
       tags: [books]
       operationId: deleteBook
@@ -1681,6 +1694,7 @@ components:
       properties:
         source_id: { type: string, format: uuid }
         book_url: { type: string }
+        toc_url: { type: string, description: 已知的目录抓取地址（无独立目录时可能等于书籍地址） }
         name: { type: string }
         author: { type: string, nullable: true }
         cover_url: { type: string, nullable: true }
@@ -1796,6 +1810,7 @@ components:
         custom_cover_url: { type: string, nullable: true }
         status: { type: string, enum: [unknown, serializing, completed, paused] }
         intro: { type: string, nullable: true }
+        refresh_intro: { type: boolean, description: 按当前源详情规则补全空简介 }
 
     BookPage:
       allOf:
@@ -2017,6 +2032,7 @@ components:
       properties:
         source_id: { type: string, format: uuid }
         book_url: { type: string }
+        toc_url: { type: string, description: 可选的独立 HTTP(S) 目录抓取地址 }
 
     # ---------------------------------------------------------------- 书签
     Bookmark:

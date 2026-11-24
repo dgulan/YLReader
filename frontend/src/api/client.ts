@@ -90,19 +90,23 @@ export async function request<T>(path: string, options: RequestInit = {}, retry 
 }
 type SearchEvent =
   | { type: 'group'; group: Model<'SearchGroup'> }
+  | { type: 'probe'; searched: number }
   | { type: 'done'; result: Model<'SearchResponse'> }
 
-export async function requestSearchStream(path: string, signal: AbortSignal | undefined, onGroup: (group: Model<'SearchGroup'>) => void): Promise<Model<'SearchResponse'>> {
+export async function requestSearchStream(path: string, signal: AbortSignal | undefined, onGroup: (group: Model<'SearchGroup'>) => void, onProbe?: (searched: number) => void): Promise<Model<'SearchResponse'>> {
   const response = await requestResponse(path, { signal, headers: { Accept: 'application/x-ndjson' } }, true)
   if (!response.headers.get('Content-Type')?.startsWith('application/x-ndjson')) {
     return response.json() as Promise<Model<'SearchResponse'>>
   }
   if (!response.body) throw new Error('搜索连接已中断')
   const reader = response.body.getReader()
+  const abortRead = () => { void reader.cancel().catch(() => {}) }
+  signal?.addEventListener('abort', abortRead, { once: true })
   const decoder = new TextDecoder()
   let pending = ''
   try {
     while (true) {
+      signal?.throwIfAborted()
       const { value, done } = await reader.read()
       signal?.throwIfAborted()
       if (done) throw new Error('搜索连接提前中断，已保留收到的结果')
@@ -113,10 +117,12 @@ export async function requestSearchStream(path: string, signal: AbortSignal | un
         pending = pending.slice(end + 1)
         if (event.type === 'done') return event.result
         if (event.type === 'group') onGroup(event.group)
+        if (event.type === 'probe') onProbe?.(event.searched)
         end = pending.indexOf('\n')
       }
     }
   } finally {
+    signal?.removeEventListener('abort', abortRead)
     await reader.cancel().catch(() => {})
     reader.releaseLock()
   }

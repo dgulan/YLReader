@@ -233,6 +233,7 @@ export interface paths {
          *     请求头 Accept 为 application/x-ndjson 时，逐行发送 JSON 对象：
          *     {"type":"group","group":SearchGroup} 表示某个书源已返回非空结果，
          *     {"type":"done","result":SearchResponse} 表示搜索结束，含最终排序结果与失败汇总。
+         *     scan=true 时还会在每个源结束后发送 {"type":"probe","searched":N}，累计包含未命中和失败的探测。
          *     连接在 done 前中断时，已收到的结果为部分结果。
          */
         get: operations["searchBooks"];
@@ -319,8 +320,8 @@ export interface paths {
         options?: never;
         head?: never;
         /**
-         * 更新书籍元数据（自定义封面/状态/分组）
-         * @description 以 version 乐观锁修改用户书籍元数据。
+         * 更新书籍元数据或回填简介
+         * @description 以 version 乐观锁修改用户书籍元数据。refresh_intro=true 时只为简介为空的在线书执行详情规则并保存非空结果，不与手动编辑字段合用。
          */
         patch: operations["updateBook"];
         trace?: never;
@@ -1027,6 +1028,8 @@ export interface components {
             /** Format: uuid */
             source_id: string;
             book_url: string;
+            /** @description 已知的目录抓取地址（无独立目录时可能等于书籍地址） */
+            toc_url?: string;
             name: string;
             author?: string | null;
             cover_url?: string | null;
@@ -1111,6 +1114,8 @@ export interface components {
             /** @enum {string} */
             status?: "unknown" | "serializing" | "completed" | "paused";
             intro?: string | null;
+            /** @description 按当前源详情规则补全空简介 */
+            refresh_intro?: boolean;
         };
         BookPage: components["schemas"]["PageMeta"] & {
             items: components["schemas"]["Book"][];
@@ -1298,6 +1303,8 @@ export interface components {
             /** Format: uuid */
             source_id: string;
             book_url: string;
+            /** @description 可选的独立 HTTP(S) 目录抓取地址 */
+            toc_url?: string;
         };
         Bookmark: {
             /** Format: uuid */
@@ -1867,6 +1874,8 @@ export interface operations {
         parameters: {
             query: {
                 keyword: string;
+                /** @description 为 NDJSON 增加逐源探测进度，普通 JSON 响应忽略此参数。 */
+                scan?: boolean;
                 /** @description 省略则使用用户全部启用且可搜索的书源；显式传入时最多 20 个 */
                 source_ids?: string[];
                 page?: components["parameters"]["Page"];
@@ -2090,8 +2099,12 @@ export interface operations {
                     "application/json": components["schemas"]["Book"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+            422: components["responses"]["UnprocessableEntity"];
+            502: components["responses"]["ServerError"];
+            504: components["responses"]["GatewayTimeout"];
         };
     };
     listChapters: {

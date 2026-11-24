@@ -29,6 +29,15 @@ async function submit() {
 </template>
 <style scoped>
 .login-panel :deep(.el-input) { min-width: 0; }
-@media (max-width: 650px) { .login-panel :deep(.el-input__inner) { font-size: 16px !important; } }
+.login-panel :deep(.el-input__wrapper) {
+  --el-input-focus-border-color: #39725e;
+  min-height: 44px;
+  padding-inline: 14px;
+  border-radius: 12px;
+}
+.login-panel :deep(.el-input__wrapper.is-focus) { box-shadow: 0 0 0 2px var(--el-input-focus-border-color) inset; }
+.login-panel :deep(.el-input__inner) { font-size: 16px; }
+.login-panel :deep(.login-submit) { min-height: 44px; border-radius: 12px; }
+.login-panel :deep(.login-submit:focus-visible) { outline: 2px solid #39725e; outline-offset: 3px; }
 :deep(.el-alert) { margin-bottom: 16px; }
 </style>

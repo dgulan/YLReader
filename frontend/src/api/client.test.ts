@@ -143,15 +143,30 @@ it('delivers complete search groups before the final response, across UTF-8 chun
     items: [{ source_id: 'fast', name: '中文书名', book_url: 'https://fast.example/book' }],
   }
   const final = { keyword: '中文', groups: [group], failures: [], total: 1 }
-  const onGroup = vi.fn()
-  const search = api.search('中文', undefined, onGroup)
+  const onGroup = vi.fn(), onProbe = vi.fn()
+  const search = api.search('中文', undefined, onGroup, onProbe)
   const bytes = new TextEncoder().encode(JSON.stringify({ type: 'group', group }) + '\n')
   const split = bytes.findIndex(byte => byte > 127) + 1
   stream.enqueue(bytes.slice(0, split))
   stream.enqueue(bytes.slice(split))
+  stream.enqueue(new TextEncoder().encode('{"type":"probe","searched":2}\n'))
   await vi.waitFor(() => expect(onGroup).toHaveBeenCalledWith(group))
+  expect(onProbe).toHaveBeenCalledWith(2)
+  expect(fetcher.mock.calls[0]?.[0]).toContain('&scan=true')
   expect(new Headers(fetcher.mock.calls[0]?.[1].headers).get('Accept')).toBe('application/x-ndjson')
   stream.enqueue(new TextEncoder().encode(JSON.stringify({ type: 'done', result: final }) + '\n'))
   stream.close()
   await expect(search).resolves.toEqual(final)
+})
+
+it('cancels a pending streaming body read on abort', async () => {
+  const cancel = vi.fn()
+  const body = new ReadableStream<Uint8Array>({ cancel })
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { headers: { 'Content-Type': 'application/x-ndjson' } })))
+  const controller = new AbortController()
+  const pending = api.search('中文', controller.signal, vi.fn(), vi.fn())
+  await vi.waitFor(() => expect(body.locked).toBe(true))
+  controller.abort()
+  await expect(pending).rejects.toHaveProperty('name', 'AbortError')
+  expect(cancel).toHaveBeenCalledOnce()
 })

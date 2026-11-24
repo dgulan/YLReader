@@ -1,12 +1,14 @@
-<script setup lang="ts">
+<script setup lang="ts" generic="T extends { id: string | number; label: string; disabled?: boolean }">
 import { computed, nextTick, ref, watch } from 'vue'
 import { enabledRow } from './virtualNavigation'
-const props = withDefaults(defineProps<{ items: { id: string | number; label: string; disabled?: boolean }[]; selected?: string | number; label?: string }>(), { label: '可选列表' })
+const props = withDefaults(defineProps<{ items: T[]; selected?: string | number; label?: string; rowHeight?: number; preserveScroll?: boolean }>(), { label: '可选列表', rowHeight: 44 })
 defineEmits<{ select: [id: string | number] }>()
+defineSlots<{ default?: (props: { item: T }) => unknown }>()
 const container = ref<HTMLElement>()
-const top = ref(0), active = ref(-1), rowHeight = 44
-const start = computed(() => Math.min(Math.max(0, props.items.length - 13), Math.max(0, Math.floor(top.value / rowHeight) - 2)))
-const visible = computed(() => props.items.slice(start.value, start.value + 13))
+const top = ref(0), active = ref(-1)
+const windowSize = computed(() => Math.ceil(352 / props.rowHeight) + 5)
+const start = computed(() => Math.min(Math.max(0, props.items.length - windowSize.value), Math.max(0, Math.floor(top.value / props.rowHeight) - 2)))
+const visible = computed(() => props.items.slice(start.value, start.value + windowSize.value))
 function onScroll() {
   top.value = container.value?.scrollTop ?? 0
   if (active.value < start.value || active.value >= start.value + visible.value.length) {
@@ -18,7 +20,7 @@ function reveal(index: number) {
   const el = container.value
   if (!el || index < 0) return
   const height = el.clientHeight || 352
-  const current = el.scrollTop
+  const current = el.scrollTop, rowHeight = props.rowHeight
   el.scrollTop = Math.max(0, Math.min(current, index * rowHeight, Math.max(0, props.items.length * rowHeight - height)))
   if ((index + 1) * rowHeight > el.scrollTop + height) el.scrollTop = (index + 1) * rowHeight - height
   top.value = el.scrollTop
@@ -28,13 +30,18 @@ function revealSelected() {
   active.value = selected >= 0 ? selected : enabledRow(props.items, 0, 1)
   reveal(active.value)
 }
-watch([() => props.items, () => props.selected], revealSelected, { immediate: true, flush: 'post' })
+watch([() => props.items, () => props.selected], ([items, selected], [previous, previousSelection]) => {
+  if (!props.preserveScroll || !previous?.length || selected !== previousSelection) return revealSelected()
+  const activeId = previous[active.value]?.id
+  active.value = items.findIndex(item => item.id === activeId && !item.disabled)
+  onScroll()
+}, { immediate: true, flush: 'post' })
 async function navigate(event: KeyboardEvent) {
   const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End', 'PageDown', 'PageUp']
   if (!keys.includes(event.key) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
   event.preventDefault()
   const direction = event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'End' ? -1 : 1
-  const page = Math.max(1, Math.floor((container.value?.clientHeight || 352) / rowHeight))
+  const page = Math.max(1, Math.floor((container.value?.clientHeight || 352) / props.rowHeight))
   let from = active.value + direction
   if (event.key === 'Home') from = 0
   if (event.key === 'End') from = props.items.length - 1
@@ -53,7 +60,7 @@ defineExpose({ revealSelected })
   <div ref="container" class="virtual-list" role="list" :aria-label="label" :tabindex="active < 0 && items.length ? 0 : undefined" @scroll="onScroll" @keydown="navigate">
     <div role="presentation" :style="{ height: `${items.length * rowHeight}px`, position: 'relative' }">
       <div v-for="(item, i) in visible" :key="item.id" role="listitem" :aria-posinset="start + i + 1" :aria-setsize="items.length" :style="{ position: 'absolute', top: `${(start + i) * rowHeight}px`, height: `${rowHeight}px`, width: '100%' }">
-        <button :data-row="start + i" :disabled="item.disabled" :tabindex="start + i === active ? 0 : -1" :aria-current="item.id === selected ? 'true' : undefined" @focus="active = start + i" @click="$emit('select', item.id)">{{ item.label }}</button>
+        <button type="button" :data-row="start + i" :disabled="item.disabled" :tabindex="start + i === active ? 0 : -1" :aria-current="item.id === selected ? 'true' : undefined" @focus="active = start + i" @click="$emit('select', item.id)"><slot :item="item">{{ item.label }}</slot></button>
       </div>
     </div>
   </div>

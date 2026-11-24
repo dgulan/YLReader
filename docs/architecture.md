@@ -902,6 +902,12 @@ RETURNING *;
 | ADR-013（正式裁定，批准日期 2026-11-11） | 废弃 `chapter_cache` 物理表（**方案 A**）：正文缓存统一由 `pkg/cache` 的 Redis / 内存实现承载，本地书正文由 `StorageProvider` 承载 | 该表自 M2c 起无任何写入路径，契约与实现长期分叉（DEF-CODE-09）；保留表将引入第二套缓存与一致性成本 | A1 仅做契约文本修订；A2 物理清理（`DROP TABLE IF EXISTS chapter_cache;`）需单独授权，且禁止在任何持久库预演；缓存容量与清理责任完全落在 Redis/内存的 TTL 机制（无主动删除、无前缀扫描） |
 | ADR-014 | `relocate_fuzzy` 采用 `normalized_title % p_normalized_title` 前置谓词 + `similarity(...) >= p_threshold` 二次过滤 | `%` 是 GIN（`ix_chapters_title_trgm`）被规划器采用的必要条件；`%` 默认阈值 0.3 是相似度下限，候选集 ⊇ `similarity >= p_threshold` 结果集，二次过滤保持 0.6 精度不变 | 宽窗口下 GIN 成为最优路径；默认 ±100 窗口只有约 200 行，规划器仍可能优先选 `(book_id, source_id, chapter_index)` 唯一索引（两者均不走 Seq Scan，GIN 的价值在宽窗口与大目录回退）。硬约束：**对每次调用**，运行环境必须保证 `pg_trgm.similarity_threshold <= p_threshold`（当前生产固定 `p_threshold=0.6`，默认 GUC `0.3 ≤ 0.6`）；若调用者传入更低 `p_threshold`，必须同步确认 GUC 不高于该值，否则 `%` 前置谓词提前截断候选集，语义等价失效。 |
 
+### ADR-022：书籍简介回填与换源扫描（2026-11-24）
+
+书籍详情 GET 仍读取已保存的数据。用户显式重新加载且在线书简介为空时，PATCH `refresh_intro` 使用当前源详情规则和已有安全抓取器，按书籍版本保存非空简介。缺少规则或规则无匹配时返回原书籍，已有简介不被覆盖。抓取不占用写事务。
+
+换源继续使用并发搜索的 NDJSON 响应。`scan=true` 增加逐源探测进度，结果随每个源完成即推送，浏览器断开时取消剩余探测。候选的目录地址来自源规则或已有书籍抓取地址，通过备用源绑定保存独立目录地址。默认 JSON 响应和默认流式事件兼容既有客户端。
+
 ### 12.1 ADR-013 架构决策：废弃 chapter_cache 物理表（方案 A）
 
 - **状态**：已裁定（项目方批准日期 **2026-11-11**）；A1 完成契约文本修订；**A2 物理清理未授权**。

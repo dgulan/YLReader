@@ -44,7 +44,7 @@ func TestSearchPoolProcessesMoreThanTwoHundredAndRanksBeforeTruncation(t *testin
 		sources[i] = &repository.BookSource{ID: uuid.New(), Weight: int32(i), BookSourceURL: "https://books.example/", Rules: []byte(`{"searchUrl":"/search?q={{key}}","ruleSearch":{"bookList":"article","name":"a@text","bookUrl":"a@href"}}`)}
 	}
 	out := &SearchOutcome{}
-	service.searchSources(t.Context(), sources, "书名", 1, 1, out, nil)
+	service.searchSources(t.Context(), sources, "书名", 1, 1, out, nil, nil)
 	if len(out.Groups) != len(sources) || len(out.Failures) != 0 || ft.calls.Load() != int32(len(sources)) || ft.peak.Load() > searchConcurrency {
 		t.Fatalf("groups=%d failures=%d calls=%d peak=%d", len(out.Groups), len(out.Failures), ft.calls.Load(), ft.peak.Load())
 	}
@@ -115,11 +115,12 @@ func TestSearchPublishesAvailableGroupBeforeSlowSource(t *testing.T) {
 	}
 	out := &SearchOutcome{}
 	published, finished := make(chan uuid.UUID, 2), make(chan struct{})
+	probes := make(chan int, 2)
 	go func() {
 		defer close(finished)
 		svc.searchSources(ctx, sources, "书名", 1, 20, out, func(group GroupResult) {
 			published <- group.SourceID
-		})
+		}, func(count int) { probes <- count })
 	}()
 	select {
 	case got := <-published:
@@ -129,8 +130,24 @@ func TestSearchPublishesAvailableGroupBeforeSlowSource(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("the fast group was held until the slow source returned")
 	}
+	select {
+	case count := <-probes:
+		if count != 1 {
+			t.Fatalf("expected first probe before slow source, got %d", count)
+		}
+	case <-ctx.Done():
+		t.Fatal("the first probe was held until the slow source returned")
+	}
 	close(release)
 	<-finished
+	select {
+	case count := <-probes:
+		if count != 2 {
+			t.Fatalf("expected two probes, got %d", count)
+		}
+	default:
+		t.Fatal("missing final probe")
+	}
 	if len(out.Groups) != 2 || out.Groups[0].SourceID != sources[0].ID {
 		t.Fatalf("unexpected final ranking: %+v", out.Groups)
 	}

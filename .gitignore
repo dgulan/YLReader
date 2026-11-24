@@ -35,5 +35,5 @@ data/
 .env.*
 !.env.example
 
-# Local UI reference document
-/YLReader 阅读界面修改建议 - 2.docx
+# Local UI reference documents
+/YLReader 阅读界面修改建议*.docx

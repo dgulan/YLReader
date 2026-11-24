@@ -32,9 +32,9 @@ export const api = {
   sources: (page = 1, q = '') => request<Model<'SourcePage'>>(`/sources?page=${page}&page_size=100&q=${id(q)}`),
   importSources: (data: string, dry_run: boolean, conflict_mode: 'skip' | 'overwrite' = 'skip') => request<Model<'ImportResult'>>('/sources/import', { method: 'POST', ...jsonBody({ format: 'legado_json', data, dry_run, conflict_mode }) }),
   importSourcesFromUrl: (url: string, dry_run: boolean, conflict_mode: 'skip' | 'overwrite' = 'skip') => request<Model<'ImportResult'>>('/sources/import-url', { method: 'POST', ...jsonBody({ url, dry_run, conflict_mode }) }),
-  search: (keyword: string, signal?: AbortSignal, onGroup?: (group: Model<'SearchGroup'>) => void) => {
-    const path = '/search?keyword=' + id(keyword)
-    return onGroup ? requestSearchStream(path, signal, onGroup) : request<Model<'SearchResponse'>>(path, { signal })
+  search: (keyword: string, signal?: AbortSignal, onGroup?: (group: Model<'SearchGroup'>) => void, onProbe?: (searched: number) => void) => {
+    const path = '/search?keyword=' + id(keyword) + (onGroup && onProbe ? '&scan=true' : '')
+    return onGroup ? requestSearchStream(path, signal, onGroup, onProbe) : request<Model<'SearchResponse'>>(path, { signal })
   },
   addBook: (book: Model<'SearchBook'>) => request<Model<'Book'>>('/books', { method: 'POST', ...jsonBody({ source_id: book.source_id, book_url: book.book_url, name: book.name, author: book.author ?? '', cover_url: book.cover_url ?? null }) }),
   chapters: (bookId: string, refresh = false, sourceId?: string, signal?: AbortSignal) => request<Model<'ChapterList'>>(`/books/${id(bookId)}/chapters?refresh=${refresh}${sourceId ? `&source_id=${id(sourceId)}` : ''}`, { signal }),

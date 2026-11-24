@@ -29,6 +29,7 @@ func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params Sear
 	}
 
 	var onGroup func(service.GroupResult)
+	var onProbe func(int)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	stream := strings.TrimSpace(r.Header.Get("Accept")) == "application/x-ndjson"
@@ -55,8 +56,11 @@ func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params Sear
 			group := searchGroup(g)
 			writeEvent(searchEvent{Type: "group", Group: &group})
 		}
+		if params.Scan != nil && *params.Scan {
+			onProbe = func(searched int) { writeEvent(searchEvent{Type: "probe", Searched: searched}) }
+		}
 	}
-	out, err := s.Search.SearchProgress(ctx, uid, params.Keyword, ids, page, pageSize, onGroup)
+	out, err := s.Search.SearchProgress(ctx, uid, params.Keyword, ids, page, pageSize, onGroup, onProbe)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -89,9 +93,10 @@ func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params Sear
 }
 
 type searchEvent struct {
-	Type   string          `json:"type"`
-	Group  *SearchGroup    `json:"group,omitempty"`
-	Result *SearchResponse `json:"result,omitempty"`
+	Type     string          `json:"type"`
+	Group    *SearchGroup    `json:"group,omitempty"`
+	Result   *SearchResponse `json:"result,omitempty"`
+	Searched int             `json:"searched,omitempty"`
 }
 
 func searchGroup(g service.GroupResult) SearchGroup {
@@ -107,6 +112,7 @@ func searchGroup(g service.GroupResult) SearchGroup {
 			Name:          it.Name,
 			Author:        optString(it.Author),
 			BookUrl:       it.BookURL,
+			TocUrl:        optString(it.TOCURL),
 			CoverUrl:      optString(it.CoverURL),
 			Intro:         optString(it.Intro),
 			Kind:          optString(it.Kind),

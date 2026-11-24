@@ -35,7 +35,7 @@ it('cannot commit a previous book after its progress read finishes late', async 
   host.querySelector<HTMLElement>('[data-row="0"]')!.click()
   await nextTick()
   const button = (label: string) => [...host.querySelectorAll('button')].find(b => b.textContent?.includes(label))!
-  button('预览切换').click(); await vi.waitFor(() => expect(button('确认切换')).toBeDefined())
+  await vi.waitFor(() => expect(button('确认切换')).toBeDefined())
   const pending = held<Model<'Progress'>>(); progress.mockReturnValueOnce(pending.promise)
   button('确认切换').click(); await nextTick(); book.value = 'second'; await nextTick()
   pending.resolve({ version: 1 } as Model<'Progress'>); await nextTick(); await nextTick()
@@ -81,7 +81,6 @@ it('discovers standby sources via search refresh and binds mapping before previe
   await vi.waitFor(() => expect(host.textContent).toContain('发现源A'))
   host.querySelector<HTMLElement>('[data-row="0"]')!.click()
   await nextTick()
-  button('预览切换').click()
   await vi.waitFor(() => expect(addMapping).toHaveBeenCalledWith('first', { source_id: 'src-new', book_url: 'https://a.example/1' }))
 })
 
@@ -90,14 +89,77 @@ it('shows the current source name and configured host without the candidate book
   app = createApp({ render: () => h(SourceSwitcher, { bookId: book.value, activeSource: 'active', ref: child }) })
   app.mount(host)
   vi.spyOn(api, 'mappings').mockResolvedValue([
-    { source_id: 'active', source_name: '正在使用的源', book_url: 'https://active.example/book/1' },
-    { source_id: 'backup', source_name: '备用源', source_host: 'root.example', book_url: 'https://cdn.example/private/path', latest_chapter_title: '尾声' },
+    { source_id: 'active', source_name: '正在使用的源', book_url: 'https://active.example/book/1', total_chapters: 10 },
+    { source_id: 'backup', source_name: '备用源', source_host: 'root.example', book_url: 'https://cdn.example/private/path', latest_chapter_title: '尾声', total_chapters: 12 },
   ] as Model<'BookSourceMapping'>[])
   vi.spyOn(api, 'progress').mockResolvedValue({ version: 1 } as Model<'Progress'>)
   await child.value!.open()
   await nextTick()
   expect(host.textContent).toContain('当前源：正在使用的源')
-  expect(host.textContent).toContain('备用源 · root.example · 尾声')
+  const rows = host.querySelectorAll('button[data-row]')
+  expect(rows[0]?.querySelector('.source-primary')?.textContent).toContain('当前源✓')
+  expect(rows[0]?.querySelector('.source-secondary')?.textContent).toContain('落后 2 章')
+  expect(rows[1]?.querySelector('.source-name')?.textContent).toBe('备用源')
+  expect(rows[1]?.querySelector('.source-host')?.textContent).toBe('root.example')
+  expect(rows[1]?.querySelector('.source-badge')?.textContent).toBe('最新')
+  expect(rows[1]?.querySelector('.source-secondary .source-chapter')?.textContent).toBe('尾声')
   expect(host.textContent).not.toContain('private/path')
   expect(host.textContent).not.toContain('cdn.example')
+})
+
+it('renders partial groups, sorts by latency and latest chapter, and cancels on stop or source selection', async () => {
+  app.unmount()
+  app = createApp({ render: () => h(SourceSwitcher, { bookId: book.value, bookName: '测试小说', ref: child }) })
+  app.mount(host)
+  vi.spyOn(api, 'mappings').mockResolvedValue([])
+  vi.spyOn(api, 'progress').mockResolvedValue({ version: 1 } as Model<'Progress'>)
+  const searches = [held<Model<'SearchResponse'>>(), held<Model<'SearchResponse'>>()]
+  const search = vi.spyOn(api, 'search').mockReturnValueOnce(searches[0]!.promise).mockReturnValueOnce(searches[1]!.promise)
+  const addMapping = vi.spyOn(api, 'addMapping').mockResolvedValue({ source_id: 'fast' } as Model<'BookSourceMapping'>)
+  vi.spyOn(api, 'chapters').mockResolvedValue({} as Model<'ChapterList'>)
+  vi.spyOn(api, 'switchSource').mockResolvedValue({ source_id: 'fast', chapter_index: 0, confidence: 1 } as Model<'SwitchSourceResult'>)
+
+  const slow = { source_id: 'slow', source_name: '慢源', source_host: 'slow.example', elapsed_ms: 4200,
+    items: [{ source_id: 'slow', name: '测试小说', book_url: 'https://slow.example/book', latest_chapter: '第150章 新进展' }] }
+  const fast = { source_id: 'fast', source_name: '快源', source_host: 'fast.example', elapsed_ms: 659,
+    items: [{ source_id: 'fast', name: '测试小说', book_url: 'https://fast.example/book', toc_url: 'https://fast.example/toc', latest_chapter: '第120章 很长的章节标题' }] }
+  const button = (label: string) => [...host.querySelectorAll('button')].find(node => node.textContent?.trim() === label)!
+  const results = () => [...host.querySelectorAll('.source-name')].map(node => node.textContent)
+  await child.value!.open()
+  button('刷新书源').click()
+  const [, firstSignal, firstGroup, probe] = search.mock.calls[0]!
+  firstGroup!(slow)
+  probe!(2)
+  await nextTick()
+  expect(results()).toEqual(['慢源'])
+  expect(host.querySelector('.probe-count')?.textContent).toBe('已探 2 源')
+  expect(host.querySelector('.scan-footer')).not.toBeNull()
+  firstGroup!(fast)
+  await nextTick()
+  expect(host.querySelector('.source-latency.fast')?.textContent).toBe('659ms')
+  expect(host.querySelector('.source-latency.slow')?.textContent).toBe('4200ms')
+  expect(host.querySelector('.source-counts')?.textContent).toBe('快 1 · 慢 1 · 共 2 源')
+  button('最快').click()
+  await nextTick()
+  expect(results()).toEqual(['快源', '慢源'])
+  button('最新').click()
+  await nextTick()
+  expect(results()).toEqual(['慢源', '快源'])
+  button('停止').click()
+  await nextTick()
+  expect(firstSignal?.aborted).toBe(true)
+  expect(host.querySelector('.scan-footer')).toBeNull()
+  expect(results()).toEqual(['慢源', '快源'])
+
+  button('刷新书源').click()
+  const [, secondSignal, secondGroup] = search.mock.calls[1]!
+  firstGroup!(slow)
+  secondGroup!(fast)
+  await nextTick()
+  expect(results()).toEqual(['快源'])
+  host.querySelector<HTMLButtonElement>('button[data-row]')!.click()
+  expect(secondSignal?.aborted).toBe(true)
+  await vi.waitFor(() => expect(button('确认切换并清除单章覆盖')).toBeDefined())
+  expect(addMapping).toHaveBeenCalledWith('first', { source_id: 'fast', book_url: 'https://fast.example/book', toc_url: 'https://fast.example/toc' })
+  for (const pending of searches) pending.resolve({ keyword: '测试小说', total: 0, groups: [], failures: [] })
 })

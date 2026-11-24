@@ -5,7 +5,7 @@ const bookId = '20000000-0000-4000-8000-000000000001'
 const sourceId = '10000000-0000-4000-8000-000000000001'
 
 // UI-only fixture: all /api requests are intercepted; no database or real session.
-async function readerFixture(page: Page) {
+async function readerFixture(page: Page, bookType: 'local' | 'online' = 'local') {
   await mkdir('.test-artifacts', { recursive: true })
   await page.addInitScript(() => sessionStorage.setItem('yreader-session', JSON.stringify({
     access_token: 'synthetic-ui-only', refresh_token: 'synthetic-ui-only-refresh',
@@ -16,14 +16,14 @@ async function readerFixture(page: Page) {
   const chapter = (i: number) => ({ id: i + 1, chapter_index: i, sort_order: i, title: `第${i + 1}章`, normalized_title: `n:${i}`, url: `local:${bookId}:${i}`, is_volume: false, word_count: 1000 })
   const chapters = Array.from({ length: 1000 }, (_, i) => chapter(i))
   const rows = [...chapters.slice(0, 500), { ...chapter(500), id: 1001, chapter_index: null, is_volume: true, title: '第二卷' }, ...chapters.slice(500)]
-  const book = { id: bookId, name: '用于小屏布局和长目录验收的很长书籍名称', book_type: 'local', author: 'UI fixture', active_source_id: sourceId, active_book_url: `local:${bookId}`, total_chapters: 1000 }
+  const book = { id: bookId, name: '用于小屏布局和长目录验收的很长书籍名称', book_type: bookType, author: 'UI fixture', active_source_id: sourceId, active_book_url: `local:${bookId}`, total_chapters: 1000, intro: '这是一段可完整阅读的作品简介。', status: 'completed', latest_chapter_title: '第1000章' }
   await page.route('**/api/v1/**', async route => {
     const url = new URL(route.request().url()), path = url.pathname.replace('/api/v1', '')
     if (path === '/settings') {
       if (route.request().method() === 'PATCH') settings = { ...settings, ...route.request().postDataJSON() }
       return route.fulfill({ json: settings })
     }
-    if (path === `/books/${bookId}`) return route.fulfill({ json: book })
+    if (path === `/books/${bookId}`) return route.fulfill({ json: { ...book, progress } })
     if (path === `/books/${bookId}/chapters`) return route.fulfill({ json: { book_id: bookId, source_id: sourceId, total: 1000, items: rows } })
     if (path === `/books/${bookId}/content`) {
       const i = Number(url.searchParams.get('chapter_index'))
@@ -40,7 +40,55 @@ async function readerFixture(page: Page) {
   await page.goto(`/reader/${bookId}`)
   await expect(page.getByLabel('章节阅读区')).toHaveAttribute('aria-busy', 'false')
   await expect(page.getByRole('heading', { name: '第500章', exact: true })).toBeVisible()
+  return book
 }
+
+test('mobile login keeps 16px rounded inputs and shows focus', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.goto('/login')
+  for (const label of ['用户名', '密码']) {
+    const input = page.getByLabel(label, { exact: true })
+    const wrapper = input.locator('..')
+    const before = await wrapper.evaluate(node => getComputedStyle(node).boxShadow)
+    await input.focus()
+    await expect(input).toHaveCSS('font-size', '16px')
+    await expect(wrapper).toHaveCSS('border-radius', '12px')
+    await expect(wrapper).not.toHaveCSS('box-shadow', before)
+  }
+  await expect(page.getByRole('button', { name: '登录书房' })).toHaveCSS('border-radius', '12px')
+})
+
+test('mobile source switcher keeps duration, action and the second chapter row within each card', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 })
+  const book = await readerFixture(page, 'online')
+  await page.route(`**/api/v1/books/${bookId}/mappings`, route => route.fulfill({ json: [{ source_id: sourceId, source_name: '当前书源', source_host: 'current.example', total_chapters: 1000 }] }))
+  const group = {
+    source_id: 'backup', source_name: '备用书源', source_host: 'www.backup.example', elapsed_ms: 659,
+    items: [{ source_id: 'backup', name: book.name, author: book.author, book_url: 'https://www.backup.example/books/1', latest_chapter: '第1001章 ' + '很长的章节标题'.repeat(10) }],
+  }
+  await page.route('**/api/v1/search?*', route => {
+    expect(route.request().headers().accept).toBe('application/x-ndjson')
+    expect(new URL(route.request().url()).searchParams.get('scan')).toBe('true')
+    return route.fulfill({ contentType: 'application/x-ndjson', body: [
+      { type: 'group', group }, { type: 'probe', searched: 2 },
+      { type: 'done', result: { groups: [group], total: 1, failures: [], keyword: book.name } },
+    ].map(event => JSON.stringify(event)).join('\n') + '\n' })
+  })
+  await page.getByRole('button', { name: '换源', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '切换书源' })
+  await dialog.getByRole('button', { name: '刷新书源' }).click()
+  const card = dialog.getByRole('button', { name: /备用书源/ })
+  await expect(card.locator('.source-host')).toHaveText('www.backup.example')
+  await expect(card.locator('.source-latency')).toHaveText('659ms')
+  await expect(card.locator('.source-action')).toHaveText('切换')
+  await expect(dialog.getByText('已探 2 源')).toBeVisible()
+  const bounds = (await card.boundingBox())!
+  const latency = (await card.locator('.source-latency').boundingBox())!
+  const chapter = (await card.locator('.source-chapter').boundingBox())!
+  expect(latency.x + latency.width).toBeLessThan(bounds.x + bounds.width)
+  expect(chapter.y).toBeGreaterThan(latency.y)
+  await expect(card.locator('.source-chapter')).toHaveAttribute('title', group.items[0]!.latest_chapter)
+})
 
 test('thousand chapter directory supports keyboard navigation and native modal focus', async ({ page }) => {
   await readerFixture(page)
@@ -208,6 +256,12 @@ test('small bookshelf opens book management from the cover menu and groups searc
   expect(menu!.x + menu!.width).toBeLessThanOrEqual(320 - 14)
   await card.getByRole('button', { name: '管理书籍', exact: true }).click()
   const editor = page.getByRole('dialog', { name: /^管理书籍 ·/ })
+  await expect(editor.getByRole('tab', { name: '概览' })).toHaveAttribute('aria-selected', 'true')
+  await expect(editor.getByRole('heading', { name: '作品简介' })).toBeVisible()
+  await expect(editor.getByText('这是一段可完整阅读的作品简介。')).toBeVisible()
+  await expect(editor.getByRole('heading', { name: '当前读至：第 500 章' })).toBeVisible()
+  await expect(editor.getByLabel('编辑书名')).toBeHidden()
+  await editor.getByRole('tab', { name: '编辑与绑定' }).click()
   await expect(editor.getByLabel('编辑书名')).toHaveValue('用于小屏布局和长目录验收的很长书籍名称')
   await expect(page).toHaveURL(/\/bookshelf$/)
   await page.keyboard.press('Escape')

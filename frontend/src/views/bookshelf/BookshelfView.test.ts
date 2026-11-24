@@ -78,7 +78,8 @@ it('keeps card actions open through pointer focus loss and opens the selected bo
   setSession({ access_token: 'test', refresh_token: 'test', token_type: 'Bearer', expires_in: 900,
     user: { id: 'owner', username: 'reader', role: 'user', token_version: 1, created_at: '' } })
   const first = { id: 'first', name: '第一本书', book_type: 'local', status: 'unknown' } as Model<'Book'>
-  const second = { ...first, id: 'second', name: '第二本书' }
+  const second = { ...first, id: 'second', name: '第二本书', intro: '简介第一段。\n简介第二段。', latest_chapter_title: '最终章', total_chapters: 12,
+    progress: { book_id: 'second', chapter_index: 3, char_offset: 15, chapter_ratio: .5, version: 2 } }
   vi.spyOn(api, 'books').mockResolvedValue({ items: [first, second], total: 2, page: 1, page_size: 20 })
   const getBook = vi.spyOn(api, 'book').mockResolvedValue(second)
   const router = await mount()
@@ -97,6 +98,9 @@ it('keeps card actions open through pointer focus loss and opens the selected bo
 
   await vi.waitFor(() => {
     const dialog = host.querySelector('[role="dialog"][aria-label="管理书籍 · 第二本书"]')
+    expect(dialog?.querySelector('.overview-intro-text')?.textContent).toBe(second.intro)
+    expect(dialog?.querySelector('.overview-progress')?.textContent).toContain('当前读至：第 4 章')
+    expect(dialog?.querySelector('progress')?.getAttribute('value')).toBe('29.2')
     expect(dialog?.querySelector<HTMLInputElement>('input[aria-label="编辑书名"]')?.value).toBe(second.name)
   })
   expect(getBook).toHaveBeenCalledWith(second.id)

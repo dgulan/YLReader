@@ -167,7 +167,7 @@ func (s *MappingService) List(ctx context.Context, userID, bookID uuid.UUID) ([]
 
 // Add 新增一条备用源绑定（pending）。源不存在/禁用/非本人 → ErrUnprocessable(422)；
 // 相同 (book, source, url) 重复 → ErrDuplicate(409)。
-func (s *MappingService) Add(ctx context.Context, userID, bookID, sourceID uuid.UUID, bookURL string) (*repository.BookSourceMapping, error) {
+func (s *MappingService) Add(ctx context.Context, userID, bookID, sourceID uuid.UUID, bookURL string, tocURL *string) (*repository.BookSourceMapping, error) {
 	book, err := s.books.Get(ctx, s.pool, userID, bookID)
 	if err != nil {
 		return nil, err
@@ -186,12 +186,20 @@ func (s *MappingService) Add(ctx context.Context, userID, bookID, sourceID uuid.
 	if verr := validateHTTPURL(u); verr != nil {
 		return nil, verr
 	}
+	if tocURL != nil {
+		target := strings.TrimSpace(*tocURL)
+		if err := ValidateSourceURL(target); err != nil {
+			return nil, err
+		}
+		tocURL = &target
+	}
 
 	srcName, authorName := book.Name, book.Author
 	m := &repository.BookSourceMapping{
 		BookID:     bookID,
 		SourceID:   sourceID,
 		BookURL:    u,
+		TOCURL:     tocURL,
 		Name:       &srcName,
 		Author:     &authorName,
 		SyncStatus: repository.MappingStatusPending,

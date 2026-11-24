@@ -13,6 +13,7 @@ test('book metadata preserves conflicts and deletion requires confirmation', asy
   await card.locator('summary').click()
   await card.getByRole('button', { name: '管理书籍', exact: true }).click()
   await expect(page.getByRole('dialog', { name: `管理书籍 · ${name}` })).toBeVisible()
+  await page.getByRole('tab', { name: '编辑与绑定' }).click()
   await expect(page.getByLabel('编辑书名')).toHaveValue(name); await page.getByLabel('编辑书名').fill(`${name}草稿`)
   // Simulate another device through the real API, retaining the original UI version.
   const current = await (await page.request.get(url, { headers })).json()

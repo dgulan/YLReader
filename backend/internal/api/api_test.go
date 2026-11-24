@@ -452,7 +452,7 @@ func TestDebugSourceRule(t *testing.T) {
 
 // 测试 3：多源并发搜索的部分失败隔离、相对 URL 绝对化、错误码映射与 total 语义。
 func TestSearchMultiSource(t *testing.T) {
-	const htmlA = `<div class="book"><a class="title" href="/book/1">Book One</a>` +
+	const htmlA = `<div class="book"><a class="title" href="/book/1">Book One</a><a class="toc" href="/catalog/1">目录</a>` +
 		`<span class="author">Author A</span><img class="cover" src="/img/1.jpg"/></div>` +
 		`<div class="book"><a class="title" href="/book/2">Book Two</a>` +
 		`<span class="author">Author B</span><img class="cover" src="/img/2.jpg"/></div>`
@@ -476,7 +476,7 @@ func TestSearchMultiSource(t *testing.T) {
 
 	rulesA := `{"search":{"searchUrl":"http://mock-a.example/search?key={{key}}&page={{page}}",` +
 		`"bookList":"div.book","name":".title@text","author":".author@text",` +
-		`"bookUrl":".title@href","coverUrl":"img.cover@src"}}`
+		`"bookUrl":".title@href","tocUrl":".toc@href","coverUrl":"img.cover@src"}}`
 	rulesB := `{"search":{"searchUrl":"http://mock-b.example/search?key={{key}}","bookList":"div.book","name":".title@text"}}`
 	rulesC := `{"search":{"searchUrl":"http://mock-c.example/search?key={{key}}","bookList":"div.book","name":".title@text"}}`
 
@@ -571,5 +571,89 @@ func TestSearchMultiSource(t *testing.T) {
 	}
 	if done.Type != "done" || done.Result == nil || done.Result.Total != 2 || len(done.Result.Failures) != 2 {
 		t.Fatalf("unexpected completion event: %+v", done)
+	}
+
+	scanReq := req.Clone(t.Context())
+	scanReq.URL.RawQuery += "&scan=true"
+	scan, err := ts.Client().Do(scanReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scan.Body.Close()
+	decoder = json.NewDecoder(scan.Body)
+	probed, matched := 0, false
+	for {
+		var event struct {
+			Type     string
+			Searched int
+			Group    *api.SearchGroup
+		}
+		if err := decoder.Decode(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == "done" {
+			break
+		}
+		switch event.Type {
+		case "probe":
+			probed++
+			if event.Searched != probed {
+				t.Fatalf("out-of-order probe: %d, want %d", event.Searched, probed)
+			}
+		case "group":
+			if event.Group == nil || event.Group.ElapsedMs == nil || len(event.Group.Items) != 2 ||
+				event.Group.Items[0].TocUrl == nil || *event.Group.Items[0].TocUrl != "http://mock-a.example/catalog/1" {
+				t.Fatalf("unexpected scan group: %+v", event.Group)
+			}
+			matched = true
+		}
+	}
+	if probed != 3 || !matched {
+		t.Fatalf("scan missed results or failed-source probes: probes=%d matched=%v", probed, matched)
+	}
+}
+
+func TestBookRefreshIntroPersistsWithoutOverwriting(t *testing.T) {
+	const detailURL = "https://intro.example/book/1"
+	const intro = "完整作品简介"
+	mock := mockFetcher{fn: func(_ context.Context, target string, _ http.Header) (*fetcher.Response, error) {
+		if target != detailURL {
+			return nil, fmt.Errorf("unexpected detail URL %q", target)
+		}
+		return &fetcher.Response{StatusCode: 200, FinalURL: detailURL, Body: []byte("<section id=\"intro\">" + intro + "</section>")}, nil
+	}}
+	ts, pool := newTestServerOpt(t, mock, func(deps *api.Deps) {
+		deps.Books.WithFetcher(mock, sandbox.New(sandbox.Config{}, nil))
+	})
+	base := ts.URL + "/api/v1"
+	uid, username, password := seedUser(t, pool)
+	token := login(t, base, username, password)
+	source := seedSource(t, pool, uid, "https://intro.example", `{"ruleBookInfo":{"intro":"#intro@text"}}`)
+	status, body := doJSON(t, http.MethodPost, base+"/books", token, []byte(fmt.Sprintf(`{"source_id":%q,"book_url":%q,"name":"示例书","cover_url":"https://intro.example/cover.jpg"}`, source, detailURL)))
+	if status != http.StatusCreated {
+		t.Fatalf("add: status=%d body=%s", status, body)
+	}
+	var book api.Book
+	if err := json.Unmarshal(body, &book); err != nil {
+		t.Fatal(err)
+	}
+	path := base + "/books/" + book.Id.String()
+	patch := func(version int) []byte { return []byte(fmt.Sprintf(`{"version":%d,"refresh_intro":true}`, version)) }
+	status, body = doJSON(t, http.MethodPatch, path, token, patch(book.Version))
+	if status != http.StatusOK || !strings.Contains(string(body), intro) {
+		t.Fatalf("refresh: status=%d body=%s", status, body)
+	}
+	status, body = doJSON(t, http.MethodGet, path, token, nil)
+	if err := json.Unmarshal(body, &book); status != http.StatusOK || err != nil || book.Intro == nil || *book.Intro != intro {
+		t.Fatalf("intro not persisted: status=%d body=%s err=%v", status, body, err)
+	}
+	status, body = doJSON(t, http.MethodPatch, path, token, []byte(fmt.Sprintf(`{"version":%d,"intro":"用户已编辑"}`, book.Version)))
+	if err := json.Unmarshal(body, &book); status != http.StatusOK || err != nil {
+		t.Fatalf("edit: status=%d body=%s err=%v", status, body, err)
+	}
+	version := book.Version
+	status, body = doJSON(t, http.MethodPatch, path, token, patch(version))
+	if err := json.Unmarshal(body, &book); status != http.StatusOK || err != nil || book.Intro == nil || *book.Intro != "用户已编辑" || book.Version != version {
+		t.Fatalf("refresh overwrote a user edit: status=%d body=%s err=%v", status, body, err)
 	}
 }

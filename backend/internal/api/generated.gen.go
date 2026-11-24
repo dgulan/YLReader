@@ -358,12 +358,15 @@ type BookSourceMappingSyncStatus string
 
 // BookUpdate defines model for BookUpdate.
 type BookUpdate struct {
-	Author         *string           `json:"author,omitempty"`
-	CustomCoverUrl *string           `json:"custom_cover_url"`
-	Intro          *string           `json:"intro"`
-	Name           *string           `json:"name,omitempty"`
-	Status         *BookUpdateStatus `json:"status,omitempty"`
-	Version        int               `json:"version"`
+	Author         *string `json:"author,omitempty"`
+	CustomCoverUrl *string `json:"custom_cover_url"`
+	Intro          *string `json:"intro"`
+	Name           *string `json:"name,omitempty"`
+
+	// RefreshIntro 按当前源详情规则补全空简介
+	RefreshIntro *bool             `json:"refresh_intro,omitempty"`
+	Status       *BookUpdateStatus `json:"status,omitempty"`
+	Version      int               `json:"version"`
 }
 
 // BookUpdateStatus defines model for BookUpdate.Status.
@@ -637,6 +640,9 @@ type LoginRequest struct {
 type MappingCreate struct {
 	BookUrl  string             `json:"book_url"`
 	SourceId openapi_types.UUID `json:"source_id"`
+
+	// TocUrl 可选的独立 HTTP(S) 目录抓取地址
+	TocUrl *string `json:"toc_url,omitempty"`
 }
 
 // OverrideStatus defines model for OverrideStatus.
@@ -809,7 +815,10 @@ type SearchBook struct {
 	LatestChapter *string            `json:"latest_chapter"`
 	Name          string             `json:"name"`
 	SourceId      openapi_types.UUID `json:"source_id"`
-	WordCount     *int               `json:"word_count"`
+
+	// TocUrl 已知的目录抓取地址（无独立目录时可能等于书籍地址）
+	TocUrl    *string `json:"toc_url,omitempty"`
+	WordCount *int    `json:"word_count"`
 }
 
 // SearchFailure defines model for SearchFailure.
@@ -1131,6 +1140,9 @@ type ListReplaceRulesParams struct {
 // SearchBooksParams defines parameters for SearchBooks.
 type SearchBooksParams struct {
 	Keyword string `form:"keyword" json:"keyword"`
+
+	// Scan 为 NDJSON 增加逐源探测进度，普通 JSON 响应忽略此参数。
+	Scan *bool `form:"scan,omitempty" json:"scan,omitempty"`
 
 	// SourceIds 省略则使用用户全部启用且可搜索的书源；显式传入时最多 20 个
 	SourceIds *[]openapi_types.UUID `form:"source_ids,omitempty" json:"source_ids,omitempty"`
@@ -2131,7 +2143,7 @@ type ServerInterface interface {
 	// 书籍详情
 	// (GET /books/{bookId})
 	GetBook(w http.ResponseWriter, r *http.Request, bookId BookId)
-	// 更新书籍元数据（自定义封面/状态/分组）
+	// 更新书籍元数据或回填简介
 	// (PATCH /books/{bookId})
 	UpdateBook(w http.ResponseWriter, r *http.Request, bookId BookId)
 	// 书签列表
@@ -2299,7 +2311,7 @@ func (_ Unimplemented) GetBook(w http.ResponseWriter, r *http.Request, bookId Bo
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
-// 更新书籍元数据（自定义封面/状态/分组）
+// 更新书籍元数据或回填简介
 // (PATCH /books/{bookId})
 func (_ Unimplemented) UpdateBook(w http.ResponseWriter, r *http.Request, bookId BookId) {
 	w.WriteHeader(http.StatusNotImplemented)
@@ -3665,6 +3677,14 @@ func (siw *ServerInterfaceWrapper) SearchBooks(w http.ResponseWriter, r *http.Re
 	err = runtime.BindQueryParameter("form", true, true, "keyword", r.URL.Query(), &params.Keyword)
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "keyword", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "scan" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "scan", r.URL.Query(), &params.Scan)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "scan", Err: err})
 		return
 	}
 

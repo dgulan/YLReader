@@ -114,6 +114,19 @@ func (s *Server) UpdateBook(w http.ResponseWriter, r *http.Request, bookId BookI
 		writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
 		return
 	}
+	if req.RefreshIntro != nil && *req.RefreshIntro {
+		if req.Name != nil || req.Author != nil || req.CustomCoverUrl != nil || req.Intro != nil || req.Status != nil {
+			writeErrorCode(w, r, http.StatusBadRequest, "validation_error")
+			return
+		}
+		book, progress, err := s.Books.RefreshIntro(r.Context(), uid, bookId, int64(req.Version))
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, toAPIBook(book, progress))
+		return
+	}
 	patch := repository.BookPatch{
 		Name:           req.Name,
 		Author:         req.Author,

@@ -46,7 +46,7 @@ it('ignores writes returned after account logout', async () => {
 it('adds and removes backup source mappings while protecting the active source', async () => {
   vi.spyOn(api, 'book').mockResolvedValue({ ...book, book_type: 'online', active_source_id: 'src-active' } as Model<'Book'>)
   const mappingsSpy = vi.spyOn(api, 'mappings').mockResolvedValue([
-    { id: 'm-active', book_id: 'book', source_id: 'src-active', book_url: 'https://a.example.com/1', sync_status: 'active' } as Model<'BookSourceMapping'>,
+    { id: 'm-active', book_id: 'book', source_id: 'src-active', source_name: '当前书源', book_url: 'https://a.example.com/1', sync_status: 'active' } as Model<'BookSourceMapping'>,
   ])
   vi.spyOn(api, 'sources').mockResolvedValue({ items: [{ id: 'src-b', book_source_name: '备用源', book_source_type: 0, enabled: true }], page: 1, page_size: 100, total: 1 } as Model<'SourcePage'>)
   const addSpy = vi.spyOn(api, 'addMapping').mockResolvedValue({ id: 'm-b', book_id: 'book', source_id: 'src-b', book_url: 'https://b.example.com/1', sync_status: 'pending' } as Model<'BookSourceMapping'>)
@@ -68,4 +68,24 @@ it('adds and removes backup source mappings while protecting the active source',
   expect(await state.removeBackupMapping(state.mappings.value[1]!)).toBe(true)
   expect(delSpy).toHaveBeenCalledWith('book', 'm-b')
   expect(state.mappings.value).toHaveLength(1)
+})
+
+it('only fetches a missing online introduction on an explicit reload and adopts the persisted result', async () => {
+  const online = { ...book, book_type: 'online' } as const
+  vi.mocked(api.book).mockResolvedValue(online)
+  vi.spyOn(api, 'mappings').mockResolvedValue([])
+  vi.spyOn(api, 'sources').mockResolvedValue({ items: [], page: 1, page_size: 100, total: 0 })
+  const updated = { ...online, version: 4, intro: '作品简介\n第二段' }
+  const patch = vi.spyOn(api, 'updateBook').mockResolvedValue(updated)
+  const state = setup()
+  await state.load()
+  expect(patch).not.toHaveBeenCalled()
+  await state.load(true)
+  expect(patch).toHaveBeenCalledWith(book.id, { version: 3, refresh_intro: true })
+  expect(state.book.value?.intro).toBe(updated.intro)
+  expect(state.draft.intro).toBe(updated.intro)
+  expect(state.dirty.value).toBe(false)
+  vi.mocked(api.book).mockResolvedValue(updated)
+  await state.load(true)
+  expect(patch).toHaveBeenCalledTimes(1)
 })

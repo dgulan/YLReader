@@ -89,6 +89,39 @@ func (s *BookService) Get(ctx context.Context, userID, bookID uuid.UUID) (*repos
 	return b, p, nil
 }
 
+// RefreshIntro fills an empty online-book introduction without overwriting an edit or a source switch.
+func (s *BookService) RefreshIntro(ctx context.Context, userID, bookID uuid.UUID, version int64) (*repository.Book, *repository.ReadingProgress, error) {
+	book, progress, err := s.Get(ctx, userID, bookID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if book.Version != version {
+		return nil, nil, repository.ErrVersionConflict
+	}
+	if s.ft == nil || book.BookType != repository.BookTypeOnline || book.ActiveSourceID == nil ||
+		book.ActiveBookURL == nil || strings.TrimSpace(derefString(book.Intro)) != "" {
+		return book, progress, nil
+	}
+	src, err := s.sources.Get(ctx, s.pool, userID, *book.ActiveSourceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	intro, err := s.fetchBookIntro(ctx, src, *book.ActiveBookURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	if intro == "" {
+		return book, progress, nil
+	}
+	updated, err := s.Update(ctx, userID, bookID, repository.BookPatch{Intro: &intro}, version)
+	if err != nil {
+		return nil, nil, err
+	}
+	return updated, progress, nil
+}
+
 // Create 加入书架：先查后写（严禁依赖 23505 后在同一事务内挽救，PostgreSQL 会把事务置为 aborted）。
 //
 //   - 分支 B（书不存在）：创建 books + 初始 active 映射，返回 201；
@@ -264,21 +297,12 @@ func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSo
 	if s.ft == nil {
 		return nil
 	}
-	detailURL := resolveURL(src.BookSourceURL, bookURL)
-	if validateHTTPURL(detailURL) != nil {
-		return nil
-	}
 	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	fetchCtx = sourceFetchContext(fetchCtx, src)
-	headers := scopeHeadersForTarget(src.BookSourceURL, detailURL, parseSourceHeaders(src.Header))
-	resp, err := s.ft.Get(fetchCtx, detailURL, headers)
-	if err != nil || resp == nil || resp.StatusCode >= 400 {
+	resp, base, err := s.fetchBookDetail(fetchCtx, src, bookURL)
+	if err != nil {
 		return nil
-	}
-	base := strings.TrimSpace(resp.FinalURL)
-	if base == "" {
-		base = detailURL
 	}
 	if rule := strings.TrimSpace(parseBookInfoCoverRule(src.Rules)); rule != "" {
 		engine := parser.New(s.sb)
@@ -292,6 +316,42 @@ func (s *BookService) fetchBookCover(ctx context.Context, src *repository.BookSo
 		}
 	}
 	return extractBookCover(resp.Body, base)
+}
+
+func (s *BookService) fetchBookDetail(ctx context.Context, src *repository.BookSource, bookURL string) (*fetcher.Response, string, error) {
+	detailURL := resolveURL(src.BookSourceURL, bookURL)
+	if err := validateHTTPURL(detailURL); err != nil {
+		return nil, "", err
+	}
+	headers := scopeHeadersForTarget(src.BookSourceURL, detailURL, parseSourceHeaders(src.Header))
+	resp, err := s.ft.Get(ctx, detailURL, headers)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp == nil || resp.StatusCode >= 400 {
+		return nil, "", fetcher.ErrUpstreamError
+	}
+	return resp, firstNonEmpty(strings.TrimSpace(resp.FinalURL), detailURL), nil
+}
+
+func (s *BookService) fetchBookIntro(ctx context.Context, src *repository.BookSource, bookURL string) (string, error) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(src.Rules, &fields) != nil {
+		return "", nil
+	}
+	rule := firstNonEmpty(nestedText(fields, "bookInfo", "intro"), rawText(fields, "ruleBookInfoIntro"), nestedText(fields, "ruleBookInfo", "intro"))
+	if strings.TrimSpace(rule) == "" {
+		return "", nil
+	}
+	ctx = sourceFetchContext(ctx, src)
+	resp, base, err := s.fetchBookDetail(ctx, src, bookURL)
+	if err != nil {
+		return "", err
+	}
+	engine := parser.New(s.sb)
+	engine.SetVariable("baseUrl", base)
+	intro, err := engine.Eval(ctx, rule, string(resp.Body))
+	return strings.TrimSpace(intro), err
 }
 
 func extractBookCover(body []byte, base string) *string {

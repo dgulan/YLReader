@@ -42,6 +42,7 @@ type BookItem struct {
 	Name          string
 	Author        string
 	BookURL       string
+	TOCURL        string
 	CoverURL      string
 	Intro         string
 	Kind          string
@@ -107,11 +108,11 @@ func (s *SearchService) WithLogger(logger *slog.Logger) *SearchService {
 
 // Search 执行多源并发搜索。部分失败隔离：任何单源失败都只进 Failures。
 func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword string, sourceIDs []uuid.UUID, page, pageSize int) (*SearchOutcome, error) {
-	return s.SearchProgress(ctx, userID, keyword, sourceIDs, page, pageSize, nil)
+	return s.SearchProgress(ctx, userID, keyword, sourceIDs, page, pageSize, nil, nil)
 }
 
-// SearchProgress reports nonempty groups in completion order and returns the ranked outcome.
-func (s *SearchService) SearchProgress(ctx context.Context, userID uuid.UUID, keyword string, sourceIDs []uuid.UUID, page, pageSize int, onGroup func(GroupResult)) (*SearchOutcome, error) {
+// SearchProgress reports available groups and completed probes before returning the ranked outcome.
+func (s *SearchService) SearchProgress(ctx context.Context, userID uuid.UUID, keyword string, sourceIDs []uuid.UUID, page, pageSize int, onGroup func(GroupResult), onProbe func(int)) (*SearchOutcome, error) {
 	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
 		return nil, fmt.Errorf("%w: keyword is required", repository.ErrInvalidArgument)
@@ -133,7 +134,7 @@ func (s *SearchService) SearchProgress(ctx context.Context, userID uuid.UUID, ke
 	}
 	out.Failures = append(out.Failures, early...)
 
-	s.searchSources(ctx, sources, keyword, page, pageSize, out, onGroup)
+	s.searchSources(ctx, sources, keyword, page, pageSize, out, onGroup, onProbe)
 	s.logSearchSummary(ctx, len(sources), out)
 	return out, nil
 }
@@ -167,7 +168,7 @@ func (s *SearchService) logSearchSummary(ctx context.Context, eligible int, out 
 		"timeouts", timeouts, "http_network_errors", upstream, "canceled", canceled, "failures", len(out.Failures), "examples", examples)
 }
 
-func (s *SearchService) searchSources(ctx context.Context, sources []*repository.BookSource, keyword string, page, pageSize int, out *SearchOutcome, onGroup func(GroupResult)) {
+func (s *SearchService) searchSources(ctx context.Context, sources []*repository.BookSource, keyword string, page, pageSize int, out *SearchOutcome, onGroup func(GroupResult), onProbe func(int)) {
 	type result struct {
 		group  GroupResult
 		err    error
@@ -177,6 +178,7 @@ func (s *SearchService) searchSources(ctx context.Context, sources []*repository
 	jobs := make(chan int)
 	var workers sync.WaitGroup
 	var publish sync.Mutex
+	completed := 0
 	run := func(index int) (res result) {
 		src := sources[index]
 		defer func() {
@@ -210,10 +212,16 @@ func (s *SearchService) searchSources(ctx context.Context, sources []*repository
 			for index := range jobs {
 				res := run(index)
 				results[index] = res
-				if onGroup != nil && res.err == nil && len(res.group.Items) > 0 {
+				if onProbe != nil || (onGroup != nil && res.err == nil && len(res.group.Items) > 0) {
 					publish.Lock()
 					if ctx.Err() == nil {
-						onGroup(res.group)
+						if onGroup != nil && res.err == nil && len(res.group.Items) > 0 {
+							onGroup(res.group)
+						}
+						completed++
+						if onProbe != nil {
+							onProbe(completed)
+						}
 					}
 					publish.Unlock()
 				}
@@ -436,11 +444,14 @@ func (s *SearchService) searchDetail(ctx context.Context, raw json.RawMessage, b
 	if cover == nil {
 		cover = extractBookCover([]byte(body), base)
 	}
-	return BookItem{Name: name, Author: eval("author"), BookURL: base, CoverURL: derefString(cover), Intro: eval("intro")}, true
+	return BookItem{
+		Name: name, Author: eval("author"), BookURL: base, TOCURL: searchTOCURL(base, eval("tocUrl"), base),
+		CoverURL: derefString(cover), Intro: eval("intro"), LatestChapter: eval("lastChapter"),
+	}, true
 }
 
 type searchRules struct {
-	SearchURL, BookList, Name, Author, BookURL, CoverURL, Intro, Kind, LastChapter, WordCount string
+	SearchURL, BookList, Name, Author, BookURL, TOCURL, CoverURL, Intro, Kind, LastChapter, WordCount string
 }
 
 // parseSearchRules 优先读取结构化 rules.search 对象，缺失时回退顶层扁平字段。
@@ -458,6 +469,7 @@ func parseSearchRules(raw json.RawMessage) searchRules {
 			out.Name = rawText(m, "name")
 			out.Author = rawText(m, "author")
 			out.BookURL = rawText(m, "bookUrl")
+			out.TOCURL = rawText(m, "tocUrl")
 			out.CoverURL = rawText(m, "coverUrl")
 			out.Intro = rawText(m, "intro")
 			out.Kind = rawText(m, "kind")
@@ -479,6 +491,9 @@ func parseSearchRules(raw json.RawMessage) searchRules {
 	}
 	if out.BookURL == "" {
 		out.BookURL = firstNonEmpty(rawText(obj, "ruleSearchBookUrl"), nestedText(obj, "ruleSearch", "bookUrl"))
+	}
+	if out.TOCURL == "" {
+		out.TOCURL = firstNonEmpty(rawText(obj, "ruleSearchTocUrl"), nestedText(obj, "ruleSearch", "tocUrl"))
 	}
 	if out.CoverURL == "" {
 		out.CoverURL = firstNonEmpty(rawText(obj, "ruleSearchCoverUrl"), nestedText(obj, "ruleSearch", "coverUrl"))
@@ -548,6 +563,7 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 			Name:          name,
 			Author:        author,
 			BookURL:       bookURL,
+			TOCURL:        searchTOCURL(baseURL, evalBookField(ctx, engine, node, rules.TOCURL), bookURL),
 			CoverURL:      derefString(normalizeCoverURL(evalBookField(ctx, engine, node, rules.CoverURL), baseURL)),
 			Intro:         evalBookField(ctx, engine, node, rules.Intro),
 			Kind:          evalBookField(ctx, engine, node, rules.Kind),
@@ -555,6 +571,13 @@ func (s *SearchService) parseBookList(ctx context.Context, content, baseURL stri
 		})
 	}
 	return items, nil
+}
+
+func searchTOCURL(baseURL, ruleValue, bookURL string) string {
+	if target := resolveURL(baseURL, ruleValue); target != "" && ValidateSourceURL(target) == nil {
+		return target
+	}
+	return bookURL
 }
 
 // evalBookField 在单本书节点上执行字段规则；失败时按空值处理（与 Legado 一致，

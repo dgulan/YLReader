@@ -91,7 +91,7 @@ function onTouchEnd(event: TouchEvent) {
   else if (dir === 'prev' && content.value?.prev_chapter_index != null) void changeChapter(content.value.prev_chapter_index)
 }
 const uncertain = ref(false), reviewing = ref(false)
-const directory = ref<InstanceType<typeof VirtualList>>()
+const directory = ref<{ revealSelected(): void }>()
 const directoryQuery = ref(''), directoryNewestFirst = ref(false)
 async function locateCurrentChapter() {
   directoryQuery.value = ''
@@ -474,7 +474,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
       </div>
       <span class="reader-status" role="status">{{ status }}</span>
     </footer>
-    <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" :book-name="book?.name" :book-author="book?.author" @switched="switched" />
+    <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" :book-name="book?.name" :book-author="book?.author" :active-latest-chapter="book?.latest_chapter_title" :active-total-chapters="book?.total_chapters" @switched="switched" />
     <BookmarksPanel ref="bookmarks" :book-id="bookId" :total="book?.total_chapters ?? 0" @navigate="visitBookmark" />
     <ChapterOverrideDialog ref="overrideDialog" :book-id="bookId" :chapter-index="index" :chapter-title="title" :is-overridden="Boolean(content?.is_overridden)" @updated="overrideUpdated" />
     <dialog id="reader-directory" ref="drawer" class="toc-dialog" aria-labelledby="toc-title" @close="onDirectoryClose">

@@ -13,6 +13,7 @@ export function bookPatch(draft: BookDraft, version: number): Model<'BookUpdate'
 export function useBookEditor(bookId: Ref<string>) {
   const owner = getSession()?.user.id ?? '', book = ref<Model<'Book'>>(), draft = reactive(empty()), busy = ref(false), error = ref(''), notice = ref(''), deleted = ref(false)
   const mappings = ref<Model<'BookSourceMapping'>[]>([]), sources = ref<Model<'Source'>[]>([])
+  const activeSourceName = ref('')
   const mappingBusy = ref(false), mappingError = ref(''), mappingNotice = ref('')
   const baseline = ref(JSON.stringify(draft)), dirty = computed(() => JSON.stringify(draft) !== baseline.value)
   let generation = 0
@@ -20,28 +21,48 @@ export function useBookEditor(bookId: Ref<string>) {
   function reset() {
     generation++; book.value = undefined; Object.assign(draft, empty()); baseline.value = JSON.stringify(draft)
     busy.value = false; error.value = ''; notice.value = ''; deleted.value = false
-    mappings.value = []; sources.value = []; mappingBusy.value = false; mappingError.value = ''; mappingNotice.value = ''
+    mappings.value = []; sources.value = []; activeSourceName.value = ''; mappingBusy.value = false; mappingError.value = ''; mappingNotice.value = ''
   }
   watch(bookId, reset, { flush: 'sync' }); onScopeDispose(reset)
   function apply(value: Model<'Book'>) { book.value = value; Object.assign(draft, { name: value.name, author: value.author || '', status: value.status, intro: value.intro || '' }); baseline.value = JSON.stringify(draft) }
-  async function loadMappings(token: number, id: string) {
+  async function loadMappings(token: number, id: string, activeSource?: string | null) {
     mappingBusy.value = true; mappingError.value = ''
     try {
-      const [list, srcPage] = await Promise.all([api.mappings(id), api.sources(1)])
-      if (!valid(token)) return
-      mappings.value = list
-      sources.value = srcPage.items.filter(s => s.book_source_type !== 3 && s.enabled)
-    } catch (e) { if (valid(token)) mappingError.value = errorText(e) }
+      const results = await Promise.allSettled([
+        api.mappings(id).then(async list => {
+          if (!valid(token)) return
+          mappings.value = list
+          const active = list.find(mapping => mapping.source_id === activeSource)
+          const source = activeSource && !active?.source_name ? await api.source(activeSource).catch(() => undefined) : undefined
+          if (valid(token)) activeSourceName.value = active?.source_name || source?.book_source_name || ''
+        }),
+        api.sources(1).then(page => {
+          if (valid(token)) sources.value = page.items.filter(source => source.book_source_type !== 3 && source.enabled)
+        }),
+      ])
+      const failure = results.find(result => result.status === 'rejected')
+      if (valid(token) && failure) mappingError.value = errorText(failure.reason)
+    }
     finally { if (valid(token)) mappingBusy.value = false }
   }
-  async function load() {
+  async function load(refreshIntro = false) {
     if (!valid(generation) || busy.value) return
     const token = generation, id = bookId.value; busy.value = true; error.value = ''; notice.value = ''
     try {
       const value = await api.book(id)
       if (!valid(token)) return
       apply(value)
-      if (value.book_type === 'online') await loadMappings(token, id)
+      if (value.book_type === 'online') {
+        const loadBindings = loadMappings(token, id, value.active_source_id)
+        try {
+          if (refreshIntro && !value.intro?.trim()) {
+            const refreshed = await api.updateBook(id, { version: value.version, refresh_intro: true })
+            if (valid(token)) apply(refreshed)
+          }
+        } finally {
+          await loadBindings
+        }
+      }
     }
     catch (e) { if (valid(token)) error.value = errorText(e) }
     finally { if (valid(token)) busy.value = false }
@@ -88,7 +109,7 @@ export function useBookEditor(bookId: Ref<string>) {
       const patch = bookPatch(draft, book.value.version); busy.value = true
       const value = await api.updateBook(id, patch); if (!valid(token)) return false
       invalidateBookCover(owner, id, value.custom_cover_url || value.cover_url || undefined)
-      apply(value)
+      apply({ ...value, progress: value.progress ?? book.value?.progress })
       try { await db.transaction('rw', db.books, db.chapters, async () => { await db.books.delete(bookKey(owner, id)); await db.chapters.where('[owner+bookId]').equals([owner, id]).delete() }); if (valid(token)) notice.value = '书籍信息已保存，重新打开章节即可更新本机缓存' }
       catch { if (valid(token)) notice.value = '书籍信息已保存，但本机缓存更新失败，请联网重新打开章节' }
       if (!valid(token)) return false
@@ -111,5 +132,5 @@ export function useBookEditor(bookId: Ref<string>) {
     } catch (e) { if (valid(token)) error.value = errorText(e); return false }
     finally { if (valid(token)) busy.value = false }
   }
-  return { book, draft, dirty, busy, error, notice, deleted, mappings, sources, mappingBusy, mappingError, mappingNotice, load, save, remove, addBackupMapping, removeBackupMapping }
+  return { book, draft, dirty, busy, error, notice, deleted, mappings, sources, activeSourceName, mappingBusy, mappingError, mappingNotice, load, save, remove, addBackupMapping, removeBackupMapping }
 }
