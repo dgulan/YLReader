@@ -8,6 +8,7 @@ import { db, bookKey, chapterContext, getChapter, putChapter, deleteChapter, ret
 import { useReaderConfig } from '@/stores/readerConfig'
 import VirtualList from '@/components/VirtualList.vue'
 import SourceSwitcher from './SourceSwitcher.vue'
+import { directoryEntries } from './directoryEntries'
 import BookmarksPanel from './BookmarksPanel.vue'
 import ChapterOverrideDialog from './ChapterOverrideDialog.vue'
 import { bookmarkExcerpt } from './bookmarks'
@@ -91,12 +92,18 @@ function onTouchEnd(event: TouchEvent) {
 }
 const uncertain = ref(false), reviewing = ref(false)
 const directory = ref<InstanceType<typeof VirtualList>>()
+const directoryQuery = ref(''), directoryNewestFirst = ref(false)
+async function locateCurrentChapter() {
+  directoryQuery.value = ''
+  await nextTick()
+  directory.value?.revealSelected()
+}
 const bookmarkTrigger = ref<HTMLButtonElement>(), directoryTrigger = ref<HTMLButtonElement>()
 let lastDirectoryTrigger: HTMLElement | null = null
 function openDirectory() {
   const active = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null
   lastDirectoryTrigger = directoryTrigger.value ?? active
-  drawer.value?.showModal(); directory.value?.revealSelected()
+  drawer.value?.showModal(); void locateCurrentChapter()
 }
 function onDirectoryClose() {
   const target = lastDirectoryTrigger
@@ -123,7 +130,7 @@ async function overrideUpdated(targetIndex: number) {
 async function openSwitcher() { clearTimeout(timer); capture(); if (!await flush()) { saveError.value = '请先同步阅读进度或解决冲突，再切换书源'; return }; await switcher.value?.open() }
 async function switched() { clearTimeout(timer); controller.abort(); let cacheFailed = false; try { await clearBookCache(owner, bookId.value) } catch { cacheFailed = true }; await boot(); if (cacheFailed) saveError.value = '已切换书源，但本机缓存清理失败，请保持联网' }
 const bookId = computed(() => String(route.params.bookId))
-const entries = computed(() => (toc.value?.items ?? []).map(ch => ({ id: ch.is_volume ? `v:${ch.id}` : ch.chapter_index!, label: ch.title, disabled: ch.is_volume })))
+const entries = computed(() => directoryEntries(toc.value?.items ?? [], directoryQuery.value, directoryNewestFirst.value))
 const title = computed(() => content.value?.chapter.title ?? '正在打开…')
 const status = computed(() => conflict.value ? '进度有冲突' : reviewing.value ? '正在核对进度…' : saving.value ? '正在保存…' : uncertain.value ? '进度保存结果待确认' : dirty.value ? '进度等待同步' : localFault.value ? '进度已同步，本机记录待更新' : '进度已同步')
 async function persistLocal() {
@@ -460,7 +467,16 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
     <SourceSwitcher ref="switcher" :book-id="bookId" :active-source="book?.active_source_id" :book-name="book?.name" :book-author="book?.author" @switched="switched" />
     <BookmarksPanel ref="bookmarks" :book-id="bookId" :total="book?.total_chapters ?? 0" @navigate="visitBookmark" />
     <ChapterOverrideDialog ref="overrideDialog" :book-id="bookId" :chapter-index="index" :chapter-title="title" :is-overridden="Boolean(content?.is_overridden)" @updated="overrideUpdated" />
-    <dialog id="reader-directory" ref="drawer" class="toc-dialog" aria-labelledby="toc-title" @close="onDirectoryClose"><div class="toc-heading"><h2 id="toc-title">章节目录</h2><button type="button" autofocus @click="drawer?.close()">关闭</button></div><VirtualList ref="directory" :items="entries" :selected="index" label="章节目录列表" @select="changeChapter" /></dialog>
+    <dialog id="reader-directory" ref="drawer" class="toc-dialog" aria-labelledby="toc-title" @close="onDirectoryClose">
+      <div class="toc-heading"><h2 id="toc-title">章节目录</h2><button type="button" autofocus @click="drawer?.close()">关闭</button></div>
+      <input v-model="directoryQuery" class="toc-search" type="search" aria-label="搜索章节" placeholder="按章节名称搜索">
+      <div class="toc-actions">
+        <button type="button" @click="directoryNewestFirst = !directoryNewestFirst">{{ directoryNewestFirst ? '倒序' : '正序' }}</button>
+        <button type="button" @click="locateCurrentChapter">定位当前</button>
+      </div>
+      <VirtualList v-if="entries.length" ref="directory" :items="entries" :selected="index" label="章节目录列表" @select="changeChapter" />
+      <p v-else role="status">没有匹配的章节</p>
+    </dialog>
   </main>
 </template>
 <style scoped>
@@ -477,6 +493,8 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 .reader-header span { min-width: 0; flex: 1; }
 .reader-article { padding-inline: max(22px, env(safe-area-inset-left)) max(22px, env(safe-area-inset-right)); }
 .reader-footer { padding-inline: max(14px, env(safe-area-inset-left)) max(14px, env(safe-area-inset-right)); padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+.toc-search { width: 100%; padding: 8px 14px; border: 1px solid #8886; border-radius: 999px; font-size: 16px; background: var(--reader-bg); color: var(--reader-ink); }
+.toc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .toc-dialog { max-height: calc(100dvh - 32px); overflow: auto; }
 @media (min-width: 651px) { .reader-article { padding-inline: max(42px, env(safe-area-inset-left)) max(42px, env(safe-area-inset-right)); } }
 @media (max-width: 650px) {

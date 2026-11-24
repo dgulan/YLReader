@@ -20,13 +20,13 @@
 
 ### 生产环境部署（`docker-compose.prod.yml`）
 
-> 默认部署方式直接拉取 GitHub Actions 预构建的多架构镜像（`ghcr.io/dgulan/ylreader-{backend,frontend,worker}:v1.1.2`），服务器无需下载 Go/Node 编译器，通常在 30 秒内完成启动。
+> 默认部署方式直接拉取 GitHub Actions 预构建的多架构镜像（`ghcr.io/dgulan/ylreader-{backend,frontend,worker}:v1.1.3`），服务器无需下载 Go/Node 编译器，通常在 30 秒内完成启动。
 
 ```bash
 # 下载并解压到固定目录 /opt/YLReader（后续升级覆盖同一目录即可，避免数据目录分散）
 # 如当前用户对 /opt 无写权限，请先执行 sudo mkdir -p /opt/YLReader && sudo chown "$USER":"$USER" /opt/YLReader
 mkdir -p /opt/YLReader
-curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.1.2.tar.gz | tar -xz --strip-components=1 -C /opt/YLReader
+curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.1.3.tar.gz | tar -xz --strip-components=1 -C /opt/YLReader
 cd /opt/YLReader
 
 # 1. 首次运行：自动生成 .env 并填充随机 JWT_SECRET（32B hex）和 YREADER_HEADER_KEY_primary（32B base64）
@@ -47,7 +47,7 @@ nano /opt/YLReader/.env
 ```dotenv
 YLREADER_BIND_IP=127.0.0.1   # 局域网直连请改为 0.0.0.0
 YLREADER_HTTP_PORT=8080      # 按需修改访问端口
-# YLREADER_IMAGE_TAG=v1.1.2  # 指定预构建镜像版本（默认 v1.1.2）
+# YLREADER_IMAGE_TAG=v1.1.3  # 指定预构建镜像版本（默认 v1.1.3）
 ```
 
 **国内服务器加速：**
@@ -100,6 +100,77 @@ docker compose up --build -d
 - 后端：`cd backend && go test -mod=readonly ./...`
 - 前端：`cd frontend && npm run type-check && npm test && npm run build`
 - 契约与目标门禁：`python scripts/verify-backup-contract.py`、`python scripts/test-db-guard.py`
+
+## 升级指南
+
+升级前先备份。升级服务端需要拉取镜像并重建容器，完成后再刷新浏览器。
+
+### 1. 升级前备份
+
+当前版本通过服务器端备份数据库和书库文件。停止写入后，在部署目录（例如 `/opt/YLReader`）执行以下命令。备份目录包含账户数据和密钥，应限制权限并另存到独立介质。
+
+```bash
+set -eu
+umask 077
+backup="../ylreader-backups/$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$backup"
+
+docker compose -f docker-compose.prod.yml stop frontend app
+docker compose -f docker-compose.prod.yml exec -T postgres sh -ec \
+  'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup/ylreader-db.dump"
+docker compose -f docker-compose.prod.yml exec -T postgres pg_restore --list \
+  < "$backup/ylreader-db.dump" > /dev/null
+docker compose -f docker-compose.prod.yml run --rm --no-deps -T --entrypoint tar app \
+  -czf - -C /var/lib/yreader/storage . > "$backup/ylreader-storage.tar.gz"
+tar -tzf "$backup/ylreader-storage.tar.gz" > /dev/null
+tar -czf "$backup/ylreader-config.tar.gz" docker-compose.prod.yml .env
+```
+
+自定义存储卷、外部密钥或反向代理配置也应单独备份。若暂缓升级，可用 `docker compose -f docker-compose.prod.yml start app frontend` 恢复服务。
+备份归档校验、隔离演练和受控恢复参见 [部署与恢复文档](docs/deployment.md#6-灾备恢复运维闭环cmdbackup)。
+
+### 2. Docker Compose 升级
+
+把目标版本的部署文件更新到原部署目录，保留原有 `.env`、卷和 Compose 项目名。
+
+- 固定版本（推荐）。在 `.env` 中设置 `YLREADER_IMAGE_TAG=v1.1.3`。
+- 跟随最新发布。在 `.env` 中设置 `YLREADER_IMAGE_TAG=latest`。建议先核对目标版本的发布说明。
+
+运行以下命令。部署脚本会拉取镜像、检查并应用数据库迁移，然后启动服务。
+
+```bash
+./scripts/deploy.sh
+docker compose -f docker-compose.prod.yml up -d --force-recreate
+```
+
+### 3. 确认版本与服务状态
+
+```bash
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml images
+docker compose -f docker-compose.prod.yml exec -T app wget -qO- http://127.0.0.1:8080/readyz
+```
+
+确认 app、frontend、两个 sandboxworker、postgres 和 redis 运行正常；一次性初始化服务 sandboxworker-init 完成后会退出。重新打开浏览器标签页或强制刷新，检查登录和阅读。
+
+### 4. 固定版本与回退
+
+在 `.env` 中设置具体版本，例如 `YLREADER_IMAGE_TAG=v1.1.3`，可以锁定后端、前端和 worker 镜像。若数据库仍兼容旧版，恢复旧版部署文件和版本标签，拉取旧镜像并重建容器。跨数据库结构版本时，先在隔离环境恢复并验证同一时间点的数据库、书库文件和密钥，再按受控恢复流程切换服务。
+
+## 致谢
+
+- [legado](https://github.com/gedoor/legado) 提供书源规则语义与开源生态。
+- [givenge/reader-rust](https://github.com/givenge/reader-rust) 提供服务端规则引擎与搜索解析参考。
+- [1432433gg/reader-next](https://github.com/1432433gg/reader-next) 提供前端阅读交互与书架设计参考。
+- [hehecat/reader](https://github.com/hehecat/reader) 提供移动端布局与并行搜索体验参考。
+- [hectorqin/reader](https://github.com/hectorqin/reader) 提供早期服务端阅读器架构参考。
+- [changshengyu/openreader](https://github.com/changshengyu/openreader) 提供自托管阅读器设计参考。
+- [warpdotsys/reader-dev](https://github.com/warpdotsys/reader-dev) 提供现代阅读器架构与规则实现参考。
+- [kukume/legado-web](https://github.com/kukume/legado-web) 提供 Legado Web 端交互参考。
+
+## License
+
+本项目采用 [MIT License](LICENSE)。
 
 ## 免责声明
 

@@ -8,7 +8,10 @@ test('book metadata preserves conflicts and deletion requires confirmation', asy
   const name = `管理验证${Date.now()}`
   const imported = await page.request.post(`/api/v1/books/import?filename=${encodeURIComponent(name + '.txt')}`, { headers: { ...headers, 'Content-Type': 'application/octet-stream' }, data: Buffer.from(`第一章 整理书房\n${name}的正文内容。\n第二章 明天继续\n继续阅读。`) })
   expect(imported.ok()).toBeTruthy(); const { book } = await imported.json(), url = `/api/v1/books/${book.id}`
-  await page.reload(); await page.locator('.book-card').filter({ has: page.getByRole('heading', { name, exact: true }) }).getByRole('button', { name: '管理书籍', exact: true }).click()
+  await page.reload()
+  const card = page.locator('.book-card').filter({ has: page.getByRole('heading', { name: name, exact: true }) })
+  await card.locator('summary').click()
+  await card.getByRole('button', { name: '管理书籍', exact: true }).click()
   await expect(page.getByLabel('编辑书名')).toHaveValue(name); await page.getByLabel('编辑书名').fill(`${name}草稿`)
   // Simulate another device through the real API, retaining the original UI version.
   const current = await (await page.request.get(url, { headers })).json()

@@ -387,7 +387,12 @@ paths:
       tags: [search]
       operationId: searchBooks
       summary: 多源并行搜索（部分失败不整体失败）
-      description: 并行搜索所选书源并聚合结果；单个源的失败单独列出。
+      description: |-
+        并行搜索所选书源并聚合结果；单个源的失败单独列出。
+        请求头 Accept 为 application/x-ndjson 时，逐行发送 JSON 对象：
+        {"type":"group","group":SearchGroup} 表示某个书源已返回非空结果，
+        {"type":"done","result":SearchResponse} 表示搜索结束，含最终排序结果与失败汇总。
+        连接在 done 前中断时，已收到的结果为部分结果。
       parameters:
         - name: keyword
           in: query
@@ -395,7 +400,7 @@ paths:
           schema: { type: string, minLength: 1, maxLength: 100 }
         - name: source_ids
           in: query
-          description: 省略则使用用户全部启用书源（上限 20 个）
+          description: 省略则使用用户全部启用且可搜索的书源；显式传入时最多 20 个
           style: form
           explode: false
           schema:
@@ -411,6 +416,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchResponse'
+            application/x-ndjson:
+              schema: { type: string }
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
@@ -1688,6 +1695,7 @@ components:
       properties:
         source_id: { type: string, format: uuid }
         source_name: { type: string }
+        source_host: { type: string, description: 书源配置网址的主机名 }
         elapsed_ms: { type: integer, minimum: 0 }
         items:
           type: array
@@ -1992,6 +2000,7 @@ components:
         book_id: { type: string, format: uuid }
         source_id: { type: string, format: uuid }
         source_name: { type: string }
+        source_host: { type: string, description: 书源配置网址的主机名 }
         book_url: { type: string }
         toc_url: { type: string, nullable: true }
         name: { type: string, nullable: true }

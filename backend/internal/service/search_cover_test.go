@@ -44,7 +44,7 @@ func TestSearchPoolProcessesMoreThanTwoHundredAndRanksBeforeTruncation(t *testin
 		sources[i] = &repository.BookSource{ID: uuid.New(), Weight: int32(i), BookSourceURL: "https://books.example/", Rules: []byte(`{"searchUrl":"/search?q={{key}}","ruleSearch":{"bookList":"article","name":"a@text","bookUrl":"a@href"}}`)}
 	}
 	out := &SearchOutcome{}
-	service.searchSources(t.Context(), sources, "书名", 1, 1, out)
+	service.searchSources(t.Context(), sources, "书名", 1, 1, out, nil)
 	if len(out.Groups) != len(sources) || len(out.Failures) != 0 || ft.calls.Load() != int32(len(sources)) || ft.peak.Load() > searchConcurrency {
 		t.Fatalf("groups=%d failures=%d calls=%d peak=%d", len(out.Groups), len(out.Failures), ft.calls.Load(), ft.peak.Load())
 	}
@@ -83,5 +83,55 @@ func TestCoverCandidatesUseFinalResponseURL(t *testing.T) {
 		if got := derefString(extractBookCover([]byte(body), base)); got != want {
 			t.Fatalf("%s: got %s, want %s", strings.TrimSpace(body), got, want)
 		}
+	}
+}
+
+type heldSearchFetcher struct {
+	release <-chan struct{}
+}
+
+func (f heldSearchFetcher) Get(ctx context.Context, target string, _ http.Header) (*fetcher.Response, error) {
+	if strings.Contains(target, "slow.example") {
+		select {
+		case <-f.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return &fetcher.Response{FinalURL: target, Body: []byte(`<article><a href="/book">书名</a></article>`)}, nil
+}
+
+func TestSearchPublishesAvailableGroupBeforeSlowSource(t *testing.T) {
+	release := make(chan struct{})
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	svc := NewSearchService(nil, heldSearchFetcher{release: release}, nil)
+	sources := []*repository.BookSource{
+		{ID: uuid.New(), BookSourceURL: "https://slow.example/", Weight: 10},
+		{ID: uuid.New(), BookSourceURL: "https://fast.example/"},
+	}
+	for _, source := range sources {
+		source.Rules = []byte(`{"searchUrl":"/search?q={{key}}","ruleSearch":{"bookList":"article","name":"a@text","bookUrl":"a@href"}}`)
+	}
+	out := &SearchOutcome{}
+	published, finished := make(chan uuid.UUID, 2), make(chan struct{})
+	go func() {
+		defer close(finished)
+		svc.searchSources(ctx, sources, "书名", 1, 20, out, func(group GroupResult) {
+			published <- group.SourceID
+		})
+	}()
+	select {
+	case got := <-published:
+		if got != sources[1].ID {
+			t.Fatalf("first group was not from the fast source: %s", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("the fast group was held until the slow source returned")
+	}
+	close(release)
+	<-finished
+	if len(out.Groups) != 2 || out.Groups[0].SourceID != sources[0].ID {
+		t.Fatalf("unexpected final ranking: %+v", out.Groups)
 	}
 }

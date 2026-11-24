@@ -1,4 +1,4 @@
-import { request, jsonBody, type Model } from './client'
+import { request, requestSearchStream, jsonBody, type Model } from './client'
 const id = encodeURIComponent
 export const api = {
   replaceRules: () => request<Model<'ReplaceRule'>[]>('/replace-rules'),
@@ -17,7 +17,7 @@ export const api = {
   updateBook: (bookId: string, data: Model<'BookUpdate'>) => request<Model<'Book'>>(`/books/${id(bookId)}`, { method: 'PATCH', ...jsonBody(data) }),
   deleteBook: (bookId: string) => request<void>(`/books/${id(bookId)}`, { method: 'DELETE' }),
   importBook: (file: File) => request<Model<'BookImportResult'>>(`/books/import?filename=${id(file.name)}`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file }),
-  source: (sourceId: string) => request<Model<'Source'>>(`/sources/${id(sourceId)}`),
+  source: (sourceId: string, signal?: AbortSignal) => request<Model<'Source'>>(`/sources/${id(sourceId)}`, { signal }),
   createSource: (data: Model<'SourceCreate'>) => request<Model<'Source'>>('/sources', { method: 'POST', ...jsonBody(data) }),
   exportSources: (ids?: string[]) => request<Model<'Source'>[]>(`/sources/export${ids?.length ? `?ids=${ids.map(id).join(',')}` : ''}`),
   updateSource: (sourceId: string, data: Model<'SourceUpdate'>) => request<Model<'Source'>>(`/sources/${id(sourceId)}`, { method: 'PUT', ...jsonBody(data) }),
@@ -29,10 +29,13 @@ export const api = {
   setChapterOverride: (bookId: string, chapterIndex: number, data: Model<'ChapterOverrideCreate'>, signal?: AbortSignal) => request<Model<'ChapterOverride'>>(`/books/${id(bookId)}/chapters/${chapterIndex}/override`, { method: 'POST', signal, ...jsonBody(data) }),
   deleteChapterOverride: (bookId: string, chapterIndex: number, signal?: AbortSignal) => request<void>(`/books/${id(bookId)}/chapters/${chapterIndex}/override`, { method: 'DELETE', signal }),
   switchSource: (bookId: string, data: Model<'SwitchSourceRequest'>, signal?: AbortSignal) => request<Model<'SwitchSourceResult'>>(`/books/${id(bookId)}/switch-source`, { method: 'POST', signal, ...jsonBody(data) }),
-  sources: (page = 1) => request<Model<'SourcePage'>>(`/sources?page=${page}&page_size=100`),
+  sources: (page = 1, q = '') => request<Model<'SourcePage'>>(`/sources?page=${page}&page_size=100&q=${id(q)}`),
   importSources: (data: string, dry_run: boolean, conflict_mode: 'skip' | 'overwrite' = 'skip') => request<Model<'ImportResult'>>('/sources/import', { method: 'POST', ...jsonBody({ format: 'legado_json', data, dry_run, conflict_mode }) }),
   importSourcesFromUrl: (url: string, dry_run: boolean, conflict_mode: 'skip' | 'overwrite' = 'skip') => request<Model<'ImportResult'>>('/sources/import-url', { method: 'POST', ...jsonBody({ url, dry_run, conflict_mode }) }),
-  search: (keyword: string, signal?: AbortSignal) => request<Model<'SearchResponse'>>(`/search?keyword=${id(keyword)}`, { signal }),
+  search: (keyword: string, signal?: AbortSignal, onGroup?: (group: Model<'SearchGroup'>) => void) => {
+    const path = '/search?keyword=' + id(keyword)
+    return onGroup ? requestSearchStream(path, signal, onGroup) : request<Model<'SearchResponse'>>(path, { signal })
+  },
   addBook: (book: Model<'SearchBook'>) => request<Model<'Book'>>('/books', { method: 'POST', ...jsonBody({ source_id: book.source_id, book_url: book.book_url, name: book.name, author: book.author ?? '', cover_url: book.cover_url ?? null }) }),
   chapters: (bookId: string, refresh = false, sourceId?: string, signal?: AbortSignal) => request<Model<'ChapterList'>>(`/books/${id(bookId)}/chapters?refresh=${refresh}${sourceId ? `&source_id=${id(sourceId)}` : ''}`, { signal }),
   content: (bookId: string, index: number, signal?: AbortSignal, refresh = false) =>

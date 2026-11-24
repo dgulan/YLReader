@@ -1,9 +1,15 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
+
+	"yreader/backend/internal/service"
 )
 
 // SearchBooks aggregates source results until the request is canceled.
@@ -22,7 +28,35 @@ func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params Sear
 		pageSize = *params.PageSize
 	}
 
-	out, err := s.Search.Search(r.Context(), uid, params.Keyword, ids, page, pageSize)
+	var onGroup func(service.GroupResult)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	stream := strings.TrimSpace(r.Header.Get("Accept")) == "application/x-ndjson"
+	controller := http.NewResponseController(w)
+	encoder := json.NewEncoder(w)
+	writeEvent := func(event searchEvent) {
+		if ctx.Err() != nil {
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := encoder.Encode(event); err != nil {
+			cancel()
+			return
+		}
+		if err := controller.Flush(); err != nil {
+			cancel()
+		}
+	}
+	w.Header().Add("Vary", "Accept")
+	if stream {
+		onGroup = func(g service.GroupResult) {
+			group := searchGroup(g)
+			writeEvent(searchEvent{Type: "group", Group: &group})
+		}
+	}
+	out, err := s.Search.SearchProgress(ctx, uid, params.Keyword, ids, page, pageSize, onGroup)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -42,34 +76,54 @@ func (s *Server) SearchBooks(w http.ResponseWriter, r *http.Request, params Sear
 		})
 	}
 
-	total := 0
 	for _, g := range out.Groups {
-		group := SearchGroup{
-			SourceId:   g.SourceID,
-			SourceName: g.SourceName,
-			Items:      make([]SearchBook, 0, len(g.Items)),
-		}
-		elapsed := g.ElapsedMs
-		group.ElapsedMs = &elapsed
-		for _, it := range g.Items {
-			group.Items = append(group.Items, SearchBook{
-				Name:          it.Name,
-				Author:        optString(it.Author),
-				BookUrl:       it.BookURL,
-				CoverUrl:      optString(it.CoverURL),
-				Intro:         optString(it.Intro),
-				Kind:          optString(it.Kind),
-				LatestChapter: optString(it.LatestChapter),
-				WordCount:     it.WordCount,
-				SourceId:      g.SourceID,
-			})
-		}
-		total += len(group.Items)
+		group := searchGroup(g)
+		resp.Total += len(group.Items)
 		resp.Groups = append(resp.Groups, group)
 	}
-	// total = 所有成功源截断后贡献的书籍总和；失败源不计入。
-	resp.Total = total
+	if stream {
+		writeEvent(searchEvent{Type: "done", Result: &resp})
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+type searchEvent struct {
+	Type   string          `json:"type"`
+	Group  *SearchGroup    `json:"group,omitempty"`
+	Result *SearchResponse `json:"result,omitempty"`
+}
+
+func searchGroup(g service.GroupResult) SearchGroup {
+	group := SearchGroup{
+		SourceId:   g.SourceID,
+		SourceName: g.SourceName,
+		SourceHost: sourceHostname(g.SourceURL),
+		Items:      make([]SearchBook, 0, len(g.Items)),
+		ElapsedMs:  &g.ElapsedMs,
+	}
+	for _, it := range g.Items {
+		group.Items = append(group.Items, SearchBook{
+			Name:          it.Name,
+			Author:        optString(it.Author),
+			BookUrl:       it.BookURL,
+			CoverUrl:      optString(it.CoverURL),
+			Intro:         optString(it.Intro),
+			Kind:          optString(it.Kind),
+			LatestChapter: optString(it.LatestChapter),
+			WordCount:     it.WordCount,
+			SourceId:      g.SourceID,
+		})
+	}
+	return group
+}
+
+func sourceHostname(rawURL string) *string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil
+	}
+	return optString(parsed.Hostname())
 }
 
 func optString(s string) *string {

@@ -230,6 +230,10 @@ export interface paths {
         /**
          * 多源并行搜索（部分失败不整体失败）
          * @description 并行搜索所选书源并聚合结果；单个源的失败单独列出。
+         *     请求头 Accept 为 application/x-ndjson 时，逐行发送 JSON 对象：
+         *     {"type":"group","group":SearchGroup} 表示某个书源已返回非空结果，
+         *     {"type":"done","result":SearchResponse} 表示搜索结束，含最终排序结果与失败汇总。
+         *     连接在 done 前中断时，已收到的结果为部分结果。
          */
         get: operations["searchBooks"];
         put?: never;
@@ -1035,6 +1039,8 @@ export interface components {
             /** Format: uuid */
             source_id: string;
             source_name: string;
+            /** @description 书源配置网址的主机名 */
+            source_host?: string;
             elapsed_ms?: number;
             items: components["schemas"]["SearchBook"][];
         };
@@ -1274,6 +1280,8 @@ export interface components {
             /** Format: uuid */
             source_id: string;
             source_name?: string;
+            /** @description 书源配置网址的主机名 */
+            source_host?: string;
             book_url: string;
             toc_url?: string | null;
             name?: string | null;
@@ -1859,7 +1867,7 @@ export interface operations {
         parameters: {
             query: {
                 keyword: string;
-                /** @description 省略则使用用户全部启用书源（上限 20 个） */
+                /** @description 省略则使用用户全部启用且可搜索的书源；显式传入时最多 20 个 */
                 source_ids?: string[];
                 page?: components["parameters"]["Page"];
                 page_size?: components["parameters"]["PageSize"];
@@ -1877,6 +1885,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SearchResponse"];
+                    "application/x-ndjson": string;
                 };
             };
             400: components["responses"]["BadRequest"];

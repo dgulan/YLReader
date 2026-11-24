@@ -100,6 +100,8 @@ type Book struct {
 
 // BookSourceMapping 记录一本书在某个书源下的绑定与目录快照状态。
 type BookSourceMapping struct {
+	SourceName         *string
+	SourceURL          *string
 	ID                 uuid.UUID
 	BookID             uuid.UUID
 	SourceID           uuid.UUID

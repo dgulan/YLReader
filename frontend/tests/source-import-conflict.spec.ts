@@ -88,3 +88,41 @@ for (const overwrite of [false, true]) {
     expect(writes).toEqual([overwrite ? 'overwrite' : 'skip'])
   })
 }
+
+test('mobile source cards support selecting and deleting the current page', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 })
+  await page.addInitScript(() => sessionStorage.setItem('yreader-session', JSON.stringify({
+    access_token: 'synthetic', refresh_token: 'synthetic-refresh', user: { id: 'synthetic-reader' },
+  })))
+  let items = [
+    { id: 'local', book_source_type: 3, book_source_name: '本地书库', enabled: true },
+    { id: 'first', book_source_type: 0, book_source_name: '第一书源', book_source_url: 'https://first.example/path', book_source_group: '试用', enabled: true },
+    { id: 'second', book_source_type: 0, book_source_name: '第二书源', book_source_url: 'https://second.example/path', enabled: false },
+  ]
+  const deleted: string[] = []
+  await page.route('**/api/v1/settings', route => route.fulfill({ json: {} }))
+  await page.route('**/api/v1/sources**', route => {
+    if (route.request().method() === 'DELETE') {
+      const id = new URL(route.request().url()).pathname.split('/').at(-1)!
+      deleted.push(id)
+      items = items.filter(item => item.id !== id)
+      return route.fulfill({ status: 204 })
+    }
+    return route.fulfill({ json: { items, total: items.length, page: 1, page_size: 100 } })
+  })
+  await page.goto('/admin')
+  const filter = page.getByRole('textbox', { name: '筛选书源' })
+  expect(await filter.evaluate(input => getComputedStyle(input).fontSize)).toBe('16px')
+  await expect(page.getByText('first.example · 试用', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '多选', exact: true }).click()
+  await page.getByRole('button', { name: '全选本页' }).click()
+  await expect(page.getByRole('checkbox', { name: '选择 本地书库' })).toBeDisabled()
+  await page.getByRole('button', { name: '删除所选 (2)', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '取消' }).click()
+  expect(deleted).toEqual([])
+  await page.getByRole('button', { name: '删除所选 (2)', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '确认删除' }).click()
+  await expect(page.getByText('已删除 2 个书源', { exact: true })).toBeVisible()
+  await expect(page.getByText('第一书源', { exact: true })).toHaveCount(0)
+  expect(deleted).toEqual(['first', 'second'])
+})

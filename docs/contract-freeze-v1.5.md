@@ -27,7 +27,7 @@
 |---|---|
 | docs/architecture.md | 037448ac1c9b82e7cf333e942783d725b2b38f63ca116ba91f5b583c9adf52a8 |
 | docs/schema.sql | fa26a8e596a4f2c89bd2ef9713ff1028aeb42925377c25ae26f957a165ba07b0 |
-| docs/openapi.yaml | bed1711517e1c8fa1aa16922e4dd792447aea1d77f51222d40a6877387bd208b |
+| docs/openapi.yaml | 22d6d960339a3a46196116ea47ec333eb797d0a3450955a701f9b0879a536b5d |
 | docs/research/1432433gg_reader-next.md | f47d1e87516b6980d86ed7a4b84f3db526770f422c4786b7aa1df5a2c65cb678 |
 | docs/research/changshengyu_openreader.md | 909606b90fe636aeac64ac0cd2e745d960915bba534a5bcae0c2e248778bcde8 |
 | docs/research/changshengyu_reader-dev.md | eaf8a857590c548a3a835c45309f5615f0c6d711afc8bb1649ef8caa8256d9fa |
@@ -75,3 +75,7 @@ sandbox-worker-design 在实现前冻结。新增受限独立 worker、有界 IP
 2026-11-24：在线书源导入沿用 JSON 导入的可选 conflict_mode，默认跳过重复，保留 overwrite 兼容字段。更新 OpenAPI 摘要，数据库与备份协议未变。
 
 2026-11-24：章节正文 GET 新增可选 refresh 参数，成功重抓后更新在线缓存。默认读取行为、数据库和备份契约保持兼容。
+
+## 2026-11-24 搜索流式响应
+
+现有 GET /api/v1/search 可由客户端明确请求 NDJSON 渐进响应，JSON 默认响应兼容既有客户端，搜索分组和换源绑定新增可选的书源主机名。操作数及备份契约保持原样。同步更新上表 OpenAPI 摘要。

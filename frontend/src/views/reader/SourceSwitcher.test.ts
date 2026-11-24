@@ -84,3 +84,20 @@ it('discovers standby sources via search refresh and binds mapping before previe
   button('预览切换').click()
   await vi.waitFor(() => expect(addMapping).toHaveBeenCalledWith('first', { source_id: 'src-new', book_url: 'https://a.example/1' }))
 })
+
+it('shows the current source name and configured host without the candidate book URL', async () => {
+  app.unmount()
+  app = createApp({ render: () => h(SourceSwitcher, { bookId: book.value, activeSource: 'active', ref: child }) })
+  app.mount(host)
+  vi.spyOn(api, 'mappings').mockResolvedValue([
+    { source_id: 'active', source_name: '正在使用的源', book_url: 'https://active.example/book/1' },
+    { source_id: 'backup', source_name: '备用源', source_host: 'root.example', book_url: 'https://cdn.example/private/path', latest_chapter_title: '尾声' },
+  ] as Model<'BookSourceMapping'>[])
+  vi.spyOn(api, 'progress').mockResolvedValue({ version: 1 } as Model<'Progress'>)
+  await child.value!.open()
+  await nextTick()
+  expect(host.textContent).toContain('当前源：正在使用的源')
+  expect(host.textContent).toContain('备用源 · root.example · 尾声')
+  expect(host.textContent).not.toContain('private/path')
+  expect(host.textContent).not.toContain('cdn.example')
+})

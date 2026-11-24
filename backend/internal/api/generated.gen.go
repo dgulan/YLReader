@@ -335,19 +335,22 @@ type BookPage struct {
 
 // BookSourceMapping defines model for BookSourceMapping.
 type BookSourceMapping struct {
-	Author             *string                     `json:"author"`
-	BookId             openapi_types.UUID          `json:"book_id"`
-	BookUrl            string                      `json:"book_url"`
-	Id                 openapi_types.UUID          `json:"id"`
-	IsActive           *bool                       `json:"is_active,omitempty"`
-	LastSyncedAt       *time.Time                  `json:"last_synced_at"`
-	LatestChapterTitle *string                     `json:"latest_chapter_title"`
-	Name               *string                     `json:"name"`
-	SourceId           openapi_types.UUID          `json:"source_id"`
-	SourceName         *string                     `json:"source_name,omitempty"`
-	SyncStatus         BookSourceMappingSyncStatus `json:"sync_status"`
-	TocUrl             *string                     `json:"toc_url"`
-	TotalChapters      *int                        `json:"total_chapters,omitempty"`
+	Author             *string            `json:"author"`
+	BookId             openapi_types.UUID `json:"book_id"`
+	BookUrl            string             `json:"book_url"`
+	Id                 openapi_types.UUID `json:"id"`
+	IsActive           *bool              `json:"is_active,omitempty"`
+	LastSyncedAt       *time.Time         `json:"last_synced_at"`
+	LatestChapterTitle *string            `json:"latest_chapter_title"`
+	Name               *string            `json:"name"`
+
+	// SourceHost 书源配置网址的主机名
+	SourceHost    *string                     `json:"source_host,omitempty"`
+	SourceId      openapi_types.UUID          `json:"source_id"`
+	SourceName    *string                     `json:"source_name,omitempty"`
+	SyncStatus    BookSourceMappingSyncStatus `json:"sync_status"`
+	TocUrl        *string                     `json:"toc_url"`
+	TotalChapters *int                        `json:"total_chapters,omitempty"`
 }
 
 // BookSourceMappingSyncStatus defines model for BookSourceMapping.SyncStatus.
@@ -818,8 +821,11 @@ type SearchFailure struct {
 
 // SearchGroup defines model for SearchGroup.
 type SearchGroup struct {
-	ElapsedMs  *int               `json:"elapsed_ms,omitempty"`
-	Items      []SearchBook       `json:"items"`
+	ElapsedMs *int         `json:"elapsed_ms,omitempty"`
+	Items     []SearchBook `json:"items"`
+
+	// SourceHost 书源配置网址的主机名
+	SourceHost *string            `json:"source_host,omitempty"`
 	SourceId   openapi_types.UUID `json:"source_id"`
 	SourceName string             `json:"source_name"`
 }
@@ -1126,7 +1132,7 @@ type ListReplaceRulesParams struct {
 type SearchBooksParams struct {
 	Keyword string `form:"keyword" json:"keyword"`
 
-	// SourceIds 省略则使用用户全部启用书源（上限 20 个）
+	// SourceIds 省略则使用用户全部启用且可搜索的书源；显式传入时最多 20 个
 	SourceIds *[]openapi_types.UUID `form:"source_ids,omitempty" json:"source_ids,omitempty"`
 	Page      *Page                 `form:"page,omitempty" json:"page,omitempty"`
 	PageSize  *PageSize             `form:"page_size,omitempty" json:"page_size,omitempty"`

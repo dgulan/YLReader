@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import 'element-plus/dist/index.css'
-import { ref, reactive, onMounted, h } from 'vue'
-import { ElMessageBox, ElButton, ElInput, ElAlert, ElTableV2, ElAutoResizer, ElPagination, ElForm, ElFormItem, ElSelect, ElOption, ElInputNumber, ElSwitch } from 'element-plus'
+import { ref, reactive, onMounted, computed } from 'vue'
+import { ElMessageBox, ElButton, ElInput, ElAlert, ElCheckbox, ElPagination, ElForm, ElFormItem, ElSelect, ElOption, ElInputNumber, ElSwitch } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { api } from '@/api/reader'
 import { errorText, type Model } from '@/api/client'
 import { useSourceImport } from './sourceImport'
-import { buildSourceCreate, exportSourcesBundle } from './sourceManage'
+import { buildSourceCreate, deleteSelectedSources, exportSourcesBundle } from './sourceManage'
 const router = useRouter()
 const sources = ref<Model<'SourcePage'>>(), page = ref(1)
 const { text, sourceUrl, fileLabel, dryRun, result, busy, error, canPreview, canPreviewUrl, canCommitText, canCommitUrl, readFile, importText, importUrl } = useSourceImport(load, async report => {
@@ -22,8 +22,84 @@ const { text, sourceUrl, fileLabel, dryRun, result, busy, error, canPreview, can
 })
 const creating = ref(false), exporting = ref(false), showCreate = ref(false), manageNotice = ref(''), manageError = ref('')
 const draft = reactive({ url: '', name: '', group: '默认', type: 0, enabled: true, enabledExplore: true, weight: 0, rules: '{}', header: '{}' })
-const columns = [{ key: 'actions', title: '操作', width: 140, cellRenderer: ({ rowData }: { rowData: Model<'Source'> }) => h(ElButton, { disabled: rowData.book_source_type === 3, onClick: () => router.push(`/admin/sources/${rowData.id}`) }, () => '编辑与调试') }, { key: 'book_source_name', dataKey: 'book_source_name', title: '书源名称', width: 260 }, { key: 'book_source_group', dataKey: 'book_source_group', title: '分组', width: 160 }, { key: 'book_source_url', dataKey: 'book_source_url', title: '地址', width: 360 }, { key: 'enabled', dataKey: 'enabled', title: '状态', width: 100, cellRenderer: ({ cellData }: { cellData: unknown }) => h('span', cellData ? '启用' : '停用') }]
-async function load() { try { sources.value = await api.sources(page.value) } catch (e) { error.value = errorText(e) } }
+const filterText = ref(''), filter = ref(''), selecting = ref(false), deleting = ref(false), loading = ref(false)
+const selected = ref<string[]>([]), toggling = reactive(new Set<string>())
+const bulkStatus = ref(''), bulkError = ref('')
+const selectable = computed(() => sources.value?.items.filter(source => source.book_source_type !== 3) ?? [])
+const allSelected = computed(() => selectable.value.length > 0 && selectable.value.every(source => selected.value.includes(source.id)))
+const togglingAny = computed(() => toggling.size > 0)
+function isToggling(id: string) { return toggling.has(id) }
+function editSource(id: string) { void router.push('/admin/sources/' + id) }
+let loadVersion = 0
+async function load() {
+  const version = ++loadVersion
+  const requestedPage = page.value
+  loading.value = true
+  try {
+    const result = await api.sources(requestedPage, filter.value)
+    if (version !== loadVersion) return
+    const lastPage = Math.max(1, Math.ceil(result.total / 100))
+    if (requestedPage > lastPage) {
+      page.value = lastPage
+      await load()
+      return
+    }
+    sources.value = result
+    const ids = new Set(selectable.value.map(source => source.id))
+    selected.value = selected.value.filter(id => ids.has(id))
+  } catch (e) {
+    if (version === loadVersion) error.value = errorText(e)
+  } finally {
+    if (version === loadVersion) loading.value = false
+  }
+}
+function applyFilter() {
+  selected.value = []
+  page.value = 1
+  filter.value = filterText.value.trim()
+  void load()
+}
+function changePage() { selected.value = []; void load() }
+function toggleSelection() { selecting.value = !selecting.value; selected.value = [] }
+function setSelected(id: string, checked: boolean) {
+  selected.value = checked ? [...selected.value, id] : selected.value.filter(value => value !== id)
+}
+function selectAll() { selected.value = allSelected.value ? [] : selectable.value.map(source => source.id) }
+function domain(value: string) {
+  try { return new URL(value).hostname } catch { return '' }
+}
+async function toggleSource(source: Model<'Source'>, enabled: boolean) {
+  if (toggling.has(source.id) || deleting.value) return
+  toggling.add(source.id)
+  manageError.value = ''
+  try {
+    const updated = await api.updateSource(source.id, { enabled, version: source.version })
+    if (sources.value) sources.value.items = sources.value.items.map(row => row.id === source.id ? updated : row)
+  } catch (e) {
+    manageError.value = errorText(e)
+    await load()
+  } finally { toggling.delete(source.id) }
+}
+async function deleteSelection() {
+  if (!selected.value.length || deleting.value) return
+  deleting.value = true
+  bulkError.value = ''; bulkStatus.value = ''
+  try {
+    const targets = selectable.value.filter(source => selected.value.includes(source.id))
+    try {
+      await ElMessageBox.confirm(
+        '将删除选中的 ' + targets.length + ' 个书源。使用这些书源的书籍可能需要重新选源。',
+        '确认删除书源',
+        { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch { return }
+    const { deleted, failed } = await deleteSelectedSources(targets, api.deleteSource)
+    selected.value = failed.map(source => source.id)
+    if (deleted) bulkStatus.value = '已删除 ' + deleted + ' 个书源'
+    if (failed.length) bulkError.value = failed.length + ' 个书源删除失败，仍保持选中。'
+    await load()
+  } finally { deleting.value = false }
+}
 async function chooseFile(event: Event) { const input = event.target as HTMLInputElement, file = input.files?.[0]; input.value = ''; if (file) await readFile(file) }
 async function createOne() {
   manageError.value = ''; manageNotice.value = ''
@@ -79,7 +155,55 @@ onMounted(load)
         <ElButton type="primary" native-type="submit" :loading="creating">创建书源</ElButton>
       </ElForm>
     </section>
-    <section class="surface"><div class="section-heading"><h2>书源列表 <small class="muted">{{ sources?.total ?? 0 }} 个</small></h2><div class="button-row"><ElButton :loading="exporting" @click="exportAll">导出 JSON</ElButton><ElButton @click="load">刷新</ElButton></div></div><div style="height: 400px"><ElAutoResizer><template #default="{ height, width }"><ElTableV2 :columns="columns" :data="sources?.items ?? []" :width="width" :height="height" row-key="id" /></template></ElAutoResizer></div><ElPagination v-if="sources && sources.total > 100" v-model:current-page="page" :page-size="100" :total="sources.total" layout="prev, pager, next" @current-change="load" /></section>
+    <section class="surface">
+      <div class="section-heading">
+        <h2>书源列表 <small class="muted">{{ sources?.total ?? 0 }} 个</small></h2>
+        <div class="button-row source-tools">
+          <ElButton :disabled="deleting" @click="toggleSelection">{{ selecting ? '退出多选' : '多选' }}</ElButton>
+          <ElButton :loading="exporting" @click="exportAll">导出 JSON</ElButton>
+          <ElButton :disabled="deleting" @click="load">刷新</ElButton>
+        </div>
+      </div>
+      <form class="search-row source-filter" @submit.prevent="applyFilter">
+        <ElInput v-model="filterText" aria-label="筛选书源" placeholder="按书源名称或网址筛选" maxlength="100" clearable :disabled="deleting" @clear="applyFilter" />
+        <ElButton native-type="submit" :loading="loading" :disabled="deleting">筛选</ElButton>
+      </form>
+      <div v-if="selecting" class="button-row source-tools">
+        <ElButton :disabled="!selectable.length || loading || deleting" @click="selectAll">{{ allSelected ? '取消全选' : '全选本页' }}</ElButton>
+        <ElButton type="danger" :disabled="!selected.length || loading || togglingAny" :loading="deleting" @click="deleteSelection">删除所选 ({{ selected.length }})</ElButton>
+      </div>
+      <p v-if="!loading && !sources?.items.length" class="muted">没有匹配的书源。</p>
+      <p v-if="bulkStatus" role="status">{{ bulkStatus }}</p>
+      <p v-if="bulkError" class="error-note" role="alert">{{ bulkError }}</p>
+      <ul class="source-list" aria-label="书源列表" :aria-busy="loading">
+        <li v-for="source in sources?.items" :key="source.id" class="source-row">
+          <ElCheckbox v-if="selecting" :model-value="selected.includes(source.id)" @change="setSelected(source.id, $event === true)" :aria-label="'选择 ' + source.book_source_name" :disabled="source.book_source_type === 3 || loading || deleting" />
+          <div class="source-copy">
+            <strong>{{ source.book_source_name }}</strong>
+            <small>{{ [domain(source.book_source_url), source.book_source_group].filter(Boolean).join(' · ') || '未分组' }}</small>
+          </div>
+          <div class="source-actions">
+            <ElSwitch :model-value="source.enabled" :aria-label="'启用 ' + source.book_source_name" :loading="isToggling(source.id)" :disabled="source.book_source_type === 3 || deleting" @change="toggleSource(source, $event === true)" />
+            <ElButton size="small" :disabled="source.book_source_type === 3 || deleting" @click="editSource(source.id)">编辑</ElButton>
+          </div>
+        </li>
+      </ul>
+      <ElPagination v-if="sources && sources.total > 100" v-model:current-page="page" :disabled="deleting" :page-size="100" :total="sources.total" layout="prev, pager, next" @current-change="changePage" />
+    </section>
   </main>
 </template>
-<style scoped>:deep(.el-alert) { margin-bottom: 16px; }</style>
+<style scoped>
+:deep(.el-alert) { margin-bottom: 16px; }
+.source-filter { margin: 12px 0; }
+.source-filter :deep(.el-input__wrapper) { border-radius: 999px; }
+.source-filter :deep(.el-input__inner) { font-size: 16px; }
+.source-tools { gap: 8px; margin: 6px 0; }
+.source-tools :deep(.el-button + .el-button) { margin-left: 0; }
+.source-list { margin: 0; padding: 0; list-style: none; }
+.source-row { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 6px 0; border-bottom: 1px solid #e3e5dc; }
+.source-copy { display: flex; flex-direction: column; gap: 3px; flex: 1 1 0; min-width: 0; }
+.source-copy strong, .source-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-copy strong { font-size: 15px; }
+.source-copy small { color: #657569; font-size: 13px; line-height: 1.35; }
+.source-actions { display: flex; gap: 8px; align-items: center; }
+</style>

@@ -17,7 +17,7 @@ func (s *Server) ListMappings(w http.ResponseWriter, r *http.Request, bookId Boo
 	}
 	out := make([]BookSourceMapping, 0, len(items))
 	for _, m := range items {
-		out = append(out, toAPIBookSourceMapping(m, nil))
+		out = append(out, toAPIBookSourceMapping(m))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -35,7 +35,7 @@ func (s *Server) AddMapping(w http.ResponseWriter, r *http.Request, bookId BookI
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toAPIBookSourceMapping(m, nil))
+	writeJSON(w, http.StatusCreated, toAPIBookSourceMapping(m))
 }
 
 // DeleteMapping 删除备用源绑定；活跃源绑定 → 409，未命中 → 404。
@@ -56,8 +56,8 @@ func (s *Server) DeleteMapping(w http.ResponseWriter, r *http.Request, bookId Bo
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// toAPIBookSourceMapping 把仓储模型映射为契约模型；sourceName 可选（列表接口不带源名）。
-func toAPIBookSourceMapping(m *repository.BookSourceMapping, sourceName *string) BookSourceMapping {
+// toAPIBookSourceMapping 把仓储模型映射为契约模型。
+func toAPIBookSourceMapping(m *repository.BookSourceMapping) BookSourceMapping {
 	out := BookSourceMapping{
 		Id:                 m.ID,
 		BookId:             m.BookID,
@@ -69,7 +69,10 @@ func toAPIBookSourceMapping(m *repository.BookSourceMapping, sourceName *string)
 		LatestChapterTitle: m.LatestChapterTitle,
 		SyncStatus:         BookSourceMappingSyncStatus(m.SyncStatus),
 		LastSyncedAt:       m.LastSyncedAt,
-		SourceName:         sourceName,
+		SourceName:         m.SourceName,
+	}
+	if m.SourceURL != nil {
+		out.SourceHost = sourceHostname(*m.SourceURL)
 	}
 	total := int(m.TotalChapters)
 	out.TotalChapters = &total

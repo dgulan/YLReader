@@ -51,7 +51,7 @@ test('thousand chapter directory supports keyboard navigation and native modal f
   await expect(dialog.getByRole('button', { name: '关闭', exact: true })).toBeFocused()
   await expect(list.getByRole('button', { name: '第500章', exact: true })).toBeVisible()
   expect(await list.getByRole('button').count()).toBeLessThanOrEqual(13)
-  await page.keyboard.press('Tab')
+  for (let i = 0; i < 4; i++) await page.keyboard.press('Tab')
   await expect(list.getByRole('button', { name: '第500章', exact: true })).toBeFocused()
   await page.keyboard.press('ArrowDown')
   await expect(list.getByRole('button', { name: '第501章', exact: true })).toBeFocused()
@@ -70,7 +70,7 @@ test('thousand chapter directory supports keyboard navigation and native modal f
   await expect(trigger).toBeFocused()
   await trigger.click()
   await expect(list.getByRole('button', { name: '第500章', exact: true })).toBeVisible()
-  await page.keyboard.press('Tab')
+  for (let i = 0; i < 4; i++) await page.keyboard.press('Tab')
   await page.keyboard.press('End')
   await page.keyboard.press('Enter')
   await expect(dialog).not.toBeVisible()
@@ -157,4 +157,55 @@ test('floating bars preserve the text position and reappear at the chapter end',
   await viewport.evaluate(el => { el.scrollTop = 0 })
   await expect(footer).toBeHidden()
   await expect(text).toBeVisible()
+})
+
+test('chapter search filters titles and can reveal the active chapter in reverse order', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 })
+  await readerFixture(page)
+  await page.getByRole('button', { name: '目录', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '章节目录', exact: true })
+  const search = dialog.getByRole('searchbox', { name: '搜索章节' })
+  expect(await search.evaluate(input => getComputedStyle(input).fontSize)).toBe('16px')
+  await search.fill('第1000章')
+  await expect(dialog.getByRole('listitem')).toHaveCount(1)
+  await expect(dialog.getByRole('button', { name: '第1000章', exact: true })).toBeVisible()
+  await dialog.getByRole('button', { name: '正序' }).click()
+  await dialog.getByRole('button', { name: '定位当前' }).click()
+  await expect(search).toHaveValue('')
+  await expect(dialog.getByRole('button', { name: '第500章', exact: true })).toHaveAttribute('aria-current', 'true')
+})
+
+test('small bookshelf keeps book actions behind the cover menu and groups search sources', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 640 })
+  await readerFixture(page)
+  const first = { source_id: 'one', name: '测试聚合书名', author: '测试作者', book_url: 'https://first.example/book/1' }
+  const groups = [
+    { source_id: 'one', source_name: '快源', items: [first] },
+    { source_id: 'two', source_name: '另一个书源', items: [{ ...first, source_id: 'two', book_url: 'https://second.example/book/1' }] },
+  ]
+  await page.route('**/api/v1/search?*', route => {
+    expect(route.request().headers().accept).toBe('application/x-ndjson')
+    const events = [ ...groups.map(group => ({ type: 'group', group })), {
+      type: 'done', result: { keyword: first.name, groups, total: 2, failures: [] },
+    } ]
+    return route.fulfill({ contentType: 'application/x-ndjson', body: events.map(event => JSON.stringify(event)).join('\n') + '\n' })
+  })
+  await page.getByRole('link', { name: '返回书架' }).click()
+  await expect(page.getByRole('navigation', { name: '主导航' })).toBeVisible()
+  await expect(page.getByText('＋ 导入本地书', { exact: true })).toBeVisible()
+  const filter = page.getByRole('textbox', { name: '筛选书架' })
+  expect(await filter.evaluate(input => getComputedStyle(input).fontSize)).toBe('16px')
+  const card = page.locator('.book-card').first()
+  await expect(card.getByRole('button', { name: '管理书籍', exact: true })).toBeHidden()
+  await card.locator('summary').click()
+  await expect(card.getByRole('button', { name: '管理书籍', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(card.getByRole('button', { name: '管理书籍', exact: true })).toBeHidden()
+  await page.getByRole('tab', { name: '发现新书' }).click()
+  const search = page.getByRole('textbox', { name: '搜索书籍' })
+  expect(await search.evaluate(input => getComputedStyle(input).fontSize)).toBe('16px')
+  await search.fill(first.name)
+  await page.getByRole('button', { name: '搜索', exact: true }).click()
+  await expect(page.getByRole('heading', { name: first.name, exact: true })).toHaveCount(1)
+  await expect(page.getByRole('combobox', { name: first.name + ' 的书源' }).getByRole('option')).toHaveCount(2)
 })

@@ -539,4 +539,37 @@ func TestSearchMultiSource(t *testing.T) {
 			t.Fatalf("failure message leaked detail: %q", msg)
 		}
 	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, base+"/search?keyword=Book", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/x-ndjson")
+	stream, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK || stream.Header.Get("Content-Type") != "application/x-ndjson" || stream.Header.Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("unexpected streaming response: %v %v", stream.StatusCode, stream.Header)
+	}
+	decoder := json.NewDecoder(stream.Body)
+	var first, done struct {
+		Type   string
+		Group  *api.SearchGroup
+		Result *api.SearchResponse
+	}
+	if err := decoder.Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Type != "group" || first.Group == nil || len(first.Group.Items) != 2 ||
+		first.Group.SourceHost == nil || *first.Group.SourceHost != "mock-a.example" {
+		t.Fatalf("unexpected group event: %+v", first)
+	}
+	if err := decoder.Decode(&done); err != nil {
+		t.Fatal(err)
+	}
+	if done.Type != "done" || done.Result == nil || done.Result.Total != 2 || len(done.Result.Failures) != 2 {
+		t.Fatalf("unexpected completion event: %+v", done)
+	}
 }

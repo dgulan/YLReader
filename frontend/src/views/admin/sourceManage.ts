@@ -56,3 +56,17 @@ export async function exportSourcesBundle(ids?: string[]) {
     json: JSON.stringify(items, null, 2),
   }
 }
+
+export async function deleteSelectedSources<T extends { id: string; book_source_type: number }>(
+  sources: T[],
+  remove: (id: string) => Promise<void>,
+): Promise<{ deleted: number; failed: T[] }> {
+  const failed: T[] = []
+  let deleted = 0
+  for (const source of sources) {
+    if (source.book_source_type === 3) continue
+    try { await remove(source.id); deleted++ }
+    catch { failed.push(source) }
+  }
+  return { deleted, failed }
+}

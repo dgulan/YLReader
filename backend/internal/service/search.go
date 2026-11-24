@@ -53,6 +53,7 @@ type BookItem struct {
 type GroupResult struct {
 	SourceID   uuid.UUID
 	SourceName string
+	SourceURL  string
 	ElapsedMs  int
 	Items      []BookItem
 }
@@ -106,6 +107,11 @@ func (s *SearchService) WithLogger(logger *slog.Logger) *SearchService {
 
 // Search 执行多源并发搜索。部分失败隔离：任何单源失败都只进 Failures。
 func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword string, sourceIDs []uuid.UUID, page, pageSize int) (*SearchOutcome, error) {
+	return s.SearchProgress(ctx, userID, keyword, sourceIDs, page, pageSize, nil)
+}
+
+// SearchProgress reports nonempty groups in completion order and returns the ranked outcome.
+func (s *SearchService) SearchProgress(ctx context.Context, userID uuid.UUID, keyword string, sourceIDs []uuid.UUID, page, pageSize int, onGroup func(GroupResult)) (*SearchOutcome, error) {
 	keyword = strings.TrimSpace(keyword)
 	if keyword == "" {
 		return nil, fmt.Errorf("%w: keyword is required", repository.ErrInvalidArgument)
@@ -127,7 +133,7 @@ func (s *SearchService) Search(ctx context.Context, userID uuid.UUID, keyword st
 	}
 	out.Failures = append(out.Failures, early...)
 
-	s.searchSources(ctx, sources, keyword, page, pageSize, out)
+	s.searchSources(ctx, sources, keyword, page, pageSize, out, onGroup)
 	s.logSearchSummary(ctx, len(sources), out)
 	return out, nil
 }
@@ -161,7 +167,7 @@ func (s *SearchService) logSearchSummary(ctx context.Context, eligible int, out 
 		"timeouts", timeouts, "http_network_errors", upstream, "canceled", canceled, "failures", len(out.Failures), "examples", examples)
 }
 
-func (s *SearchService) searchSources(ctx context.Context, sources []*repository.BookSource, keyword string, page, pageSize int, out *SearchOutcome) {
+func (s *SearchService) searchSources(ctx context.Context, sources []*repository.BookSource, keyword string, page, pageSize int, out *SearchOutcome, onGroup func(GroupResult)) {
 	type result struct {
 		group  GroupResult
 		err    error
@@ -170,6 +176,7 @@ func (s *SearchService) searchSources(ctx context.Context, sources []*repository
 	results := make([]result, len(sources))
 	jobs := make(chan int)
 	var workers sync.WaitGroup
+	var publish sync.Mutex
 	run := func(index int) (res result) {
 		src := sources[index]
 		defer func() {
@@ -194,14 +201,22 @@ func (s *SearchService) searchSources(ctx context.Context, sources []*repository
 		if len(items) > pageSize {
 			items = items[:pageSize]
 		}
-		res.group = GroupResult{SourceID: src.ID, SourceName: src.BookSourceName, ElapsedMs: int(time.Since(start).Milliseconds()), Items: items}
+		res.group = GroupResult{SourceID: src.ID, SourceName: src.BookSourceName, SourceURL: src.BookSourceURL, ElapsedMs: int(time.Since(start).Milliseconds()), Items: items}
 		res.weight = src.Weight
 		return
 	}
 	for range min(searchConcurrency, len(sources)) {
 		workers.Go(func() {
 			for index := range jobs {
-				results[index] = run(index)
+				res := run(index)
+				results[index] = res
+				if onGroup != nil && res.err == nil && len(res.group.Items) > 0 {
+					publish.Lock()
+					if ctx.Err() == nil {
+						onGroup(res.group)
+					}
+					publish.Unlock()
+				}
 			}
 		})
 	}

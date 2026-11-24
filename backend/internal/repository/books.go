@@ -250,13 +250,20 @@ const mappingColumns = `m.id, m.book_id, m.source_id, m.book_url, m.toc_url, m.n
 	m.latest_chapter_title, m.total_chapters, m.sync_status, m.failure_count, m.last_synced_at, m.created_at, m.updated_at`
 
 func scanMapping(row pgx.Row) (*BookSourceMapping, error) {
+	return scanMappingRow(row, false)
+}
+
+func scanMappingRow(row pgx.Row, includeSource bool) (*BookSourceMapping, error) {
 	var m BookSourceMapping
-	err := row.Scan(
+	columns := []any{
 		&m.ID, &m.BookID, &m.SourceID, &m.BookURL, &m.TOCURL, &m.Name, &m.Author, &m.CoverURL,
 		&m.LatestChapterTitle, &m.TotalChapters, &m.SyncStatus, &m.FailureCount, &m.LastSyncedAt,
 		&m.CreatedAt, &m.UpdatedAt,
-	)
-	if err != nil {
+	}
+	if includeSource {
+		columns = append(columns, &m.SourceName, &m.SourceURL)
+	}
+	if err := row.Scan(columns...); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -343,9 +350,10 @@ func (r *MappingRepository) UpsertStandby(ctx context.Context, q Querier, userID
 
 // ListByBook 列出某用户某本书的全部源绑定。
 func (r *MappingRepository) ListByBook(ctx context.Context, q Querier, userID, bookID uuid.UUID) ([]*BookSourceMapping, error) {
-	rows, err := q.Query(ctx, `SELECT `+mappingColumns+`
+	rows, err := q.Query(ctx, `SELECT `+mappingColumns+`, s.book_source_name, s.book_source_url
 		FROM book_source_mappings m
 		JOIN books b ON b.id = m.book_id AND b.user_id = $1
+		LEFT JOIN book_sources s ON s.id = m.source_id AND s.user_id = $1
 		WHERE m.book_id = $2 ORDER BY m.created_at ASC, m.id`, userID, bookID)
 	if err != nil {
 		return nil, err
@@ -353,7 +361,7 @@ func (r *MappingRepository) ListByBook(ctx context.Context, q Querier, userID, b
 	defer rows.Close()
 	out := make([]*BookSourceMapping, 0, 4)
 	for rows.Next() {
-		m, err := scanMapping(rows)
+		m, err := scanMappingRow(rows, true)
 		if err != nil {
 			return nil, err
 		}

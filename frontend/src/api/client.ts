@@ -88,6 +88,40 @@ export async function request<T>(path: string, options: RequestInit = {}, retry 
   options.signal?.throwIfAborted()
   return data
 }
+type SearchEvent =
+  | { type: 'group'; group: Model<'SearchGroup'> }
+  | { type: 'done'; result: Model<'SearchResponse'> }
+
+export async function requestSearchStream(path: string, signal: AbortSignal | undefined, onGroup: (group: Model<'SearchGroup'>) => void): Promise<Model<'SearchResponse'>> {
+  const response = await requestResponse(path, { signal, headers: { Accept: 'application/x-ndjson' } }, true)
+  if (!response.headers.get('Content-Type')?.startsWith('application/x-ndjson')) {
+    return response.json() as Promise<Model<'SearchResponse'>>
+  }
+  if (!response.body) throw new Error('搜索连接已中断')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let pending = ''
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      signal?.throwIfAborted()
+      if (done) throw new Error('搜索连接提前中断，已保留收到的结果')
+      pending += decoder.decode(value, { stream: true })
+      let end = pending.indexOf('\n')
+      while (end >= 0) {
+        const event = JSON.parse(pending.slice(0, end)) as SearchEvent
+        pending = pending.slice(end + 1)
+        if (event.type === 'done') return event.result
+        if (event.type === 'group') onGroup(event.group)
+        end = pending.indexOf('\n')
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+    reader.releaseLock()
+  }
+}
+
 export async function requestBookCover(bookId: string, signal: AbortSignal): Promise<Blob> {
   const response = await requestResponse('/books/' + encodeURIComponent(bookId) + '/cover', { signal, cache: 'no-store', headers: { Accept: 'image/*' } }, true)
   if (!response.headers.get('Content-Type')?.startsWith('image/')) throw new Error('Invalid cover response')

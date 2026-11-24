@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/api/reader'
 import type { Model } from '@/api/client'
-import { buildSourceCreate, exportFilename, exportSourcesBundle } from './sourceManage'
+import { buildSourceCreate, deleteSelectedSources, exportFilename, exportSourcesBundle } from './sourceManage'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -56,4 +56,16 @@ describe('sourceManage', () => {
     expect(bundle.filename).toBe(exportFilename())
     expect(JSON.parse(bundle.json)).toEqual(mocked)
   })
+})
+
+it('deletes the selected sources, keeps failures identifiable and protects the local source', async () => {
+  const sources = [
+    { id: 'local', book_source_type: 3 },
+    { id: 'first', book_source_type: 0 },
+    { id: 'failed', book_source_type: 0 },
+    { id: 'last', book_source_type: 0 },
+  ]
+  const remove = vi.fn(async (id: string) => { if (id === 'failed') throw new Error('denied') })
+  expect(await deleteSelectedSources(sources, remove)).toEqual({ deleted: 2, failed: [sources[2]] })
+  expect(remove.mock.calls).toEqual([['first'], ['failed'], ['last']])
 })
