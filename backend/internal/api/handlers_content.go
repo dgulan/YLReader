@@ -37,7 +37,8 @@ func (s *Server) GetChapterContent(w http.ResponseWriter, r *http.Request, bookI
 		return
 	}
 
-	view, err := s.Content.Get(r.Context(), userIDFrom(r.Context()), uuid.UUID(bookId), params.ChapterIndex, params.ChapterId)
+	refresh := params.Refresh != nil && *params.Refresh
+	view, err := s.Content.GetWithRefresh(r.Context(), userIDFrom(r.Context()), uuid.UUID(bookId), params.ChapterIndex, params.ChapterId, refresh)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -66,6 +67,7 @@ func (s *Server) GetChapterContent(w http.ResponseWriter, r *http.Request, bookI
 		next = &v
 	}
 
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, ChapterContent{
 		Chapter:               toAPIChapterPlain(view.Chapter),
 		Content:               view.Content,

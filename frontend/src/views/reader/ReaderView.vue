@@ -105,6 +105,7 @@ function onDirectoryClose() {
 }
 let generation = 0, revision = 0, saveEpoch = 0, disposed = false, timer: ReturnType<typeof setTimeout> | undefined, controller = new AbortController()
 let bookController = new AbortController()
+let failedChapter: { index: number; offset: number } | undefined
 const switcher = ref<InstanceType<typeof SourceSwitcher>>()
 const bookmarks = ref<InstanceType<typeof BookmarksPanel>>()
 const overrideDialog = ref<InstanceType<typeof ChapterOverrideDialog>>()
@@ -260,36 +261,51 @@ function fetchChapter(request: ChapterRequest) {
     cacheError: () => { saveError.value = '章节缓存不可用，离线阅读暂不可用' },
   })
 }
-async function openChapter(i: number, at = 0, onCommitted?: () => void) {
+async function openChapter(i: number, at = 0, options: { refresh?: boolean; onCommitted?: () => void } = {}) {
   if (!book.value) return false
   controller.abort(); controller = new AbortController(); const signal = controller.signal, serial = ++generation
-  const request = { owner, bookId: bookId.value, context: chapterContext(book.value), index: i, signal }, total = book.value.total_chapters
+  const request = { owner, bookId: bookId.value, context: chapterContext(book.value), index: i, signal, refresh: options.refresh }, total = book.value.total_chapters
   const current = () => !signal.aborted && serial === generation
-  loading.value = true; restoring.value = true; error.value = ''
+  loading.value = true; restoring.value = true; error.value = ''; failedChapter = undefined
   try {
     const loaded = await fetchChapter(request)
     if (!current()) return false
     content.value = loaded.result; index.value = i; offset.value = Math.min(Math.max(0, at), codePointLength(loaded.result.content)); offline.value = loaded.cached
-    onCommitted?.()
+    options.onCommitted?.()
     loading.value = false; await restorePosition(current)
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
     if (!current()) return false
     restoring.value = false
     if (!loaded.cached) {
       const neighbors = [i + 1, i - 1, i + 2, i - 2].filter(n => n >= 0 && n < total)
-      void preloadChapters(neighbors, signal, index => fetchChapter({ ...request, index })).then(() => { if (current()) return retainWindow(owner, request.bookId, i) }).catch(() => undefined)
+      void preloadChapters(neighbors, signal, index => fetchChapter({ ...request, index, refresh: false })).then(() => { if (current()) return retainWindow(owner, request.bookId, i) }).catch(() => undefined)
     }
     return true
-  } catch (e) { if (current() && !(e instanceof DOMException && e.name === 'AbortError')) error.value = errorText(e); return false }
-  finally { if (current()) { loading.value = false; restoring.value = false } }
+  } catch (e) {
+    if (current() && !(e instanceof DOMException && e.name === 'AbortError')) {
+      failedChapter = { index: i, offset: at }
+      error.value = errorText(e)
+    }
+    return false
+  } finally { if (current()) { loading.value = false; restoring.value = false } }
 }
-async function boot() {
+async function reloadChapter() {
+  if (!book.value || (!content.value && !failedChapter)) return boot(true)
+  clearTimeout(timer)
+  capture()
+  const target = failedChapter ?? { index: index.value, offset: offset.value }
+  const chapterChanged = target.index !== index.value
+  if (!await openChapter(target.index, target.offset, { refresh: book.value.book_type === 'online' })) return
+  if (chapterChanged) { dirty.value = true; revision++ }
+  await flush()
+}
+async function boot(refresh = false) {
   saveEpoch++; localFault.value = false; saving.value = false; uncertain.value = false; reviewing.value = false
   bookController.abort(); bookController = new AbortController(); controller.abort()
   const signal = bookController.signal, requestedBook = bookId.value
   function check() { signal.throwIfAborted(); if (!owner || getSession()?.user.id !== owner) throw new DOMException('Aborted', 'AbortError') }
   loading.value = true; restoring.value = false; offline.value = false; content.value = undefined; error.value = ''; conflict.value = undefined; dirty.value = false; saveError.value = ''
-  book.value = undefined; toc.value = undefined; baseProgress.value = undefined
+  book.value = undefined; toc.value = undefined; baseProgress.value = undefined; failedChapter = undefined
   try {
     check()
     await config.initialize(owner)
@@ -315,8 +331,9 @@ async function boot() {
     const restored = reconcileProgress(current, local)
     baseProgress.value = restored.base; dirty.value = restored.dirty; conflict.value = restored.conflict
     let earlyPersist: Promise<void> | undefined
-    if (!await openChapter(Math.min(restored.index, Math.max(0, book.value!.total_chapters - 1)), restored.offset, () => {
-      earlyPersist = persistLocal().catch(() => undefined)
+    if (!await openChapter(Math.min(restored.index, Math.max(0, book.value!.total_chapters - 1)), restored.offset, {
+      refresh: refresh && book.value.book_type === 'online',
+      onCommitted: () => { earlyPersist = persistLocal().catch(() => undefined) },
     })) return
     check()
     if (earlyPersist) await earlyPersist
@@ -363,7 +380,7 @@ const stopCheckpoint = watchPageCheckpoint(checkpoint)
 window.addEventListener('online', online)
 onBeforeRouteLeave(leave)
 onBeforeRouteUpdate(leave)
-watch(bookId, boot, { immediate: true })
+watch(bookId, () => { void boot() }, { immediate: true })
 onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTimeout(timer); bookController.abort(); controller.abort(); window.removeEventListener('online', online) })
 </script>
 <template>
@@ -386,7 +403,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
     <p v-if="config.error" class="reader-notice" role="status">{{ config.error }} <button :disabled="config.loading || config.saving" @click="config.retry">重试设置同步</button></p>
     </div>
     <section ref="viewport" class="reader-viewport" :aria-busy="loading || restoring" aria-label="章节阅读区" tabindex="0" @scroll="scroll" @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" @click="toggleToolbar">
-      <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="boot">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
+      <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="reloadChapter">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
       <article ref="article" v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><div ref="body" class="chapter-body"><p v-for="(para, i) in paragraphs" :key="i + ':' + para.start" class="chapter-paragraph" :data-start="para.start">{{ para.text }}</p></div><p class="chapter-end">本章完</p></article>
     </section>
     <p v-if="immersive" class="reader-chapter-mark" aria-hidden="true">{{ title }}</p>
@@ -416,6 +433,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
         <div class="reader-setting-group">
           <span class="reader-setting-label">书签与进度</span>
           <div class="reader-setting-actions">
+            <button v-if="book?.book_type === 'online'" type="button" :disabled="loading || restoring || !content || !!error" @click="reloadChapter">刷新本章</button>
             <button ref="bookmarkTrigger" :disabled="loading || restoring || !book" @click="openBookmarks">书签</button>
             <button :disabled="loading || restoring || saving || reviewing" @click="capture(); flush(true)">保存进度</button>
           </div>

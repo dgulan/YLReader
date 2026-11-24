@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -18,4 +19,25 @@ func NewHTMLDocumentNode(body string) (RuleNode, error) {
 		return RuleNode{}, fmt.Errorf("empty html document")
 	}
 	return RuleNode{Kind: NodeHTML, docNode: doc.Nodes[0]}, nil
+}
+
+// ContentPaginationLinks returns explicit next-page links for the service's URL checks.
+func (n RuleNode) ContentPaginationLinks() []string {
+	if n.Kind != NodeHTML || n.docNode == nil {
+		return nil
+	}
+	var links []string
+	goquery.NewDocumentFromNode(n.docNode).
+		Find("a[rel~=next][href], .prenext a[href], .bottem2 a[href], .page_chapter a[href]").
+		Each(func(_ int, link *goquery.Selection) {
+			label := strings.TrimSpace(link.Text())
+			if label == "下一章" || label == "下章" {
+				return
+			}
+			rel := strings.Fields(strings.ToLower(link.AttrOr("rel", "")))
+			if label == "下一页" || label == "下页" || slices.Contains(rel, "next") {
+				links = append(links, link.AttrOr("href", ""))
+			}
+		})
+	return links
 }

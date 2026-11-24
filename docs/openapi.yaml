@@ -700,6 +700,10 @@ paths:
           in: query
           description: 预热下一章（不返回正文）
           schema: { type: boolean, default: false }
+        - name: refresh
+          in: query
+          description: 跳过在线章节正文缓存，重新抓取完整章节，成功后更新缓存。
+          schema: { type: boolean, default: false }
       responses:
         '200':
           description: >-

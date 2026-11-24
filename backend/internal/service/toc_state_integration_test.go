@@ -95,7 +95,7 @@ func TestTOCStateReorderPreservesReferencesAndCache(t *testing.T) {
 	cs := NewContentService(f.pool, ft, nil, cache.NewMemory(), nil, nil)
 	book, _ := s.books.Get(ctx, f.pool, f.user, f.book)
 	index := 0
-	old, err := cs.get(ctx, f.user, f.book, &index, nil, book)
+	old, err := cs.get(ctx, f.user, f.book, &index, nil, book, false)
 	if err != nil || !strings.Contains(old.Content, "/a") {
 		t.Fatal(old, err)
 	}
@@ -138,7 +138,7 @@ func TestTOCStateReorderPreservesReferencesAndCache(t *testing.T) {
 			t.Fatal("note lost")
 		}
 	}
-	gotContent, err := cs.get(ctx, f.user, f.book, &index, nil, book2)
+	gotContent, err := cs.get(ctx, f.user, f.book, &index, nil, book2, false)
 	if err != nil || gotContent.Cached || !strings.Contains(gotContent.Content, "/b") {
 		t.Fatal("old indexed cache reused", gotContent, err)
 	}
@@ -147,7 +147,7 @@ func TestTOCStateReorderPreservesReferencesAndCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	index = 1
-	warmed, err := cs.get(ctx, f.user, f.book, &index, nil, book2)
+	warmed, err := cs.get(ctx, f.user, f.book, &index, nil, book2, false)
 	if err != nil || !warmed.Cached || !strings.Contains(warmed.Content, "/a") {
 		t.Fatal(warmed, err)
 	}

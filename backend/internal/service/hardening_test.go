@@ -290,7 +290,7 @@ func TestCrossHostAndDowngradeHeaderScoping(t *testing.T) {
 		text, err := svc.fetchContentWithHeaders(context.Background(), contentRules{
 			Content:        "#c@text",
 			NextContentURL: "a.next@href",
-		}, "https://book.example/ch/1", parseSourceHeaders(srcHeaders), "")
+		}, "https://book.example/ch/1", parseSourceHeaders(srcHeaders), nil)
 		if err != nil {
 			t.Fatalf("fetchContentWithHeaders: %v", err)
 		}
@@ -300,7 +300,7 @@ func TestCrossHostAndDowngradeHeaderScoping(t *testing.T) {
 		if ft.calls[0].headers.Get("Authorization") != "Bearer tok" {
 			t.Fatalf("hop 0 missing Authorization: %+v", ft.calls[0].headers)
 		}
-		for _, k := range []string{"Cookie", "Authorization", "X-Auth-Token"} {
+		for _, k := range []string{"Cookie", "Authorization", "X-Auth-Token", "Referer"} {
 			if got := ft.calls[1].headers.Get(k); got != "" {
 				t.Fatalf("downgraded hop 1 leaked %s = %q", k, got)
 			}

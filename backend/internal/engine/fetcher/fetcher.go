@@ -355,6 +355,9 @@ func (f *Fetcher) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) > 0 {
 		origin := via[0].URL
 		prev := via[len(via)-1].URL
+		if prev.Scheme != req.URL.Scheme || !strings.EqualFold(prev.Host, req.URL.Host) {
+			req.Header.Del("Referer")
+		}
 		if isCrossOriginOrDowngrade(origin, req.URL) || isCrossOriginOrDowngrade(prev, req.URL) {
 			stripSensitiveRedirectHeaders(req.Header)
 		}

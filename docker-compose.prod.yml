@@ -27,7 +27,7 @@ services:
       - chown 10001:10001 /run/worker-1 /run/worker-2 && chmod 0700 /run/worker-1 /run/worker-2
 
   sandboxworker-1:
-    image: ghcr.io/dgulan/ylreader-worker:${YLREADER_IMAGE_TAG:-v1.1.1}
+    image: ghcr.io/dgulan/ylreader-worker:${YLREADER_IMAGE_TAG:-v1.1.2}
     build:
       context: ./backend
       dockerfile: Dockerfile.sandboxworker
@@ -58,7 +58,7 @@ services:
     restart: unless-stopped
 
   sandboxworker-2:
-    image: ghcr.io/dgulan/ylreader-worker:${YLREADER_IMAGE_TAG:-v1.1.1}
+    image: ghcr.io/dgulan/ylreader-worker:${YLREADER_IMAGE_TAG:-v1.1.2}
     build:
       context: ./backend
       dockerfile: Dockerfile.sandboxworker
@@ -89,7 +89,7 @@ services:
     restart: unless-stopped
 
   app:
-    image: ghcr.io/dgulan/ylreader-backend:${YLREADER_IMAGE_TAG:-v1.1.1}
+    image: ghcr.io/dgulan/ylreader-backend:${YLREADER_IMAGE_TAG:-v1.1.2}
     build:
       context: ./backend
       args:
@@ -145,7 +145,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ghcr.io/dgulan/ylreader-frontend:${YLREADER_IMAGE_TAG:-v1.1.1}
+    image: ghcr.io/dgulan/ylreader-frontend:${YLREADER_IMAGE_TAG:-v1.1.2}
     build:
       context: ./frontend
       args:

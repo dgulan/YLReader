@@ -270,6 +270,24 @@ func evalListNodesRegex(rule, content string) ([]RuleNode, error) {
 // 复用 M1a 的 EvalList 全套管线（|| / && / %% / ## / makeUp / @put / @get）；
 // 仅对 CSS 的显式 @getter 与 JSON 的纯 @js: 做必要的预处理。
 func (e *Engine) EvalField(ctx context.Context, node RuleNode, rule string) (string, error) {
+	value, err := e.evalField(ctx, node, rule, firstNonEmpty)
+	return strings.TrimSpace(value), err
+}
+
+// EvalContent keeps all matched paragraphs in document order.
+func (e *Engine) EvalContent(ctx context.Context, node RuleNode, rule string) (string, error) {
+	return e.evalField(ctx, node, rule, func(list []string) string {
+		paragraphs := make([]string, 0, len(list))
+		for _, paragraph := range list {
+			if paragraph = strings.TrimSpace(paragraph); paragraph != "" {
+				paragraphs = append(paragraphs, paragraph)
+			}
+		}
+		return strings.Join(paragraphs, "\n")
+	})
+}
+
+func (e *Engine) evalField(ctx context.Context, node RuleNode, rule string, combine func([]string) string) (string, error) {
 	rule = strings.TrimSpace(rule)
 	if rule == "" {
 		return "", nil
@@ -340,7 +358,7 @@ func (e *Engine) EvalField(ctx context.Context, node RuleNode, rule string) (str
 			if err != nil {
 				return "", err
 			}
-			val := firstNonEmpty(list)
+			val := combine(list)
 			if repl != "" {
 				if out := applyReplace([]string{val}, repl, replacement, first); len(out) > 0 {
 					val = out[0]
@@ -363,12 +381,7 @@ func (e *Engine) EvalField(ctx context.Context, node RuleNode, rule string) (str
 	if err != nil {
 		return "", err
 	}
-	for _, s := range list {
-		if strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s), nil
-		}
-	}
-	return "", nil
+	return combine(list), nil
 }
 
 // jsonPlainPath 匹配可安全补 `$.` 前缀的简单路径规则。

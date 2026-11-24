@@ -2182,6 +2182,8 @@ export interface operations {
                 source_id?: string;
                 /** @description 预热下一章（不返回正文） */
                 prefetch?: boolean;
+                /** @description 跳过在线章节正文缓存，重新抓取完整章节，成功后更新缓存。 */
+                refresh?: boolean;
             };
             header?: never;
             path: {

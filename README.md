@@ -20,13 +20,13 @@
 
 ### 生产环境部署（`docker-compose.prod.yml`）
 
-> 默认部署方式直接拉取 GitHub Actions 预构建的多架构镜像（`ghcr.io/dgulan/ylreader-{backend,frontend,worker}:v1.1.1`），服务器无需下载 Go/Node 编译器，通常在 30 秒内完成启动。
+> 默认部署方式直接拉取 GitHub Actions 预构建的多架构镜像（`ghcr.io/dgulan/ylreader-{backend,frontend,worker}:v1.1.2`），服务器无需下载 Go/Node 编译器，通常在 30 秒内完成启动。
 
 ```bash
 # 下载并解压到固定目录 /opt/YLReader（后续升级覆盖同一目录即可，避免数据目录分散）
 # 如当前用户对 /opt 无写权限，请先执行 sudo mkdir -p /opt/YLReader && sudo chown "$USER":"$USER" /opt/YLReader
 mkdir -p /opt/YLReader
-curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.1.1.tar.gz | tar -xz --strip-components=1 -C /opt/YLReader
+curl -fsSL https://github.com/dgulan/YLReader/archive/refs/tags/v1.1.2.tar.gz | tar -xz --strip-components=1 -C /opt/YLReader
 cd /opt/YLReader
 
 # 1. 首次运行：自动生成 .env 并填充随机 JWT_SECRET（32B hex）和 YREADER_HEADER_KEY_primary（32B base64）
@@ -47,7 +47,7 @@ nano /opt/YLReader/.env
 ```dotenv
 YLREADER_BIND_IP=127.0.0.1   # 局域网直连请改为 0.0.0.0
 YLREADER_HTTP_PORT=8080      # 按需修改访问端口
-# YLREADER_IMAGE_TAG=v1.1.1  # 指定预构建镜像版本（默认 v1.1.1）
+# YLREADER_IMAGE_TAG=v1.1.2  # 指定预构建镜像版本（默认 v1.1.2）
 ```
 
 **国内服务器加速：**

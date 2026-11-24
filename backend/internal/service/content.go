@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ const (
 	maxContentPages    = 20
 	contentBudget      = 10 * time.Second
 	paginatedBudget    = 60 * time.Second
+	contentPageDelay   = 150 * time.Millisecond
 	contentCacheTTL    = 7 * 24 * time.Hour
 	contentCachePrefix = "yreader:cache:content"
 	contentPreviewMax  = 0 // 正文不截断；此处仅为对齐契约保留语义位
@@ -105,7 +107,7 @@ func (s *ContentService) WithHealth(h *SourceHealthService) *ContentService {
 }
 
 // Get 读取章节正文。chapterIndex 与 chapterID 必须且只能提供一个（由 handler 校验）。
-func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chapterIndex *int, chapterID *int64, book *repository.Book) (*ChapterContentView, error) {
+func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chapterIndex *int, chapterID *int64, book *repository.Book, refresh bool) (*ChapterContentView, error) {
 	var err error
 	if book.ActiveSourceID == nil {
 		return nil, ErrNoMatchingSource
@@ -154,13 +156,15 @@ func (s *ContentService) get(ctx context.Context, userID, bookID uuid.UUID, chap
 		return nil, err
 	}
 	fingerprint := contentRulesFingerprint(src.Rules, userRules)
-	if payload, ok := s.loadCache(ctx, key, targetSourceID); ok && payload.RulesFingerprint == fingerprint && payload.TargetURL == targetURL {
-		return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, payload.Content, payload.WordCount,
-			payload.AppliedReplaceRuleIDs, payload.TraceID, isOverridden, true)
+	if !refresh {
+		if payload, ok := s.loadCache(ctx, key, targetSourceID); ok && payload.RulesFingerprint == fingerprint && payload.TargetURL == targetURL {
+			return s.assemble(ctx, userID, bookID, activeSourceID, targetSourceID, chapter, payload.Content, payload.WordCount,
+				payload.AppliedReplaceRuleIDs, payload.TraceID, isOverridden, true)
+		}
 	}
 
 	fetchStart := time.Now()
-	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, bookID, curIndex, src, targetURL, userRules)
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, bookID, src, targetURL, userRules)
 	if err != nil {
 		s.health.RecordFailure(userID, targetSourceID, err)
 		return nil, err
@@ -196,7 +200,7 @@ func (s *ContentService) WarmChapterForSource(ctx context.Context, userID, bookI
 		return nil
 	}
 	fetchStart := time.Now()
-	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, bookID, *ch.ChapterIndex, src, ch.URL, userRules)
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, bookID, src, ch.URL, userRules)
 	if err != nil {
 		s.health.RecordFailure(userID, src.ID, err)
 		return err
@@ -220,7 +224,7 @@ func (s *ContentService) TrialFetchForOverride(ctx context.Context, userID, book
 	if err != nil {
 		return "", nil, err
 	}
-	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, bookID, chapterIndex, src, targetURL, userRules)
+	content, traceID, appliedIDs, err := s.fetchAndClean(ctx, userID, bookID, src, targetURL, userRules)
 	if err != nil {
 		return "", nil, err
 	}
@@ -349,22 +353,17 @@ func (s *ContentService) storeCache(ctx context.Context, key string, p cachedPay
 }
 
 // fetchAndClean 完成抓取、多页拼接、书源正则与用户替换规则净化、段落标准化。
-func (s *ContentService) fetchAndClean(ctx context.Context, userID, bookID uuid.UUID, chapterIndex int32, src *repository.BookSource, startURL string, userRules []*repository.ReplaceRule) (string, string, []uuid.UUID, error) {
+func (s *ContentService) fetchAndClean(ctx context.Context, userID, bookID uuid.UUID, src *repository.BookSource, startURL string, userRules []*repository.ReplaceRule) (string, string, []uuid.UUID, error) {
 	ctx = sourceFetchContext(ctx, src)
 	ctx = fetcher.WithResponseCharset(ctx, derefString(src.Charset))
 	rules := parseContentRules(src.Rules)
 	traceID := "tr_" + uuid.NewString()
 
-	var nextChapterURL string
-	if strings.TrimSpace(rules.NextContentURL) != "" {
-		var err error
-		nextChapterURL, err = s.chapters.NextReadableURL(ctx, s.pool, userID, bookID, src.ID, chapterIndex)
-		if err != nil {
-			return "", "", nil, err
-		}
+	loadNextChapter := func(ctx context.Context) (string, error) {
+		return s.chapters.NextReadableURL(ctx, s.pool, userID, bookID, src.ID, startURL)
 	}
 	srcHeader := scopeHeadersForTarget(src.BookSourceURL, startURL, parseSourceHeaders(src.Header))
-	content, err := s.fetchContentWithHeaders(ctx, rules, startURL, srcHeader, nextChapterURL)
+	content, err := s.fetchContentWithHeaders(ctx, rules, startURL, srcHeader, loadNextChapter)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -384,27 +383,22 @@ func (s *ContentService) fetchAndClean(ctx context.Context, userID, bookID uuid.
 }
 
 func (s *ContentService) fetchContent(ctx context.Context, rules contentRules, startURL string) (string, error) {
-	return s.fetchContentWithHeaders(ctx, rules, startURL, nil, "")
+	return s.fetchContentWithHeaders(ctx, rules, startURL, nil, nil)
 }
 
-func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules contentRules, startURL string, srcHeader http.Header, nextChapterURL string) (string, error) {
+func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules contentRules, startURL string, srcHeader http.Header, loadNextChapter func(context.Context) (string, error)) (string, error) {
 	if strings.TrimSpace(rules.Content) == "" {
 		return "", fmt.Errorf("%w: content rule is empty", sandbox.ErrRuleExecution)
 	}
-	paginated := strings.TrimSpace(rules.NextContentURL) != ""
-	budget := contentBudget
-	if paginated {
-		budget = paginatedBudget
-	}
-	ctx, cancel := context.WithTimeout(ctx, budget)
+	ctx, cancel := context.WithTimeout(ctx, paginatedBudget)
 	defer cancel()
 
 	engine := parser.New(s.sb)
 	visited := make(map[string]bool, maxContentPages)
 	parts := make([]string, 0, maxContentPages)
 	pageURL := contentPageURL(startURL)
-	prevBase := pageURL
-	nextChapterURL = contentPageURL(resolveURL(pageURL, nextChapterURL))
+	var firstPage *url.URL
+	var prevBase, nextChapterURL string
 
 	for pages := 0; pageURL != "" && pages < maxContentPages; pages++ {
 		if visited[pageURL] {
@@ -413,10 +407,17 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		visited[pageURL] = true
 
 		reqHeader := scopeHeadersForTarget(startURL, pageURL, srcHeader)
-		if pages > 0 && len(reqHeader) > 0 {
-			reqHeader = scopeHeadersForTarget(prevBase, pageURL, reqHeader)
+		pageCtx, cancelPage := ctx, func() {}
+		if pages > 0 {
+			if err := waitForContentPage(ctx); err != nil {
+				return "", err
+			}
+			reqHeader = contentContinuationHeaders(prevBase, pageURL, reqHeader)
+		} else if strings.TrimSpace(rules.NextContentURL) == "" {
+			pageCtx, cancelPage = context.WithTimeout(ctx, contentBudget)
 		}
-		resp, err := s.ft.Get(ctx, pageURL, reqHeader)
+		resp, err := s.ft.Get(pageCtx, pageURL, reqHeader)
+		cancelPage()
 		if err != nil {
 			return "", err
 		}
@@ -427,6 +428,9 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		base := contentPageURL(resp.FinalURL)
 		if base == "" {
 			base = pageURL
+		}
+		if pages == 0 {
+			firstPage, _ = url.Parse(base)
 		}
 		if pages > 0 && base == nextChapterURL {
 			break
@@ -442,7 +446,7 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		if err != nil {
 			return "", fmt.Errorf("%w: parse content page: %v", sandbox.ErrRuleExecution, err)
 		}
-		text, err := engine.EvalField(ctx, node, rules.Content)
+		text, err := engine.EvalContent(ctx, node, rules.Content)
 		if err != nil {
 			return "", err
 		}
@@ -455,15 +459,26 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		if strings.TrimSpace(text) != "" {
 			parts = append(parts, text)
 		}
-		if !paginated {
-			break
-		}
 		next, err := engine.EvalNextURL(ctx, rules.NextContentURL, body)
 		if err != nil {
 			return "", err
 		}
 		next = contentPageURL(resolveURL(base, next))
-		if next == "" || next == nextChapterURL {
+		if next == "" {
+			next = standardContentNextURL(node, firstPage, base, pages+2)
+		}
+		if next == "" {
+			break
+		}
+		if loadNextChapter != nil {
+			raw, err := loadNextChapter(ctx)
+			if err != nil {
+				return "", err
+			}
+			nextChapterURL = contentPageURL(resolveURL(base, raw))
+			loadNextChapter = nil
+		}
+		if next == nextChapterURL {
 			break
 		}
 		if next == pageURL || visited[next] || pages+1 == maxContentPages {
@@ -473,6 +488,53 @@ func (s *ContentService) fetchContentWithHeaders(ctx context.Context, rules cont
 		pageURL = next
 	}
 	return strings.Join(parts, "\n"), nil
+}
+
+func waitForContentPage(ctx context.Context) error {
+	timer := time.NewTimer(contentPageDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func contentContinuationHeaders(previous, target string, headers http.Header) http.Header {
+	headers = scopeHeadersForTarget(previous, target, headers)
+	prevURL, _ := url.Parse(previous)
+	targetURL, _ := url.Parse(target)
+	if _, configured := headers["Referer"]; configured || !sameContentOrigin(prevURL, targetURL) {
+		return headers
+	}
+	if headers == nil {
+		headers = make(http.Header)
+	} else {
+		headers = headers.Clone()
+	}
+	headers.Set("Referer", previous)
+	return headers
+}
+
+func sameContentOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil && a.Host != "" && a.Scheme == b.Scheme && strings.EqualFold(a.Host, b.Host)
+}
+
+func standardContentNextURL(node parser.RuleNode, firstPage *url.URL, current string, page int) string {
+	if firstPage == nil || !strings.HasSuffix(firstPage.Path, ".html") {
+		return ""
+	}
+	// A navigation label alone can point to another chapter. Require an exact sequential filename.
+	expectedPath := fmt.Sprintf("%s-%d.html", strings.TrimSuffix(firstPage.Path, ".html"), page)
+	for _, href := range node.ContentPaginationLinks() {
+		next := contentPageURL(resolveURL(current, href))
+		u, _ := url.Parse(next)
+		if sameContentOrigin(firstPage, u) && u.Path == expectedPath && u.RawQuery == firstPage.RawQuery {
+			return next
+		}
+	}
+	return ""
 }
 
 func contentPageURL(raw string) string {
@@ -494,7 +556,7 @@ func contentRulesFingerprint(source json.RawMessage, rules []*repository.Replace
 		Pagination string
 		Source     json.RawMessage
 		Rules      []*repository.ReplaceRule
-	}{"complete-pages-v2", source, rules})
+	}{"complete-pages-v3", source, rules})
 	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
@@ -625,6 +687,11 @@ func parseContentRules(raw json.RawMessage) contentRules {
 // Get resolves a deferred chapter-local offset only for the exact version read
 // before fetching content. A concurrent progress/source change always wins.
 func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, index *int, chapterID *int64) (*ChapterContentView, error) {
+	return s.GetWithRefresh(ctx, userID, bookID, index, chapterID, false)
+}
+
+// GetWithRefresh skips the online cache read when refresh is true and stores a successful fetch.
+func (s *ContentService) GetWithRefresh(ctx context.Context, userID, bookID uuid.UUID, index *int, chapterID *int64, refresh bool) (*ChapterContentView, error) {
 	book, err := s.books.Get(ctx, s.pool, userID, bookID)
 	if err != nil {
 		return nil, err
@@ -636,7 +703,7 @@ func (s *ContentService) Get(ctx context.Context, userID, bookID uuid.UUID, inde
 			s.log.Warn("deferred offset snapshot unavailable", "book_id", bookID, "error", err)
 		}
 	}
-	view, err := s.get(ctx, userID, bookID, index, chapterID, book)
+	view, err := s.get(ctx, userID, bookID, index, chapterID, book, refresh)
 	if err != nil {
 		return nil, err
 	}

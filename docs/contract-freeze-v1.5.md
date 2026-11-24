@@ -27,7 +27,7 @@
 |---|---|
 | docs/architecture.md | 037448ac1c9b82e7cf333e942783d725b2b38f63ca116ba91f5b583c9adf52a8 |
 | docs/schema.sql | fa26a8e596a4f2c89bd2ef9713ff1028aeb42925377c25ae26f957a165ba07b0 |
-| docs/openapi.yaml | 4ab5c05b5fc5f32addd0a4366cebc31158f1a7dc8075c2f0dd82a9826e1a8021 |
+| docs/openapi.yaml | bed1711517e1c8fa1aa16922e4dd792447aea1d77f51222d40a6877387bd208b |
 | docs/research/1432433gg_reader-next.md | f47d1e87516b6980d86ed7a4b84f3db526770f422c4786b7aa1df5a2c65cb678 |
 | docs/research/changshengyu_openreader.md | 909606b90fe636aeac64ac0cd2e745d960915bba534a5bcae0c2e248778bcde8 |
 | docs/research/changshengyu_reader-dev.md | eaf8a857590c548a3a835c45309f5615f0c6d711afc8bb1649ef8caa8256d9fa |
@@ -73,3 +73,5 @@ sandbox-worker-design 在实现前冻结。新增受限独立 worker、有界 IP
 2026-11-23：书源导入新增可选 conflict_mode 和重复摘要字段。原 overwrite、统计字段及 dry_run 语义继续兼容。数据库与备份格式沿用原契约。
 
 2026-11-24：在线书源导入沿用 JSON 导入的可选 conflict_mode，默认跳过重复，保留 overwrite 兼容字段。更新 OpenAPI 摘要，数据库与备份协议未变。
+
+2026-11-24：章节正文 GET 新增可选 refresh 参数，成功重抓后更新在线缓存。默认读取行为、数据库和备份契约保持兼容。

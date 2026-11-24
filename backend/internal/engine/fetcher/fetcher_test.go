@@ -302,6 +302,7 @@ func TestCheckRedirect_StripsSensitiveHeadersOnCrossHostAndDowngrade(t *testing.
 		req.Header.Set("Cookie", "sid=abc")
 		req.Header.Set("X-Auth-Token", "tok-1")
 		req.Header.Set("User-Agent", "YLReader-Test")
+		req.Header.Set("Referer", "https://book.example/previous?session=private")
 		return req
 	}
 
@@ -310,7 +311,7 @@ func TestCheckRedirect_StripsSensitiveHeadersOnCrossHostAndDowngrade(t *testing.
 	if err := f.checkRedirect(sameReq, []*http.Request{makeReq("https://book.example/start")}); err != nil {
 		t.Fatalf("same-origin checkRedirect: %v", err)
 	}
-	if sameReq.Header.Get("Cookie") != "sid=abc" || sameReq.Header.Get("X-Auth-Token") != "tok-1" {
+	if sameReq.Header.Get("Cookie") != "sid=abc" || sameReq.Header.Get("X-Auth-Token") != "tok-1" || sameReq.Header.Get("Referer") == "" {
 		t.Fatalf("same-origin headers unexpectedly stripped: %+v", sameReq.Header)
 	}
 
@@ -320,7 +321,7 @@ func TestCheckRedirect_StripsSensitiveHeadersOnCrossHostAndDowngrade(t *testing.
 		if err := f.checkRedirect(nextReq, []*http.Request{makeReq("https://book.example/start")}); err != nil {
 			t.Fatalf("checkRedirect(%s): %v", target, err)
 		}
-		for _, stripped := range []string{"Authorization", "Proxy-Authorization", "Cookie", "X-Auth-Token"} {
+		for _, stripped := range []string{"Authorization", "Proxy-Authorization", "Cookie", "X-Auth-Token", "Referer"} {
 			if got := nextReq.Header.Get(stripped); got != "" {
 				t.Fatalf("target %s leaked header %s = %q", target, stripped, got)
 			}

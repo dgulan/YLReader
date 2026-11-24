@@ -40,6 +40,23 @@ describe('chapter request ownership and cancellation', () => {
     expect(io.read).toHaveBeenCalledExactlyOnceWith('user-a', 'book-a', 5, 'source-a:1')
     expect(io.write).not.toHaveBeenCalled()
   })
+  it('requests a fresh copy and updates the offline cache after success', async () => {
+    const { request, io } = fixture()
+    const refreshed = { ...content, content: '更新后的完整正文' }
+    io.fetch.mockResolvedValue(refreshed)
+    const result = await loadChapter({ ...request, refresh: true }, io)
+    expect(io.fetch).toHaveBeenCalledExactlyOnceWith(request.bookId, request.index, request.signal, true)
+    expect(io.read).not.toHaveBeenCalled()
+    expect(io.write).toHaveBeenCalledExactlyOnceWith(request.owner, request.bookId, request.index, request.context, refreshed)
+    expect(result).toEqual({ result: refreshed, cached: false })
+  })
+  it('reports a refresh failure and keeps the offline copy', async () => {
+    const { request, io } = fixture()
+    io.fetch.mockRejectedValue(new TypeError('offline'))
+    await expect(loadChapter({ ...request, refresh: true }, io)).rejects.toThrow('offline')
+    expect(io.read).not.toHaveBeenCalled()
+    expect(io.write).not.toHaveBeenCalled()
+  })
   it('does not fall back for server errors or canceled network failures', async () => {
     const { request, io, controller } = fixture()
     io.fetch.mockRejectedValue(new Error('server failure'))

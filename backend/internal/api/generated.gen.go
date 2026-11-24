@@ -1103,6 +1103,9 @@ type GetChapterContentParams struct {
 
 	// Prefetch 预热下一章（不返回正文）
 	Prefetch *bool `form:"prefetch,omitempty" json:"prefetch,omitempty"`
+
+	// Refresh 跳过在线章节正文缓存，重新抓取完整章节，成功后更新缓存。
+	Refresh *bool `form:"refresh,omitempty" json:"refresh,omitempty"`
 }
 
 // UpdateProgressParams defines parameters for UpdateProgress.
@@ -3161,6 +3164,14 @@ func (siw *ServerInterfaceWrapper) GetChapterContent(w http.ResponseWriter, r *h
 	err = runtime.BindQueryParameter("form", true, false, "prefetch", r.URL.Query(), &params.Prefetch)
 	if err != nil {
 		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "prefetch", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "refresh" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "refresh", r.URL.Query(), &params.Refresh)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "refresh", Err: err})
 		return
 	}
 

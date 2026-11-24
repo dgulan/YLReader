@@ -35,7 +35,8 @@ export const api = {
   search: (keyword: string, signal?: AbortSignal) => request<Model<'SearchResponse'>>(`/search?keyword=${id(keyword)}`, { signal }),
   addBook: (book: Model<'SearchBook'>) => request<Model<'Book'>>('/books', { method: 'POST', ...jsonBody({ source_id: book.source_id, book_url: book.book_url, name: book.name, author: book.author ?? '', cover_url: book.cover_url ?? null }) }),
   chapters: (bookId: string, refresh = false, sourceId?: string, signal?: AbortSignal) => request<Model<'ChapterList'>>(`/books/${id(bookId)}/chapters?refresh=${refresh}${sourceId ? `&source_id=${id(sourceId)}` : ''}`, { signal }),
-  content: (bookId: string, index: number, signal?: AbortSignal) => request<Model<'ChapterContent'>>(`/books/${id(bookId)}/content?chapter_index=${index}`, { signal }),
+  content: (bookId: string, index: number, signal?: AbortSignal, refresh = false) =>
+    request<Model<'ChapterContent'>>(`/books/${id(bookId)}/content?chapter_index=${index}${refresh ? '&refresh=true' : ''}`, { signal, cache: 'no-store' }),
   progress: (bookId: string, signal?: AbortSignal) => request<Model<'Progress'>>(`/books/${id(bookId)}/progress`, { signal }),
   bookmarks: (bookId: string) => request<Model<'Bookmark'>[]>(`/books/${id(bookId)}/bookmarks`),
   createBookmark: (bookId: string, data: Model<'BookmarkCreate'>) => request<Model<'Bookmark'>>(`/books/${id(bookId)}/bookmarks`, { method: 'POST', ...jsonBody(data) }),

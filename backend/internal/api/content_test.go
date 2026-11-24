@@ -161,14 +161,14 @@ func TestContentActiveSourcePaginationAndReplace(t *testing.T) {
 	}
 }
 
-// TestContentCacheHit 覆盖：第二次读取命中缓存、字段与 trace_id 稳定、不再发生网络抓取。
-func TestContentCacheHit(t *testing.T) {
+// TestContentCacheHitAndRefresh 覆盖缓存命中、跳过缓存重抓及成功后覆盖缓存。
+func TestContentCacheHitAndRefresh(t *testing.T) {
 	const (
 		bookURL = "https://mc2.example.com/book/1"
-		c0      = "https://mc2.example.com/c/0"
+		c0      = "https://mc2.example.com/c/0.html"
 	)
 	mock := newTOCMock(map[string]string{
-		bookURL: tocPage(false, []string{"/c/0", "/c/1"}, ""),
+		bookURL: tocPage(false, []string{"/c/0.html", "/c/1.html"}, ""),
 		c0:      `<html><body><div id="content"><p>缓存正文</p></div></body></html>`,
 	})
 	ts, pool := newTestServer(t, mock)
@@ -202,6 +202,16 @@ func TestContentCacheHit(t *testing.T) {
 	}
 	if got := mock.Count(); got != before {
 		t.Fatalf("cache hit must not fetch: %d -> %d", before, got)
+	}
+	mock.Set(c0, `<div id="content"><p>更新后的完整正文</p></div><div class="prenext"><a href="0-2.html">下一页</a></div>`)
+	mock.Set("https://mc2.example.com/c/0-2.html", `<div id="content"><p>第二页末尾</p></div>`)
+	status, refreshed := getContent(t, base, token, bookID.String(), "?chapter_index=0&refresh=true")
+	if status != http.StatusOK || refreshed.Cached || !contains(refreshed.Content, "更新后的完整正文") || !contains(refreshed.Content, "第二页末尾") {
+		t.Fatalf("refresh status=%d, response=%+v", status, refreshed)
+	}
+	status, recached := getContent(t, base, token, bookID.String(), "?chapter_index=0")
+	if status != http.StatusOK || !recached.Cached || recached.Content != refreshed.Content || mock.Count() != before+2 {
+		t.Fatalf("updated cache status=%d, response=%+v, fetches=%d", status, recached, mock.Count()-before)
 	}
 }
 
