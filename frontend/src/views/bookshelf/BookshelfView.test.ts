@@ -1,5 +1,5 @@
 import { createApp, h, nextTick, type App, type VNode } from 'vue'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/api/reader'
 import { setSession, type Model } from '@/api/client'
@@ -8,18 +8,26 @@ import { invalidateBookCover } from './coverCache'
 
 vi.mock('element-plus', async () => {
   const { h } = await import('vue')
-  return Object.fromEntries(['ElButton', 'ElInput', 'ElAlert', 'ElEmpty', 'ElPagination', 'ElTabs', 'ElTabPane', 'ElSkeleton']
+  const panels = Object.fromEntries(['ElButton', 'ElAlert', 'ElEmpty', 'ElPagination', 'ElTabs', 'ElTabPane', 'ElSkeleton', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElTag']
     .map(name => [name, (_: unknown, { slots, attrs }: { slots: { default?: () => VNode[] }; attrs: Record<string, unknown> }) => h('div', attrs, slots.default?.())]))
+  return {
+    ...panels,
+    ElDialog: (_: unknown, { slots, attrs }: { slots: { default?: () => VNode[] }; attrs: Record<string, unknown> }) =>
+      attrs.modelValue ? h('div', { role: 'dialog', 'aria-label': attrs.title }, slots.default?.()) : null,
+    ElInput: (_: unknown, { attrs }: { attrs: Record<string, unknown> }) => h('input', { 'aria-label': attrs['aria-label'], value: attrs.modelValue }),
+    ElMessageBox: { confirm: vi.fn() },
+  }
 })
 let app: App | undefined
 let host: HTMLDivElement
 afterEach(() => { app?.unmount(); app = undefined; host?.remove(); setSession(null); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 async function mount() {
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { render: () => h('div') } }] })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: BookshelfView }] })
   await router.push('/')
   host = document.createElement('div'); document.body.append(host)
-  app = createApp(BookshelfView); app.use(router); app.mount(host)
+  app = createApp({ render: () => h(RouterView) }); app.use(router); app.mount(host)
   await nextTick()
+  return router
 }
 function pending() {
   let resolve!: (value: Model<'BookPage'>) => void
@@ -65,6 +73,35 @@ it('still surfaces an ordinary list failure', async () => {
   vi.spyOn(api, 'books').mockRejectedValue(new Error('synthetic-list-failure'))
   await mount()
   await vi.waitFor(() => expect(host.querySelector('[title="synthetic-list-failure"]')).not.toBeNull())
+})
+it('keeps card actions open through pointer focus loss and opens the selected book in the editor dialog', async () => {
+  setSession({ access_token: 'test', refresh_token: 'test', token_type: 'Bearer', expires_in: 900,
+    user: { id: 'owner', username: 'reader', role: 'user', token_version: 1, created_at: '' } })
+  const first = { id: 'first', name: '第一本书', book_type: 'local', status: 'unknown' } as Model<'Book'>
+  const second = { ...first, id: 'second', name: '第二本书' }
+  vi.spyOn(api, 'books').mockResolvedValue({ items: [first, second], total: 2, page: 1, page_size: 20 })
+  const getBook = vi.spyOn(api, 'book').mockResolvedValue(second)
+  const router = await mount()
+  await vi.waitFor(() => expect(host.querySelectorAll('.book-menu')).toHaveLength(2))
+  const menu = host.querySelectorAll<HTMLDetailsElement>('.book-menu')[1]!
+  const summary = menu.querySelector('summary')!
+  summary.focus()
+  summary.click()
+  expect(menu.open).toBe(true)
+
+  const manage = [...menu.querySelectorAll('button')].find(button => button.textContent === '管理书籍')!
+  manage.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+  summary.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }))
+  expect(menu.open).toBe(true)
+  manage.click()
+
+  await vi.waitFor(() => {
+    const dialog = host.querySelector('[role="dialog"][aria-label="管理书籍 · 第二本书"]')
+    expect(dialog?.querySelector<HTMLInputElement>('input[aria-label="编辑书名"]')?.value).toBe(second.name)
+  })
+  expect(getBook).toHaveBeenCalledWith(second.id)
+  expect(router.currentRoute.value.path).toBe('/')
+  expect(menu.open).toBe(false)
 })
 it('cancels pending GETs on early document teardown without preventing navigation', async () => {
   const list = vi.spyOn(api, 'books').mockImplementation((_page, _query, signal) => new Promise((_resolve, reject) => {

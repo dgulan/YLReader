@@ -2,10 +2,11 @@
 import 'element-plus/dist/index.css'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElButton, ElInput, ElAlert, ElEmpty, ElPagination, ElTabs, ElTabPane, ElSkeleton, ElMessageBox } from 'element-plus'
+import { ElButton, ElInput, ElAlert, ElEmpty, ElPagination, ElTabs, ElTabPane, ElSkeleton, ElMessageBox, ElDialog } from 'element-plus'
 import { api } from '@/api/reader'
 import { errorText, getSession, type Model } from '@/api/client'
 import BookCover from './BookCover.vue'
+import BookEditorView from './BookEditorView.vue'
 import { invalidateBookCover } from './coverCache'
 import { bookKey, clearBookCache, db } from '@/db/chapters'
 import { groupSearchResults } from './searchResults'
@@ -20,6 +21,8 @@ const results = computed(() => groupSearchResults(search.value?.groups ?? partia
   current: result.variants.find(variant => variant.key === selectedVariants.value[result.key]) ?? result.variants[0]!,
 })))
 const removing = ref(false)
+const bookGrid = ref<HTMLElement>(), editingBook = ref<Model<'Book'>>()
+const editor = ref<InstanceType<typeof BookEditorView>>(), editorOpen = ref(false)
 function readingChapter(book: Model<'Book'>) {
   return book.progress ? Math.min(book.progress.chapter_index + 1, book.total_chapters || Infinity) : 0
 }
@@ -47,9 +50,26 @@ async function remove(book: Model<'Book'>) {
   } catch (e) { if (!disposed && getSession()?.user.id === owner) error.value = errorText(e) }
   finally { removing.value = false }
 }
-function closeCardMenu(event: FocusEvent) {
-  const menu = event.currentTarget as HTMLDetailsElement
-  if (!(event.relatedTarget instanceof Node) || !menu.contains(event.relatedTarget)) menu.open = false
+function dismissCardMenu(event: MouseEvent) {
+  const menu = bookGrid.value?.querySelector<HTMLDetailsElement>('.book-menu[open]')
+  if (menu && event.target instanceof Node && !menu.contains(event.target)) menu.open = false
+}
+function closeActionMenu(event: MouseEvent) {
+  const menu = (event.currentTarget as HTMLButtonElement).closest('details')
+  menu?.querySelector('summary')?.focus()
+  if (menu) menu.open = false
+}
+function manageBook(book: Model<'Book'>, event: MouseEvent) {
+  editingBook.value = book
+  editorOpen.value = true
+  closeActionMenu(event)
+}
+async function closeEditor(done: () => void) {
+  if (!editor.value || await editor.value.canClose()) done()
+}
+function editorClosed() {
+  editingBook.value = undefined
+  void load()
 }
 let touchStart: TouchPoint | null = null
 function onTouchStart(event: TouchEvent) {
@@ -128,8 +148,8 @@ async function findBooks() {
 
 async function add(book: Model<'SearchBook'>) { adding.value = book.book_url; error.value = ''; try { const added = await api.addBook(book); addedUrls.value[book.book_url] = true; notice.value = `《${added.name}》已加入书架`; await load() } catch (e) { error.value = errorText(e) } finally { adding.value = '' } }
 function read(book: Model<'Book'>) { void router.push(`/reader/${book.id}`) }
-onMounted(() => { window.addEventListener('pagehide', hidePage); window.addEventListener('pageshow', showPage); void load() })
-onBeforeUnmount(() => { disposed = true; cancelLoad(); cancelSearch(); window.removeEventListener('pagehide', hidePage); window.removeEventListener('pageshow', showPage) })
+onMounted(() => { document.addEventListener('click', dismissCardMenu); window.addEventListener('pagehide', hidePage); window.addEventListener('pageshow', showPage); void load() })
+onBeforeUnmount(() => { disposed = true; cancelLoad(); cancelSearch(); document.removeEventListener('click', dismissCardMenu); window.removeEventListener('pagehide', hidePage); window.removeEventListener('pageshow', showPage) })
 </script>
 <template>
   <main class="library page-width" @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd"><div class="page-heading"><div><h1>我的书房<span class="heading-dot">.</span></h1><p class="muted">把想读的故事放在这里，随时继续。</p></div><label class="file-button" :class="{ disabled: importing }">{{ importing ? '正在导入…' : '＋ 导入本地书' }}<input aria-label="导入本地书" type="file" accept=".txt,.epub" :disabled="importing" @change="importLocal"></label></div>
@@ -137,18 +157,18 @@ onBeforeUnmount(() => { disposed = true; cancelLoad(); cancelSearch(); window.re
     <ElTabs v-model="tab"><ElTabPane label="我的书架" name="shelf"><form class="search-row" @submit.prevent="page = 1; load()"><ElInput v-model="query" aria-label="筛选书架" placeholder="按书名或作者筛选" clearable @clear="page = 1; load()" /><ElButton native-type="submit" :loading="busy">筛选</ElButton><span class="muted count">{{ books?.total ?? 0 }} 本藏书</span></form>
       <ElSkeleton v-if="busy && !books" :rows="6" animated />
       <ElEmpty v-else-if="!books?.items.length" description="书架还很安静。导入一本书，或去找书吧。" />
-      <section v-else class="book-grid" aria-label="书架">
+      <section v-else ref="bookGrid" class="book-grid" aria-label="书架">
         <article v-for="book in books.items" :key="book.id" class="book-card">
           <div class="cover-frame">
             <button type="button" class="book-open" :aria-label="book.progress ? '继续阅读' : '开始阅读'" :aria-description="book.name" @click="read(book)">
               <BookCover :title="book.name" :book-id="book.id" :base="book.active_book_url" :url="book.custom_cover_url || book.cover_url" :local="book.book_type === 'local'" />
             </button>
-            <details name="shelf-book-actions" class="book-menu" @focusout="closeCardMenu" @keydown.esc.stop.prevent="($event.currentTarget as HTMLDetailsElement).querySelector('summary')?.focus(); ($event.currentTarget as HTMLDetailsElement).open = false">
+            <details name="shelf-book-actions" class="book-menu" @click.stop @keydown.esc.stop.prevent="($event.currentTarget as HTMLDetailsElement).querySelector('summary')?.focus(); ($event.currentTarget as HTMLDetailsElement).open = false">
               <summary :aria-label="'书籍操作 ' + book.name">⋯</summary>
               <div class="book-menu-items">
-                <button type="button" @click="router.push('/books/' + book.id + '/edit')">管理书籍</button>
-                <button v-if="book.book_type === 'online'" type="button" @click="router.push('/books/' + book.id + '/cache')">后台缓存</button>
-                <button type="button" :disabled="removing" @click="remove(book)">删除书籍</button>
+                <button type="button" @click.stop="manageBook(book, $event)">管理书籍</button>
+                <button v-if="book.book_type === 'online'" type="button" @click.stop="closeActionMenu($event); router.push({ name: 'cache-task', params: { bookId: book.id } })">后台缓存</button>
+                <button type="button" :disabled="removing" @click.stop="closeActionMenu($event); remove(book)">删除书籍</button>
               </div>
             </details>
           </div>
@@ -191,6 +211,18 @@ onBeforeUnmount(() => { disposed = true; cancelLoad(); cancelSearch(); window.re
         </article>
       </section>
     </ElTabPane></ElTabs>
+    <ElDialog
+      v-model="editorOpen"
+      :title="editingBook ? `管理书籍 · ${editingBook.name}` : '管理书籍'"
+      width="min(680px, calc(100% - 32px))"
+      append-to-body
+      destroy-on-close
+      :close-on-click-modal="false"
+      :before-close="closeEditor"
+      @closed="editorClosed"
+    >
+      <BookEditorView v-if="editingBook" ref="editor" :book-id="editingBook.id" />
+    </ElDialog>
   </main>
 </template>
 <style scoped>
@@ -210,10 +242,9 @@ onBeforeUnmount(() => { disposed = true; cancelLoad(); cancelSearch(); window.re
 .book-card h2 { margin: 6px 0 2px; font-size: 14px; }
 .book-meta { margin: 4px 0; font-size: 11px; color: #657569; }
 .shelf-progress { display: block; height: 3px; width: 100%; accent-color: var(--accent, #315d4d); }
-.book-menu { position: absolute; right: 4px; bottom: 4px; }
-.book-menu summary { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #223e34ee; color: white; cursor: pointer; font-size: 20px; }
+.book-menu summary { position: absolute; right: 4px; bottom: 4px; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #223e34ee; color: white; cursor: pointer; font-size: 20px; }
 .book-menu summary::-webkit-details-marker { display: none; }
-.book-menu-items { position: absolute; right: 0; top: 100%; z-index: 2; display: grid; min-width: max-content; padding: 4px; border: 1px solid #dce1d8; border-radius: 6px; background: #fcfbf8; box-shadow: 0 3px 14px #17302025; }
+.book-menu-items { position: absolute; right: 4px; top: calc(100% - 4px); z-index: 2; display: grid; min-width: max-content; padding: 4px; border: 1px solid #dce1d8; border-radius: 6px; background: #fcfbf8; box-shadow: 0 3px 14px #17302025; }
 .book-menu-items button { border: 0; background: transparent; text-align: left; padding: 8px 12px; cursor: pointer; color: inherit; }
 .book-menu-items button:is(:hover, :focus-visible) { background: #edf1ec; }
 .search-cover { width: 50px; height: 70px; flex: 0 0 50px; padding: 0; justify-content: center; }
@@ -231,6 +262,7 @@ onBeforeUnmount(() => { disposed = true; cancelLoad(); cancelSearch(); window.re
   .library { padding-top: 12px; }
   .book-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .book-card { padding: 5px; }
+  .book-card:nth-child(3n + 1) .book-menu-items { left: 0; right: auto; }
   .search-result { gap: 8px; }
   .search-row :deep(.el-input) { flex: 1 1 0%; max-width: 100%; }
 }

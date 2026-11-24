@@ -175,7 +175,7 @@ test('chapter search filters titles and can reveal the active chapter in reverse
   await expect(dialog.getByRole('button', { name: '第500章', exact: true })).toHaveAttribute('aria-current', 'true')
 })
 
-test('small bookshelf keeps book actions behind the cover menu and groups search sources', async ({ page }) => {
+test('small bookshelf opens book management from the cover menu and groups search sources', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 640 })
   await readerFixture(page)
   const first = { source_id: 'one', name: '测试聚合书名', author: '测试作者', book_url: 'https://first.example/book/1' }
@@ -201,6 +201,17 @@ test('small bookshelf keeps book actions behind the cover menu and groups search
   await expect(card.getByRole('button', { name: '管理书籍', exact: true })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(card.getByRole('button', { name: '管理书籍', exact: true })).toBeHidden()
+  await card.locator('summary').click()
+  const menu = await card.locator('.book-menu-items').boundingBox()
+  const cover = await card.locator('.cover-frame').boundingBox()
+  expect(menu!.x).toBeGreaterThanOrEqual(cover!.x)
+  expect(menu!.x + menu!.width).toBeLessThanOrEqual(320 - 14)
+  await card.getByRole('button', { name: '管理书籍', exact: true }).click()
+  const editor = page.getByRole('dialog', { name: /^管理书籍 ·/ })
+  await expect(editor.getByLabel('编辑书名')).toHaveValue('用于小屏布局和长目录验收的很长书籍名称')
+  await expect(page).toHaveURL(/\/bookshelf$/)
+  await page.keyboard.press('Escape')
+  await expect(editor).toBeHidden()
   await page.getByRole('tab', { name: '发现新书' }).click()
   const search = page.getByRole('textbox', { name: '搜索书籍' })
   expect(await search.evaluate(input => getComputedStyle(input).fontSize)).toBe('16px')

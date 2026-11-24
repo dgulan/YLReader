@@ -12,6 +12,7 @@ test('book metadata preserves conflicts and deletion requires confirmation', asy
   const card = page.locator('.book-card').filter({ has: page.getByRole('heading', { name: name, exact: true }) })
   await card.locator('summary').click()
   await card.getByRole('button', { name: '管理书籍', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: `管理书籍 · ${name}` })).toBeVisible()
   await expect(page.getByLabel('编辑书名')).toHaveValue(name); await page.getByLabel('编辑书名').fill(`${name}草稿`)
   // Simulate another device through the real API, retaining the original UI version.
   const current = await (await page.request.get(url, { headers })).json()
@@ -22,7 +23,7 @@ test('book metadata preserves conflicts and deletion requires confirmation', asy
   const renamed = `${name}已整理`; await page.getByLabel('编辑书名').fill(renamed); await page.getByLabel('编辑作者').fill(' 新作者 '); await page.getByLabel('编辑简介').fill('')
   await page.getByRole('button', { name: '保存书籍信息', exact: true }).click(); await expect(page.getByRole('alert')).toContainText('书籍信息已保存')
   const saved = await (await page.request.get(url, { headers })).json(); expect(saved.name).toBe(renamed); expect(saved.author).toBe('新作者'); expect(saved.intro).toBe('')
-  await page.reload(); await expect(page.getByLabel('编辑书名')).toHaveValue(renamed)
+  await page.goto(`/books/${book.id}/edit`); await expect(page.getByLabel('编辑书名')).toHaveValue(renamed)
   await page.setViewportSize({ width: 390, height: 844 }); await expect.poll(() => page.evaluate(() => Math.max(document.body.scrollWidth, document.documentElement.scrollWidth) <= innerWidth)).toBe(true)
   await mkdir('.test-artifacts', { recursive: true }); await page.screenshot({ path: '.test-artifacts/book-management-mobile.png' })
   await page.getByRole('button', { name: '删除书籍', exact: true }).click(); const dialog = page.getByRole('dialog', { name: '删除书籍', exact: true }); await expect(dialog).toContainText('本地书还将清理服务端文件'); await dialog.getByRole('button', { name: '取消', exact: true }).click(); expect((await page.request.get(url, { headers })).ok()).toBeTruthy()
