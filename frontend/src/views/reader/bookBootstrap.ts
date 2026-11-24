@@ -4,6 +4,7 @@ import { canReadOffline } from './offline'
 
 export interface BootstrapIO {
   fetchBook: (bookId: string, signal: AbortSignal) => Promise<Model<'Book'>>
+  onBookLoaded?: (book: Model<'Book'>) => void
   fetchChapters: (bookId: string, signal: AbortSignal) => Promise<Model<'ChapterList'>>
   fetchProgress: (bookId: string, signal: AbortSignal) => Promise<Model<'Progress'>>
   readCachedBook: (owner: string, bookId: string) => Promise<CachedBook | undefined>
@@ -31,9 +32,14 @@ export async function loadBookBootstrap(request: BootstrapRequest, io: Bootstrap
   const { owner, bookId, local, signal } = request
   signal.throwIfAborted()
 
+  const bookRequest = io.fetchBook(bookId, signal)
+  const readingRequests = Promise.allSettled([
+    io.fetchChapters(bookId, signal),
+    io.fetchProgress(bookId, signal),
+  ])
   let liveBook: Model<'Book'> | undefined
   try {
-    liveBook = await io.fetchBook(bookId, signal)
+    liveBook = await bookRequest
   } catch (error) {
     signal.throwIfAborted()
     if (!canReadOffline(error)) throw error
@@ -52,10 +58,8 @@ export async function loadBookBootstrap(request: BootstrapRequest, io: Bootstrap
     }
   }
 
-  const [tocResult, progressResult] = await Promise.allSettled([
-    io.fetchChapters(bookId, signal),
-    io.fetchProgress(bookId, signal),
-  ])
+  io.onBookLoaded?.(liveBook)
+  const [tocResult, progressResult] = await readingRequests
   signal.throwIfAborted()
 
   if (progressResult.status === 'rejected' && !canReadOffline(progressResult.reason)) {
@@ -78,7 +82,7 @@ export async function loadBookBootstrap(request: BootstrapRequest, io: Bootstrap
   let toc: Model<'ChapterList'>
   if (tocResult.status === 'fulfilled') {
     toc = tocResult.value
-    liveBook.total_chapters = toc.total
+    liveBook = { ...liveBook, total_chapters: toc.total }
     await io.writeCachedBook({
       key: io.bookKey(owner, bookId),
       owner,
@@ -94,7 +98,7 @@ export async function loadBookBootstrap(request: BootstrapRequest, io: Bootstrap
         throw new Error('书源或书籍已变化，尚无新版本缓存，请联网重试')
       }
       toc = cached.toc
-      liveBook.total_chapters = toc.total
+      liveBook = { ...liveBook, total_chapters: toc.total }
     } else if (liveBook.total_chapters > 0) {
       // Live book and progress succeeded; synthesize a minimal TOC so cached/live chapter content can still open.
       toc = {

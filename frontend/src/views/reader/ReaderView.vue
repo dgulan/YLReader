@@ -130,6 +130,7 @@ async function overrideUpdated(targetIndex: number) {
 async function openSwitcher() { clearTimeout(timer); capture(); if (!await flush()) { saveError.value = '请先同步阅读进度或解决冲突，再切换书源'; return }; await switcher.value?.open() }
 async function switched() { clearTimeout(timer); controller.abort(); let cacheFailed = false; try { await clearBookCache(owner, bookId.value) } catch { cacheFailed = true }; await boot(); if (cacheFailed) saveError.value = '已切换书源，但本机缓存清理失败，请保持联网' }
 const bookId = computed(() => String(route.params.bookId))
+const canSwitchSource = computed(() => book.value?.book_type === 'online')
 const entries = computed(() => directoryEntries(toc.value?.items ?? [], directoryQuery.value, directoryNewestFirst.value))
 const title = computed(() => content.value?.chapter.title ?? '正在打开…')
 const status = computed(() => conflict.value ? '进度有冲突' : reviewing.value ? '正在核对进度…' : saving.value ? '正在保存…' : uncertain.value ? '进度保存结果待确认' : dirty.value ? '进度等待同步' : localFault.value ? '进度已同步，本机记录待更新' : '进度已同步')
@@ -323,6 +324,7 @@ async function boot(refresh = false) {
       { owner, bookId: requestedBook, local, signal },
       {
         fetchBook: (id, sig) => api.book(id, sig),
+        onBookLoaded: metadata => { check(); book.value = metadata },
         fetchChapters: (id, sig) => api.chapters(id, false, undefined, sig),
         fetchProgress: (id, sig) => api.progress(id, sig),
         readCachedBook: (userId, id) => db.books.get(bookKey(userId, id)),
@@ -396,7 +398,7 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
       <RouterLink to="/bookshelf" aria-label="返回书架">← 书架</RouterLink>
       <span class="reader-book-title">{{ book?.name ?? '阅读器' }}</span>
       <div class="reader-header-actions">
-        <button v-if="book?.book_type === 'online'" :disabled="loading || saving" @click="openSwitcher">换源</button>
+        <button v-if="canSwitchSource" :disabled="loading || saving" @click="openSwitcher">换源</button>
         <button v-if="book?.book_type === 'online'" :disabled="loading || restoring || !content" @click="openOverride">{{ content?.is_overridden ? '单章覆盖中' : '单章换源' }}</button>
         <button ref="directoryTrigger" aria-haspopup="dialog" aria-controls="reader-directory" :disabled="!toc" @click="openDirectory">目录</button>
         <button type="button" class="reader-settings-toggle" :aria-expanded="settingsOpen" aria-controls="reader-settings" :disabled="loading || restoring" @click="settingsOpen = !settingsOpen">设置</button>
@@ -410,7 +412,15 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
     <p v-if="config.error" class="reader-notice" role="status">{{ config.error }} <button :disabled="config.loading || config.saving" @click="config.retry">重试设置同步</button></p>
     </div>
     <section ref="viewport" class="reader-viewport" :aria-busy="loading || restoring" aria-label="章节阅读区" tabindex="0" @scroll="scroll" @touchstart.passive="onTouchStart" @touchend.passive="onTouchEnd" @click="toggleToolbar">
-      <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div><div v-else-if="error" class="reader-state" role="alert"><p>{{ error }}</p><button @click="reloadChapter">重新加载</button><RouterLink to="/bookshelf">返回书架</RouterLink></div>
+      <div v-if="loading" class="reader-state" role="status">正在翻开这一页…</div>
+      <div v-else-if="error" class="reader-state" role="alert">
+        <p>{{ error }}</p>
+        <div class="reader-error-actions">
+          <button type="button" @click="reloadChapter">重新加载</button>
+          <button v-if="canSwitchSource" type="button" class="reader-error-switch" :disabled="saving" @click="openSwitcher">换源</button>
+        </div>
+        <RouterLink to="/bookshelf">返回书架</RouterLink>
+      </div>
       <article ref="article" v-show="!loading && !error" class="reader-article"><span class="reader-kicker">{{ offline ? '离线缓存' : '正文' }} · 第 {{ index + 1 }} 章<template v-if="content?.is_overridden"> · 已单章换源</template></span><h1>{{ title }}</h1><div ref="body" class="chapter-body"><p v-for="(para, i) in paragraphs" :key="i + ':' + para.start" class="chapter-paragraph" :data-start="para.start">{{ para.text }}</p></div><p class="chapter-end">本章完</p></article>
     </section>
     <p v-if="immersive" class="reader-chapter-mark" aria-hidden="true">{{ title }}</p>
@@ -495,6 +505,8 @@ onBeforeUnmount(() => { disposed = true; saveEpoch++; stopCheckpoint(); clearTim
 .reader-footer { padding-inline: max(14px, env(safe-area-inset-left)) max(14px, env(safe-area-inset-right)); padding-bottom: max(14px, env(safe-area-inset-bottom)); }
 .toc-search { width: 100%; padding: 8px 14px; border: 1px solid #8886; border-radius: 999px; font-size: 16px; background: var(--reader-bg); color: var(--reader-ink); }
 .toc-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.reader-error-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.reader .reader-error-switch { border-color: currentColor; font-weight: 600; }
 .toc-dialog { max-height: calc(100dvh - 32px); overflow: auto; }
 @media (min-width: 651px) { .reader-article { padding-inline: max(42px, env(safe-area-inset-left)) max(42px, env(safe-area-inset-right)); } }
 @media (max-width: 650px) {

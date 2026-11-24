@@ -56,6 +56,25 @@ const cachedContentB: Model<'ChapterContent'> = {
 let app: App | undefined
 let host: HTMLDivElement | undefined
 
+async function mountReader() {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/bookshelf', name: 'bookshelf', component: { render: () => h('div') } },
+      { path: '/login', name: 'login', component: { render: () => h('div') } },
+      { path: '/reader/:bookId', name: 'reader', component: ReaderView },
+    ],
+  })
+  await router.push(`/reader/${bookId}`)
+  host = document.createElement('div')
+  document.body.append(host)
+  app = createApp({ render: () => h(RouterView) })
+  app.use(createPinia())
+  app.use(router)
+  app.mount(host)
+  return host
+}
+
 beforeEach(async () => {
   if (!HTMLDialogElement.prototype.showModal) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, writable: true, value() { (this as HTMLDialogElement).open = true } })
   if (!HTMLDialogElement.prototype.close) Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, writable: true, value() { (this as HTMLDialogElement).open = false } })
@@ -137,28 +156,92 @@ describe('ReaderView 502 TOC reload fallback', () => {
     vi.spyOn(api, 'progress').mockResolvedValue({ ...progress0 })
     vi.spyOn(api, 'content').mockRejectedValue(new ApiError(502, 'source_request_failed', null))
 
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/bookshelf', name: 'bookshelf', component: { render: () => h('div') } },
-        { path: '/login', name: 'login', component: { render: () => h('div') } },
-        { path: '/reader/:bookId', name: 'reader', component: ReaderView },
-      ],
-    })
-    await router.push(`/reader/${bookId}`)
-    await router.isReady()
-
-    host = document.createElement('div')
-    document.body.append(host)
-    app = createApp({ render: () => h(RouterView) })
-    app.use(createPinia())
-    app.use(router)
-    app.mount(host)
+    const reader = await mountReader()
 
     await vi.waitFor(() => {
-      const body = host!.querySelector('.chapter-body')?.textContent
+      const body = reader.querySelector('.chapter-body')?.textContent
       expect(body).toBe('源B正文')
     })
-    expect(host.querySelector('.reader-state[role="alert"]')).toBeNull()
+    expect(reader.querySelector('.reader-state[role="alert"]')).toBeNull()
+  })
+})
+
+describe('ReaderView source switching without a usable TOC', () => {
+  it('opens the same switcher from both entries after a rule failure and reads the replacement source', async () => {
+    const sourceAId = '10000000-0000-4000-8000-000000000001'
+    const bookA = { ...bookB, active_source_id: sourceAId, total_chapters: 0, version: 1 }
+    const bookUrl = bookB.active_book_url!
+    let switched = false
+    let rejectToc!: (error: ApiError) => void
+    const pendingToc = new Promise<Model<'ChapterList'>>((_, reject) => { rejectToc = reject })
+    vi.spyOn(api, 'settings').mockResolvedValue({})
+    vi.spyOn(api, 'book').mockImplementation(async () => ({ ...(switched ? bookB : bookA) }))
+    const chapters = vi.spyOn(api, 'chapters').mockImplementation((_, __, source) =>
+      source === sourceBId || switched ? Promise.resolve(tocB) : pendingToc)
+    vi.spyOn(api, 'progress').mockImplementation(async () => ({ ...progress0, version: switched ? 2 : 1 }))
+    const content = vi.spyOn(api, 'content').mockResolvedValue(cachedContentB)
+    vi.spyOn(api, 'mappings').mockResolvedValue([{ source_id: sourceAId, source_name: '原书源' } as Model<'BookSourceMapping'>])
+    const search = vi.spyOn(api, 'search').mockResolvedValue({ groups: [{
+      source_id: sourceBId, source_name: '备用书源', items: [
+        { name: bookB.name, author: '另一位作者', book_url: 'https://b.example.com/other' },
+        { name: bookB.name, author: bookB.author, book_url: bookUrl },
+      ],
+    }] } as Model<'SearchResponse'>)
+    const addMapping = vi.spyOn(api, 'addMapping').mockResolvedValue({ source_id: sourceBId, source_name: '备用书源', book_url: bookUrl } as Model<'BookSourceMapping'>)
+    const switchSource = vi.spyOn(api, 'switchSource').mockImplementation(async (_, request) => {
+      if (!request.dry_run) switched = true
+      return { source_id: sourceBId, chapter_index: 0, confidence: 1 } as Model<'SwitchSourceResult'>
+    })
+
+    const reader = await mountReader()
+    const button = (label: string, within: ParentNode = reader) =>
+      [...within.querySelectorAll('button')].find(node => node.textContent?.trim() === label)
+    await vi.waitFor(() => expect(reader.querySelector('.reader-book-title')?.textContent).toBe(bookB.name))
+    expect(chapters).toHaveBeenCalled()
+    expect(content).not.toHaveBeenCalled()
+    rejectToc(new ApiError(422, 'rule_execution_failed', null))
+    await vi.waitFor(() => expect(reader.querySelector('.reader-state[role="alert"]')?.textContent).toContain('请求失败（rule_execution_failed）'))
+    const headerAction = button('换源', reader.querySelector('.reader-header')!)
+    const errorAction = button('换源', reader.querySelector('.reader-state')!)
+    expect(headerAction?.disabled).toBe(false)
+    expect(errorAction?.disabled).toBe(false)
+
+    const dialog = reader.querySelector<HTMLDialogElement>('.switch-dialog')!
+    headerAction!.click()
+    await vi.waitFor(() => expect(dialog.open && button('关闭', dialog)?.disabled === false).toBe(true))
+    expect(dialog.textContent).toContain('当前源：原书源')
+    button('关闭', dialog)!.click()
+    expect(dialog.open).toBe(false)
+    errorAction!.click()
+    await vi.waitFor(() => expect(dialog.open && button('刷新书源', dialog)?.disabled === false).toBe(true))
+    button('刷新书源', dialog)!.click()
+    await vi.waitFor(() => expect(dialog.querySelector('button[data-row]')?.textContent).toContain('备用书源'))
+    expect(search).toHaveBeenCalledWith(bookB.name, expect.any(AbortSignal))
+    dialog.querySelector<HTMLButtonElement>('button[data-row]')!.click()
+    await vi.waitFor(() => expect(button('预览切换', dialog)?.disabled).toBe(false))
+    button('预览切换', dialog)!.click()
+    await vi.waitFor(() => expect(button('确认切换并清除单章覆盖', dialog)?.disabled).toBe(false))
+    expect(addMapping).toHaveBeenCalledWith(bookId, { source_id: sourceBId, book_url: bookUrl })
+    button('确认切换并清除单章覆盖', dialog)!.click()
+
+    await vi.waitFor(() => expect(reader.querySelector('.chapter-body')?.textContent).toBe('源B正文'))
+    expect(dialog.open).toBe(false)
+    expect(reader.querySelector('.reader-state[role="alert"]')).toBeNull()
+    expect(switchSource.mock.calls.map(([, request]) => request.dry_run)).toEqual([true, false])
+    expect(chapters.mock.calls.map(([, , source]) => source)).toEqual([undefined, sourceBId, undefined])
+    expect(content.mock.calls[0]?.slice(0, 2)).toEqual([bookId, 0])
+  })
+
+  it.each(['online', 'local'] as const)('handles an empty TOC for a %s book', async bookType => {
+    vi.spyOn(api, 'settings').mockResolvedValue({})
+    vi.spyOn(api, 'book').mockResolvedValue({ ...bookB, book_type: bookType, total_chapters: 0 })
+    vi.spyOn(api, 'chapters').mockResolvedValue({ ...tocB, total: 0, items: [] })
+    vi.spyOn(api, 'progress').mockResolvedValue(progress0)
+
+    const reader = await mountReader()
+    await vi.waitFor(() => expect(reader.querySelector('.reader-state[role="alert"]')?.textContent).toContain('目录中没有可读章节'))
+    const actions = [...reader.querySelectorAll('.reader-header button, .reader-state button')]
+      .filter(node => node.textContent?.trim() === '换源')
+    expect(actions).toHaveLength(bookType === 'online' ? 2 : 0)
   })
 })

@@ -72,13 +72,18 @@ async function open() {
 async function refreshSources() {
   const at = snapshot(), kw = (props.bookName ?? '').trim()
   if (!at.valid() || !kw || busy.value || refreshing.value) return
+  const author = props.bookAuthor?.trim()
   refreshing.value = true; error.value = ''
   try {
     const res = await api.search(kw, at.signal)
     if (!at.valid()) return
     const items: DiscoveredCandidate[] = []
     for (const g of res.groups ?? []) {
-      const exact = g.items.find(it => it.name.trim() === kw) ?? g.items[0]
+      if (g.source_id === props.activeSource) continue
+      const matches = g.items.filter(it => it.name.trim() === kw)
+      const exact = author
+        ? matches.find(it => it.author?.trim() === author) ?? matches.find(it => !it.author?.trim())
+        : matches[0]
       if (exact) {
         items.push({
           source_id: g.source_id,
